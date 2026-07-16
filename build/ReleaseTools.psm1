@@ -84,11 +84,75 @@ function Get-BuildProvenanceVerificationArguments {
         '--source-digest', $SourceDigest.ToLowerInvariant(),
         '--signer-digest', $SourceDigest.ToLowerInvariant(),
         '--deny-self-hosted-runners',
-        '--no-public-good',
         '--cert-oidc-issuer', 'https://token.actions.githubusercontent.com',
         '--predicate-type', 'https://slsa.dev/provenance/v1',
         '--format', 'json'
     )
+}
+
+function Invoke-GitHubBuildProvenanceVerification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ExecutablePath,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+    if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {
+        throw 'The GitHub CLI executable could not be found.'
+    }
+    if ($Arguments.Count -eq 0) { throw 'GitHub CLI verification arguments are required.' }
+
+    $standardErrorPath = Join-Path ([IO.Path]::GetTempPath()) "lftp-pilot-gh-attestation-$([Guid]::NewGuid().ToString('N')).stderr"
+    $savedNativePreference = if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference } else { $null }
+    $savedErrorActionPreference = $ErrorActionPreference
+    $lines = @()
+    $exitCode = -1
+    try {
+        try {
+            # Windows PowerShell 5 promotes native stderr to ErrorRecord objects
+            # under Stop. Keep stdout as parseable JSON and retain stderr only
+            # for a bounded failure diagnostic.
+            $ErrorActionPreference = 'Continue'
+            if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
+            $lines = @(& $ExecutablePath @Arguments 2> $standardErrorPath)
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $savedNativePreference }
+            $ErrorActionPreference = $savedErrorActionPreference
+        }
+        $standardError = if (Test-Path -LiteralPath $standardErrorPath) {
+            [IO.File]::ReadAllText($standardErrorPath)
+        } else { '' }
+        if ($standardError.Length -gt 8192) { $standardError = $standardError.Substring(0, 8192) }
+        if ($exitCode -ne 0) {
+            throw "GitHub build-provenance verification failed with exit code $exitCode. $standardError"
+        }
+
+        $json = ($lines | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+        try { $verification = $json | ConvertFrom-Json }
+        catch { throw 'GitHub returned invalid JSON after provenance verification.' }
+        if ($null -eq $verification -or @($verification).Count -lt 1) {
+            throw 'GitHub returned no matching build provenance.'
+        }
+
+        $publicGoodVerified = $false
+        foreach ($entry in @($verification)) {
+            $certificate = $entry.verificationResult.signature.certificate
+            $transparencyTimestamps = @($entry.verificationResult.verifiedTimestamps | Where-Object type -CEQ 'Tlog')
+            if ($certificate.sourceRepositoryVisibilityAtSigning -ceq 'public' -and $transparencyTimestamps.Count -gt 0) {
+                $publicGoodVerified = $true
+                break
+            }
+        }
+        if (-not $publicGoodVerified) {
+            throw 'The public-repository attestation did not contain a verified transparency-log timestamp and public source identity.'
+        }
+
+        return [pscustomobject]@{ Results = @($verification) }
+    }
+    finally {
+        if (Test-Path -LiteralPath $standardErrorPath) { Remove-Item -LiteralPath $standardErrorPath -Force }
+    }
 }
 
 function Get-CertificateSha256 {
@@ -167,4 +231,4 @@ function Assert-ReleaseCertificate {
 
 Export-ModuleMember -Function Assert-MsixVersion, New-MsixVersion, Get-FileSha256, Assert-ReleaseCertificate, `
     Assert-ReleaseRepository, Get-ReviewedSourceCommit, Get-BuildProvenanceVerificationArguments, `
-    Get-CertificateSha256, Assert-CertificateContinuity
+    Invoke-GitHubBuildProvenanceVerification, Get-CertificateSha256, Assert-CertificateContinuity

@@ -36,24 +36,8 @@ else {
     if ($null -eq $gh) { throw 'GitHub CLI is required to verify build provenance.' }
     $arguments = Get-BuildProvenanceVerificationArguments -ArtifactPath $artifact.FullName `
         -SourceDigest $sourceDigest -Repository $Repository
-    $savedNativePreference = if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference } else { $null }
-    try {
-        if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
-        $lines = @(& $gh.Source @arguments 2>&1)
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $savedNativePreference }
-    }
-    if ($exitCode -ne 0) {
-        throw "GitHub build-provenance verification failed with exit code $exitCode. $($lines -join [Environment]::NewLine)"
-    }
-    $json = ($lines | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
-    try { $verification = $json | ConvertFrom-Json }
-    catch { throw 'GitHub returned invalid JSON after provenance verification.' }
-    if ($null -eq $verification -or @($verification).Count -lt 1) {
-        throw 'GitHub returned no matching build provenance.'
-    }
+    $verificationResult = Invoke-GitHubBuildProvenanceVerification -ExecutablePath $gh.Source -Arguments $arguments
+    $verification = $verificationResult.Results
 }
 
 $record = [ordered]@{
@@ -63,7 +47,8 @@ $record = [ordered]@{
     sourceRef = 'refs/heads/main'
     sourceDigest = $sourceDigest
     githubHostedRunnerRequired = $true
-    publicGoodAttestationsAllowed = $false
+    publicGoodAttestationRequired = -not $synthetic
+    transparencyLogRequired = -not $synthetic
     unsignedArtifact = [ordered]@{
         name = $artifact.Name
         length = [long]$artifact.Length

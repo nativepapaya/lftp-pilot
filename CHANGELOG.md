@@ -92,3 +92,7 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 - Self-contained unsigned MSIX validation, App Installer feed generation,
   locked NuGet restores, CycloneDX SBOM generation, offline signing policy, and
   fail-closed third-party source/license publication gates.
+- Public-repository build provenance now verifies through GitHub's documented
+  Sigstore Public Good trust path and requires a verified transparency-log
+  timestamp. GitHub CLI stderr is kept separate from JSON evidence so the same
+  fail-closed verification works under Windows PowerShell 5 and PowerShell 7.

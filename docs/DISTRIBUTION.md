@@ -26,8 +26,10 @@ explicitly. Existing releases are never overwritten.
 Production attestation verification is fixed to `nativepapaya/lftp-pilot`,
 `.github/workflows/unsigned-package.yml`, `refs/heads/main`, the completely clean
 local `HEAD` digest for both source and signer workflow, GitHub's OIDC issuer,
-SLSA provenance v1, and GitHub-hosted runners. Public-good attestations and
-self-hosted runners are rejected. `Sign-Release.ps1` and
+SLSA provenance v1, and GitHub-hosted runners. Because the repository is public,
+verification also requires GitHub's Sigstore Public Good trust path, a verified
+transparency-log timestamp, and a public source identity; self-hosted runners are
+rejected. `Sign-Release.ps1` and
 `Publish-Release.ps1` expose no bypass. `Test-BuildProvenance.ps1` has a
 diagnostic bypass that works only with a small specially named fixture under the
 operating-system temp directory and an exact test-only environment marker; it
