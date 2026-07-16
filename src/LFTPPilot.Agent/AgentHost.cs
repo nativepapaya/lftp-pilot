@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using LFTPPilot.Core;
@@ -25,6 +26,7 @@ public sealed partial class AgentHost : IAsyncDisposable
     private readonly List<Task> _clients = [];
     private readonly object _clientGate = new();
     private readonly TaskCompletionSource _acceptorsStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private bool _jobStateOwned;
     private bool _started;
     private bool _disposed;
 
@@ -52,7 +54,8 @@ public sealed partial class AgentHost : IAsyncDisposable
         {
             _workspace = new(profileStore, secretStore!, hostKeyManager!, processHost!, runtimeProvider!, _coordinator, mirrorPlanner!, workspaceOptions!,
                 (kind, name, payload, jobId, sessionId) => _events.Publish(kind, name, payload, jobId, sessionId),
-                _scheduler);
+                _scheduler,
+                _store);
         }
     }
 
@@ -75,6 +78,12 @@ public sealed partial class AgentHost : IAsyncDisposable
             var restoredJobs = NormalizeInterruptedJobs(state.Jobs);
             _coordinator.Restore(restoredJobs);
             await _scheduler.RestoreAsync(restoredJobs, cancellationToken).ConfigureAwait(false);
+            // From this point onward the coordinator and scheduler have both
+            // restored and durably committed their view of the job collection.
+            // Disposal is now allowed to finalize that state.
+            Volatile.Write(ref _jobStateOwned, true);
+            if (_workspace is not null)
+                await _workspace.RestoreSessionTabsAsync(state.EffectiveSessionTabs, cancellationToken).ConfigureAwait(false);
 
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
             await Task.WhenAll(AcceptControlClientsAsync(linked.Token), AcceptEventClientsAsync(linked.Token)).ConfigureAwait(false);
@@ -90,20 +99,44 @@ public sealed partial class AgentHost : IAsyncDisposable
         if (_disposed) return;
         _disposed = true;
         _lifetime.Cancel();
+        var failures = new List<Exception>();
         if (_started) await _acceptorsStopped.Task.ConfigureAwait(false);
         Task[] clients;
         lock (_clientGate) clients = _clients.ToArray();
-        await Task.WhenAll(clients).ConfigureAwait(false);
-        if (_started)
+        try { await Task.WhenAll(clients).ConfigureAwait(false); }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            if (exception is not OperationCanceledException) failures.Add(exception);
+        }
+        if (Volatile.Read(ref _jobStateOwned))
         {
             try { await _scheduler.MarkPendingMissedAsync("The agent was explicitly stopped.").ConfigureAwait(false); }
-            catch (IOException) { }
+            catch (Exception exception) when (!IsFatalRuntimeException(exception))
+            {
+                PublishPersistenceFailure(exception);
+                failures.Add(exception);
+            }
         }
-        await _scheduler.DisposeAsync().ConfigureAwait(false);
-        if (_workspace is not null) await _workspace.DisposeAsync().ConfigureAwait(false);
-        await _store.SaveAsync(_coordinator.GetJobs()).ConfigureAwait(false);
+        try { await _scheduler.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception)) { failures.Add(exception); }
+        if (_workspace is not null)
+        {
+            try { await _workspace.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception exception) when (!IsFatalRuntimeException(exception)) { failures.Add(exception); }
+        }
+        if (Volatile.Read(ref _jobStateOwned))
+        {
+            try { await _store.SaveAsync(_coordinator.GetJobs).ConfigureAwait(false); }
+            catch (Exception exception) when (!IsFatalRuntimeException(exception))
+            {
+                PublishPersistenceFailure(exception);
+                failures.Add(exception);
+            }
+        }
         _coordinator.JobChanged -= OnJobChanged;
         _lifetime.Dispose();
+        if (failures.Count == 1) ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        if (failures.Count > 1) throw new AggregateException("The Agent encountered multiple shutdown failures after completing cleanup.", failures);
     }
 
     private async Task AcceptControlClientsAsync(CancellationToken cancellationToken)
@@ -216,7 +249,7 @@ public sealed partial class AgentHost : IAsyncDisposable
                         throw new NotSupportedException("Run-once work requires an executable transfer payload through transfers.enqueue.");
                     ValidateNewJob(job);
                     var result = _coordinator.Enqueue(job);
-                    await _store.SaveAsync(_coordinator.GetJobs(), cancellationToken).ConfigureAwait(false);
+                    await _store.SaveAsync(_coordinator.GetJobs, cancellationToken).ConfigureAwait(false);
                     return JsonSerializer.SerializeToElement(result, FramedJsonStream.SerializerOptions);
                 }
             case "jobs.transition":
@@ -224,15 +257,17 @@ public sealed partial class AgentHost : IAsyncDisposable
                     if (_workspace is not null)
                         throw new NotSupportedException("Direct job mutation is disabled when workspace services are active. Use a typed workspace operation instead.");
                     var transition = request.Arguments.Deserialize<JobTransitionRequest>(FramedJsonStream.SerializerOptions) ?? throw new ArgumentException("A transition is required.");
+                    ValidateJobTransition(transition);
                     var result = _coordinator.Transition(transition.JobId, transition.State, transition.Status, transition.Error);
-                    await _store.SaveAsync(_coordinator.GetJobs(), cancellationToken).ConfigureAwait(false);
+                    await _store.SaveAsync(_coordinator.GetJobs, cancellationToken).ConfigureAwait(false);
                     return JsonSerializer.SerializeToElement(result, FramedJsonStream.SerializerOptions);
                 }
             case "jobs.cancel":
                 {
                     var cancel = request.Arguments.Deserialize<JobCancelRequest>(FramedJsonStream.SerializerOptions) ?? throw new ArgumentException("A cancellation request is required.");
+                    JobSnapshotPolicy.ValidateStatus(cancel.Reason);
                     var cancelled = _workspace?.TryCancelOperation(cancel.JobId, cancel.Reason) == true || _coordinator.TryCancel(cancel.JobId, cancel.Reason);
-                    await _store.SaveAsync(_coordinator.GetJobs(), cancellationToken).ConfigureAwait(false);
+                    await _store.SaveAsync(_coordinator.GetJobs, cancellationToken).ConfigureAwait(false);
                     return JsonSerializer.SerializeToElement(new { cancelled }, FramedJsonStream.SerializerOptions);
                 }
             default:
@@ -257,14 +292,28 @@ public sealed partial class AgentHost : IAsyncDisposable
     private void OnJobChanged(object? sender, JobSnapshot job)
     {
         _events.Publish(EngineEventKind.Job, "job.changed", job, job.Id);
-        _ = PersistJobsAsync();
+        if (Volatile.Read(ref _jobStateOwned)) _ = PersistJobsAsync();
     }
 
     private async Task PersistJobsAsync()
     {
-        try { await _store.SaveAsync(_coordinator.GetJobs(), _lifetime.Token).ConfigureAwait(false); }
+        try { await _store.SaveAsync(_coordinator.GetJobs, _lifetime.Token).ConfigureAwait(false); }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (IOException) { }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            PublishPersistenceFailure(exception);
+        }
+    }
+
+    private void PublishPersistenceFailure(Exception exception)
+    {
+        _events.Publish(
+            EngineEventKind.Error,
+            "job.persistence-failed",
+            new EngineError(
+                "job-persistence-failed",
+                "The durable job state could not be saved.",
+                Detail: exception.GetType().Name));
     }
 
     private void TrackClient(Task task)
@@ -282,8 +331,16 @@ public sealed partial class AgentHost : IAsyncDisposable
     {
         try { await task.ConfigureAwait(false); }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (IOException) { }
-        catch (InvalidDataException) { }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            _events.Publish(
+                EngineEventKind.Error,
+                "client.failed",
+                new EngineError(
+                    "agent-client-failed",
+                    "An Agent client connection ended unexpectedly.",
+                    Detail: exception.GetType().Name));
+        }
     }
 
     private static NamedPipeServerStream CreatePipe(string name) => new(
@@ -320,13 +377,27 @@ public sealed partial class AgentHost : IAsyncDisposable
 
     private void ValidateNewJob(JobSnapshot job)
     {
-        if (string.IsNullOrWhiteSpace(job.DisplayName) || job.DisplayName.Length > 256) throw new ArgumentException("The job display name must contain between 1 and 256 characters.");
-        if (!Enum.IsDefined(job.Kind) || !Enum.IsDefined(job.State)) throw new ArgumentException("The job kind or state is unsupported.");
+        JobSnapshotPolicy.ValidateForEnqueue(job, _scheduler.UtcNow);
         if (job.RetryAvailable) throw new ArgumentException("Direct jobs cannot advertise an Agent-owned retry operation.");
         if (job.State == JobState.Scheduled && (job.RunAt is null || job.RunAt <= _scheduler.UtcNow))
             throw new ArgumentException("A scheduled job requires a future run time.");
         if (job.State == JobState.Queued && job.RunAt is not null)
             throw new ArgumentException("A queued job cannot have a run-once time.");
+    }
+
+    private void ValidateJobTransition(JobTransitionRequest transition)
+    {
+        var current = _coordinator.GetJobs().FirstOrDefault(job => job.Id == transition.JobId)
+            ?? throw new KeyNotFoundException($"Job {transition.JobId} was not found.");
+        var updatedAt = DateTimeOffset.UtcNow;
+        if (updatedAt < current.CreatedAt) updatedAt = current.CreatedAt;
+        JobSnapshotPolicy.Validate(current with
+        {
+            State = transition.State,
+            Status = transition.Status ?? current.Status,
+            Error = transition.Error,
+            UpdatedAt = updatedAt,
+        });
     }
 
     private static IReadOnlyList<JobSnapshot> NormalizeInterruptedJobs(IEnumerable<JobSnapshot> jobs)
@@ -341,13 +412,16 @@ public sealed partial class AgentHost : IAsyncDisposable
                 State = JobState.Failed,
                 Status = "Interrupted because the previous Agent process stopped.",
                 Error = new("agent-interrupted", "The operation did not complete before the Agent stopped.", IsTransient: true),
-                UpdatedAt = now,
+                UpdatedAt = now >= normalized.CreatedAt ? now : normalized.CreatedAt,
             }
             : normalized;
         }).ToArray();
     }
 
     private sealed record DispatchResult(ProtocolEnvelope Response, bool StopAfterReply);
+
+    private static bool IsFatalRuntimeException(Exception exception) => exception is
+        OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException;
 
     private static partial class NativeMethods
     {

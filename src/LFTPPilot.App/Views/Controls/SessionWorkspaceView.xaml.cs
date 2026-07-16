@@ -103,6 +103,75 @@ public sealed partial class SessionWorkspaceView : UserControl
         }
     }
 
+    private async void Reconnect_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not SessionViewModel viewModel || !viewModel.CanReconnect) return;
+
+        PasswordBox? credentialInput = null;
+        string? ephemeralCredential = null;
+        if (viewModel.RequiresCredentialForReconnect)
+        {
+            credentialInput = new PasswordBox
+            {
+                Header = "Credential",
+                PlaceholderText = "Enter the credential for this connection",
+                PasswordRevealMode = PasswordRevealMode.Peek,
+            };
+            AutomationProperties.SetName(credentialInput, "Ask-on-connect credential");
+            var validation = new InfoBar
+            {
+                IsOpen = false,
+                IsClosable = false,
+                Severity = InfoBarSeverity.Error,
+                Title = "Credential required",
+                Message = "Enter the credential before reconnecting this saved tab.",
+            };
+            var content = new StackPanel { Spacing = 12, MaxWidth = 520 };
+            content.Children.Add(new TextBlock
+            {
+                Text = "This credential is sent only for this explicit reconnect. It is not saved by the restored tab.",
+                TextWrapping = TextWrapping.Wrap,
+            });
+            content.Children.Add(credentialInput);
+            content.Children.Add(validation);
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = $"Reconnect {viewModel.DisplayName}",
+                Content = content,
+                PrimaryButtonText = "Reconnect",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            dialog.PrimaryButtonClick += (_, args) =>
+            {
+                if (!string.IsNullOrEmpty(credentialInput.Password)) return;
+                validation.IsOpen = true;
+                args.Cancel = true;
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+            {
+                credentialInput.Password = string.Empty;
+                return;
+            }
+            ephemeralCredential = credentialInput.Password;
+        }
+
+        try
+        {
+            await viewModel.ReconnectAsync(ephemeralCredential).ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            await ShowOperationErrorAsync("The saved tab could not reconnect", exception).ConfigureAwait(true);
+        }
+        finally
+        {
+            if (credentialInput is not null) credentialInput.Password = string.Empty;
+            ephemeralCredential = null;
+        }
+    }
+
     private async Task ShowTransferOptionsAsync(TransferDirection direction)
     {
         if (DataContext is not SessionViewModel viewModel) return;

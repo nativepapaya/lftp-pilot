@@ -17,7 +17,11 @@ public interface IAgentWorkspaceClient : IAsyncDisposable
     Task<bool> DeleteProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
     Task<SftpHostKeyInspection> InspectSftpHostKeyAsync(ConnectionProfile profile, CancellationToken cancellationToken = default);
     Task<SftpHostKeyApproveResult> ApproveSftpHostKeyAsync(SftpHostKeyReview review, bool replaceExisting, CancellationToken cancellationToken = default);
-    Task<WorkspaceSessionSeed> ConnectAsync(ConnectionProfile profile, string? ephemeralCredential = null, CancellationToken cancellationToken = default);
+    Task<WorkspaceSessionSeed> ConnectAsync(
+        ConnectionProfile profile,
+        string? ephemeralCredential = null,
+        CancellationToken cancellationToken = default,
+        Guid? existingSessionId = null);
     Task<bool> DisconnectAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<FileEntry>> BrowseAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default);
     Task<FileMutationResult> CreateDirectoryAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default);

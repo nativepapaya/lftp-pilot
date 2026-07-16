@@ -11,35 +11,44 @@ public sealed class SessionViewModel : ObservableObject
 {
     private readonly IAgentWorkspaceClient _agent;
     private readonly HashSet<Guid> _unconfirmedTransferIds = [];
+    private ConnectionProfile _profile;
+    private EngineError? _connectionError;
     private bool _isConnected;
+    private bool _isReconnecting;
+    private string _displayName;
     private string _statusText;
 
     public SessionViewModel(IAgentWorkspaceClient agent, WorkspaceSessionSeed seed, ConnectionProfile profile)
     {
         _agent = agent;
+        _profile = profile;
         SessionId = seed.Snapshot.SessionId;
         ProfileId = seed.Snapshot.ProfileId;
-        DisplayName = seed.Snapshot.DisplayName;
+        _displayName = profile.Name;
         _isConnected = seed.Snapshot.IsConnected;
-        _statusText = IsConnected ? "Connected" : "Disconnected";
+        _connectionError = seed.Snapshot.Error;
+        _statusText = CreateConnectionStatus();
         LocalPane = new FilePaneViewModel(agent, SessionId, PaneKind.Local, seed.Snapshot.LocalLocation.Path, seed.LocalEntries);
         RemotePane = new FilePaneViewModel(agent, SessionId, PaneKind.Remote, seed.Snapshot.RemoteLocation.Path, seed.RemoteEntries, profile);
         DownloadCommand = new AsyncRelayCommand(
             _ => TransferAsync(TransferDirection.Download),
-            _ => RemotePane.HasSelection && !HasUnconfirmedTransfers,
+            _ => IsConnected && RemotePane.HasSelection && !HasUnconfirmedTransfers,
             ReportError);
         UploadCommand = new AsyncRelayCommand(
             _ => TransferAsync(TransferDirection.Upload),
-            _ => LocalPane.HasSelection && !HasUnconfirmedTransfers,
+            _ => IsConnected && LocalPane.HasSelection && !HasUnconfirmedTransfers,
             ReportError);
-        RefreshCommand = new AsyncRelayCommand(_ => Task.WhenAll(LocalPane.NavigateAsync(LocalPane.Path), RemotePane.NavigateAsync(RemotePane.Path)), null, ReportError);
+        RefreshCommand = new AsyncRelayCommand(
+            _ => Task.WhenAll(LocalPane.NavigateAsync(LocalPane.Path), RemotePane.NavigateAsync(RemotePane.Path)),
+            _ => IsConnected,
+            ReportError);
         LocalPane.SelectedEntries.CollectionChanged += (_, _) => UploadCommand.NotifyCanExecuteChanged();
         RemotePane.SelectedEntries.CollectionChanged += (_, _) => DownloadCommand.NotifyCanExecuteChanged();
     }
 
     public Guid SessionId { get; }
     public Guid ProfileId { get; }
-    public string DisplayName { get; }
+    public string DisplayName { get => _displayName; private set => SetProperty(ref _displayName, value); }
     public FilePaneViewModel LocalPane { get; }
     public FilePaneViewModel RemotePane { get; }
     public AsyncRelayCommand DownloadCommand { get; }
@@ -48,11 +57,34 @@ public sealed class SessionViewModel : ObservableObject
 
     public event EventHandler<JobSnapshot>? JobQueued;
     public event EventHandler<UnconfirmedTransferSubmission>? TransferOutcomeUnconfirmed;
+    public event EventHandler? StateRefreshRequested;
 
     public bool IsConnected
     {
         get => _isConnected;
-        set => SetProperty(ref _isConnected, value);
+        private set
+        {
+            if (!SetProperty(ref _isConnected, value)) return;
+            OnPropertyChanged(nameof(IsDisconnected));
+            OnPropertyChanged(nameof(ConnectionGlyph));
+            OnPropertyChanged(nameof(CanReconnect));
+            OnPropertyChanged(nameof(ReconnectDescription));
+            RefreshCommand.NotifyCanExecuteChanged();
+            UploadCommand.NotifyCanExecuteChanged();
+            DownloadCommand.NotifyCanExecuteChanged();
+        }
+    }
+
+    public bool IsDisconnected => !IsConnected;
+
+    public bool IsReconnecting
+    {
+        get => _isReconnecting;
+        private set
+        {
+            if (!SetProperty(ref _isReconnecting, value)) return;
+            OnPropertyChanged(nameof(CanReconnect));
+        }
     }
 
     public string StatusText
@@ -63,10 +95,80 @@ public sealed class SessionViewModel : ObservableObject
 
     public string ConnectionGlyph => IsConnected ? "\uE701" : "\uE711";
     public bool HasUnconfirmedTransfers => _unconfirmedTransferIds.Count != 0;
+    public bool RequiresCredentialForReconnect => _profile.Authentication == AuthenticationKind.AskOnConnect;
+    public bool CanReconnect => IsDisconnected && !IsReconnecting;
+    public string ReconnectDescription => RequiresCredentialForReconnect
+        ? "This restored tab needs its credential again. LFTP Pilot did not store the ask-on-connect credential."
+        : _connectionError is not null
+            ? $"The prior connection could not be restored: {_connectionError.Message}"
+            : "The saved tab is disconnected. Reconnect to resume remote browsing and transfers.";
 
     public void UpdateProfile(ConnectionProfile profile)
     {
-        if (profile.Id == ProfileId) RemotePane.UpdateProfile(profile);
+        if (profile.Id != ProfileId) return;
+        _profile = profile;
+        DisplayName = profile.Name;
+        RemotePane.UpdateProfile(profile);
+        OnPropertyChanged(nameof(RequiresCredentialForReconnect));
+        OnPropertyChanged(nameof(ReconnectDescription));
+    }
+
+    public void ApplySeed(WorkspaceSessionSeed seed, ConnectionProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(seed);
+        ArgumentNullException.ThrowIfNull(profile);
+        if (seed.Snapshot.SessionId != SessionId || seed.Snapshot.ProfileId != ProfileId || profile.Id != ProfileId)
+            throw new InvalidDataException("The refreshed session tab did not match its existing session identity.");
+        if (seed.Snapshot.LocalLocation.Kind != PaneKind.Local || seed.Snapshot.RemoteLocation.Kind != PaneKind.Remote)
+            throw new InvalidDataException("The refreshed session tab returned invalid pane locations.");
+
+        _profile = profile;
+        _connectionError = seed.Snapshot.Error;
+        DisplayName = profile.Name;
+        RemotePane.UpdateProfile(profile);
+        LocalPane.Restore(seed.Snapshot.LocalLocation.Path, seed.LocalEntries);
+        RemotePane.Restore(seed.Snapshot.RemoteLocation.Path, seed.RemoteEntries);
+        IsConnected = seed.Snapshot.IsConnected;
+        StatusText = CreateConnectionStatus();
+        OnPropertyChanged(nameof(RequiresCredentialForReconnect));
+        OnPropertyChanged(nameof(ReconnectDescription));
+    }
+
+    public async Task ReconnectAsync(string? ephemeralCredential = null, CancellationToken cancellationToken = default)
+    {
+        if (IsConnected) return;
+        if (IsReconnecting) throw new InvalidOperationException("This saved tab is already reconnecting.");
+        if (RequiresCredentialForReconnect && string.IsNullOrEmpty(ephemeralCredential))
+            throw new ArgumentException("Enter the ask-on-connect credential before reconnecting.", nameof(ephemeralCredential));
+
+        IsReconnecting = true;
+        StatusText = _profile.Protocol == ConnectionProtocol.Sftp
+            ? "Inspecting the SFTP host key before reconnectingâ€¦"
+            : "Reconnectingâ€¦";
+        try
+        {
+            var seed = await _agent.ConnectAsync(
+                _profile,
+                RequiresCredentialForReconnect ? ephemeralCredential : null,
+                cancellationToken,
+                existingSessionId: SessionId).ConfigureAwait(true);
+            ApplySeed(seed, _profile);
+        }
+        catch (AgentRequestOutcomeUnknownException exception)
+        {
+            StatusText = $"Reconnect outcome unconfirmed. {exception.Message}";
+            RequestStateRefresh();
+            throw;
+        }
+        catch (Exception exception)
+        {
+            StatusText = $"Reconnect failed. {exception.Message}";
+            throw;
+        }
+        finally
+        {
+            IsReconnecting = false;
+        }
     }
 
     public void SetUnconfirmedTransferIds(IEnumerable<Guid> planIds)
@@ -107,6 +209,8 @@ public sealed class SessionViewModel : ObservableObject
     public async Task<RemoteEditSession> StartRemoteEditAsync(FileEntryViewModel entry)
     {
         ArgumentNullException.ThrowIfNull(entry);
+        if (!IsConnected)
+            throw new InvalidOperationException("Reconnect this saved tab before editing a remote file.");
         if (entry.Entry.Kind != EntryKind.File || !RemotePane.SelectedEntries.Contains(entry) || RemotePane.SelectedEntries.Count != 1)
             throw new InvalidOperationException("Select exactly one regular remote file to edit.");
         StatusText = $"Preparing managed copy of {entry.Name}…";
@@ -120,6 +224,11 @@ public sealed class SessionViewModel : ObservableObject
         IReadOnlyList<FilePaneTransferSource> sources,
         TransferUiOptions? options = null)
     {
+        if (!IsConnected)
+        {
+            StatusText = "Reconnect this saved tab before queueing a transfer.";
+            throw new InvalidOperationException(StatusText);
+        }
         if (HasUnconfirmedTransfers)
         {
             StatusText = "A prior transfer submission is still unconfirmed. Activity must reconcile its original plan ID before another transfer can be queued.";
@@ -251,6 +360,26 @@ public sealed class SessionViewModel : ObservableObject
                 "Root-wide folder transfers require the reviewed Mirror workflow; select an item below the root instead.");
         }
         return name;
+    }
+
+    private string CreateConnectionStatus() => IsConnected
+        ? "Connected"
+        : RequiresCredentialForReconnect
+            ? "Disconnected Â· Credential required"
+            : _connectionError is not null
+                ? $"Disconnected Â· {_connectionError.Message}"
+                : "Disconnected";
+
+    private void RequestStateRefresh()
+    {
+        try
+        {
+            StateRefreshRequested?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine(exception);
+        }
     }
 
     private void ReportError(Exception exception) => StatusText = exception.Message;

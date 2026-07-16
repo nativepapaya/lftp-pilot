@@ -34,6 +34,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly Action<EngineEventKind, string, object?, Guid?, Guid?>? _publish;
     private readonly RunOnceScheduler? _scheduler;
     private readonly RemoteEditManager _remoteEdits;
+    private readonly DurableJobStore? _stateStore;
     private readonly ConcurrentDictionary<Guid, StoredMirrorPreview> _previews = [];
     private readonly Dictionary<Guid, StoredMirrorApproval> _mirrorApprovals = [];
     private readonly ConcurrentDictionary<Guid, StoredBrowseSnapshot> _browseSnapshots = [];
@@ -46,6 +47,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _profileTrustGate = new(1, 1);
     private readonly SemaphoreSlim _remoteTransferGate = new(1, 1);
+    private readonly SemaphoreSlim _sessionStateGate = new(1, 1);
     private readonly object _operationGate = new();
     private readonly HashSet<Task> _operations = [];
     private readonly object _requestGate = new();
@@ -64,7 +66,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         IMirrorPlanner mirrorPlanner,
         AgentWorkspaceOptions options,
         Action<EngineEventKind, string, object?, Guid?, Guid?>? publish = null,
-        RunOnceScheduler? scheduler = null)
+        RunOnceScheduler? scheduler = null,
+        DurableJobStore? stateStore = null)
     {
         _profileStore = profileStore;
         _secretStore = secretStore;
@@ -75,11 +78,31 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         _options = options;
         _publish = publish;
         _scheduler = scheduler;
+        _stateStore = stateStore;
         _sessions = new(processHost, runtimeProvider, hostKeys, options);
         _remoteEdits = new(
             Path.Combine(options.CacheRoot, "remote-edits"),
             new LftpRemoteEditTransport(_sessions, options),
             publish: publish);
+    }
+
+    internal async Task RestoreSessionTabsAsync(
+        IReadOnlyList<PersistedSessionTab> tabs,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(tabs);
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var profiles = (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false))
+                .ToDictionary(static profile => profile.Id);
+            _sessions.RestoreTabs(tabs, profiles);
+            await PersistSessionTabsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
     }
 
     public async Task<JsonElement> HandleAsync(string method, JsonElement arguments, CancellationToken cancellationToken)
@@ -140,11 +163,19 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             await _remoteTransferGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                return new(AgentProtocol.CurrentVersion, runtime,
-                    (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).ToImmutableArray(),
-                    _sessions.GetSnapshots().ToImmutableArray(),
-                    _jobs.GetJobs().ToImmutableArray(),
-                    _remoteEdits.GetSnapshots().ToImmutableArray());
+                await _sessionStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    return new(AgentProtocol.CurrentVersion, runtime,
+                        (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).ToImmutableArray(),
+                        _sessions.GetSnapshots().ToImmutableArray(),
+                        _jobs.GetJobs().ToImmutableArray(),
+                        _remoteEdits.GetSnapshots().ToImmutableArray());
+                }
+                finally
+                {
+                    _sessionStateGate.Release();
+                }
             }
             finally
             {
@@ -195,6 +226,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             }
             if (credentialSupplied && request.Profile.Protocol == ConnectionProtocol.Sftp)
                 _ = await _hostKeys.RequireTrustedAsync(request.Profile, cancellationToken).ConfigureAwait(false);
+            if (connectionIdentityChanged)
+                await RemoveProfileSessionTabsAsync(request.Profile.Id, cancellationToken).ConfigureAwait(false);
             var identityChanged = previous is not null && !SecretBindingFor(previous).Equals(SecretBindingFor(request.Profile));
             if (identityChanged) await _secretStore.DeleteAsync(request.Profile.Id, cancellationToken).ConfigureAwait(false);
             if (hostKeyBindingChanged)
@@ -224,7 +257,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             ThrowIfProfileHasActiveRemoteEdits(request.ProfileId);
             ThrowIfProfileHasDependentJobs(request.ProfileId);
-            await _sessions.DisconnectProfileAsync(request.ProfileId).ConfigureAwait(false);
+            await RemoveProfileSessionTabsAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
             await _secretStore.DeleteAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
             await _hostKeys.DeleteAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
             // Revoke security state before deleting discoverable profile metadata.
@@ -248,6 +281,13 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         try
         {
             var profile = await FindExpectedProfileAsync(request.ExpectedIdentity, cancellationToken).ConfigureAwait(false);
+            if (request.ExistingSessionId == Guid.Empty)
+                throw new ArgumentException("An existing session identifier cannot be empty.", nameof(request));
+            if (request.ExistingSessionId is { } existingSessionId &&
+                _sessions.GetActiveSnapshot(existingSessionId, request.ExpectedIdentity) is { } activeSnapshot)
+            {
+                return activeSnapshot;
+            }
             if (profile.Protocol == ConnectionProtocol.Sftp)
             {
                 // Keep the no-active-work replacement decision atomic with
@@ -256,7 +296,11 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 // credential lookup.
                 _ = await _hostKeys.RequireTrustedAsync(profile, cancellationToken).ConfigureAwait(false);
             }
-            return await ConnectTrustedProfileAsync(profile, request.EphemeralCredential, cancellationToken).ConfigureAwait(false);
+            return await ConnectTrustedProfileAsync(
+                profile,
+                request.EphemeralCredential,
+                cancellationToken,
+                request.ExistingSessionId).ConfigureAwait(false);
         }
         finally
         {
@@ -309,12 +353,35 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private async Task<SessionSnapshot> ConnectTrustedProfileAsync(
         ConnectionProfile profile,
         string? ephemeralCredential,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? existingSessionId = null)
     {
         var credential = await ResolveCredentialAsync(profile, ephemeralCredential, cancellationToken).ConfigureAwait(false);
-        var snapshot = await _sessions.ConnectAsync(profile, credential, cancellationToken).ConfigureAwait(false);
-        _publish?.Invoke(EngineEventKind.Session, "session.connected", snapshot, null, snapshot.SessionId);
-        return snapshot;
+        var connection = await _sessions.ConnectAsync(
+            profile,
+            credential,
+            existingSessionId,
+            cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await PersistSessionTabsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception persistenceException)
+        {
+            try { await _sessions.RollbackConnectionAsync(connection).ConfigureAwait(false); }
+            catch (Exception cleanupException)
+            {
+                throw new AggregateException(
+                    "The session-tab commit failed and its uncommitted LFTP process did not stop cleanly.",
+                    persistenceException,
+                    cleanupException);
+            }
+            ExceptionDispatchInfo.Capture(persistenceException).Throw();
+            throw;
+        }
+        if (connection.IsNewRegistration)
+            _publish?.Invoke(EngineEventKind.Session, "session.connected", connection.Snapshot, null, connection.Snapshot.SessionId);
+        return connection.Snapshot;
     }
 
     public async Task<bool> DisconnectAsync(
@@ -325,13 +392,34 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var session = _sessions.Get(request.SessionId);
-            if (_remoteEdits.HasActiveSession(request.SessionId))
+            if (_sessions.GetClosing(request.SessionId) is { } closing)
+            {
+                await _sessions.DisposeDetachedAsync(closing).ConfigureAwait(false);
+            }
+            var preparation = _sessions.PrepareDisconnect(request.SessionId)
+                ?? (_sessions.GetClosing(request.SessionId) is null
+                    ? null
+                    : throw new InvalidOperationException("The session is still closing."));
+            if (preparation is null) return true;
+            if (preparation.ActiveSession is not null && _remoteEdits.HasActiveSession(request.SessionId))
                 throw new InvalidOperationException("Finish or cancel every active remote edit for this session before disconnecting it.");
-            ThrowIfProfileHasDependentJobs(session.Profile.Id);
-            var disconnected = await _sessions.DisconnectAsync(request.SessionId).ConfigureAwait(false);
-            if (disconnected) _publish?.Invoke(EngineEventKind.Session, "session.disconnected", request.SessionId, null, request.SessionId);
-            return disconnected;
+            ThrowIfProfileHasDependentJobs(preparation.PersistedTab.ProfileId);
+            WorkspaceSession? detached;
+            await _sessionStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await PersistSessionTabsCoreAsync(
+                    _sessions.GetPersistedTabs().Where(tab => tab.SessionId != request.SessionId),
+                    cancellationToken).ConfigureAwait(false);
+                detached = _sessions.DetachDisconnect(preparation);
+            }
+            finally
+            {
+                _sessionStateGate.Release();
+            }
+            _publish?.Invoke(EngineEventKind.Session, "session.disconnected", request.SessionId, null, request.SessionId);
+            if (detached is not null) await _sessions.DisposeDetachedAsync(detached).ConfigureAwait(false);
+            return true;
         }
         finally
         {
@@ -348,6 +436,94 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         }
     }
 
+    private async Task RemoveProfileSessionTabsAsync(Guid profileId, CancellationToken cancellationToken)
+    {
+        if (_sessions.HasClosingProfile(profileId))
+            throw new InvalidOperationException("A profile session is still closing. Retry cleanup before changing or deleting the profile.");
+        SessionDisconnectPreparation[] preparations;
+        WorkspaceSession[] detached;
+        await _sessionStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            preparations = _sessions.PrepareDisconnectProfile(profileId).ToArray();
+            if (preparations.Length == 0) return;
+            var removedIds = preparations.Select(static item => item.PersistedTab.SessionId).ToHashSet();
+            await PersistSessionTabsCoreAsync(
+                _sessions.GetPersistedTabs().Where(tab => !removedIds.Contains(tab.SessionId)),
+                cancellationToken).ConfigureAwait(false);
+            detached = preparations.Select(_sessions.DetachDisconnect).OfType<WorkspaceSession>().ToArray();
+        }
+        finally
+        {
+            _sessionStateGate.Release();
+        }
+
+        foreach (var preparation in preparations)
+            _publish?.Invoke(EngineEventKind.Session, "session.disconnected", preparation.PersistedTab.SessionId, null, preparation.PersistedTab.SessionId);
+
+        var errors = new List<Exception>();
+        foreach (var session in detached)
+        {
+            try { await _sessions.DisposeDetachedAsync(session).ConfigureAwait(false); }
+            catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException))
+            {
+                errors.Add(exception);
+            }
+        }
+        if (errors.Count == 1) throw errors[0];
+        if (errors.Count > 1) throw new AggregateException("Multiple profile sessions failed to stop cleanly.", errors);
+    }
+
+    private async Task PersistSessionTabsAsync(CancellationToken cancellationToken)
+    {
+        await _sessionStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await PersistSessionTabsCoreAsync(_sessions.GetPersistedTabs(), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sessionStateGate.Release();
+        }
+    }
+
+    private async Task CommitSessionLocationAsync(
+        WorkspaceSession session,
+        PaneKind kind,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        await _sessionStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var previous = session.Snapshot;
+            session.SetLocation(kind, path);
+            try
+            {
+                await PersistSessionTabsCoreAsync(_sessions.GetPersistedTabs(), cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                session.RestoreSnapshot(previous);
+                throw;
+            }
+        }
+        finally
+        {
+            _sessionStateGate.Release();
+        }
+    }
+
+    private Task PersistSessionTabsCoreAsync(
+        IEnumerable<PersistedSessionTab> sessionTabs,
+        CancellationToken cancellationToken)
+    {
+        var captured = sessionTabs.ToArray();
+        return _stateStore is null
+            ? Task.CompletedTask
+            : _stateStore.SaveSessionTabsAsync(captured, cancellationToken);
+    }
+
     private void ThrowIfProfileHasActiveRemoteEdits(Guid profileId)
     {
         if (_sessions.GetSnapshots().Any(session =>
@@ -360,6 +536,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
     private bool ProfileIsQuiescent(Guid profileId)
     {
+        if (_sessions.HasClosingProfile(profileId)) return false;
         if (_sessions.GetSnapshots().Any(session => session.ProfileId == profileId && session.IsConnected)) return false;
         if (ProfileHasDependentWork(profileId)) return false;
         return !_sessions.GetSnapshots().Any(session =>
@@ -376,13 +553,19 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
              _scheduler?.IsRegistered(job.Id) == true));
     }
 
-    public Task<BrowseResult> BrowseLocalAsync(BrowseRequest request, CancellationToken cancellationToken = default)
+    public async Task<BrowseResult> BrowseLocalAsync(BrowseRequest request, CancellationToken cancellationToken = default)
     {
         ValidateBrowseRequest(request);
         if (!Path.IsPathFullyQualified(request.Path)) throw new ArgumentException("The local browse path must be fully qualified.", nameof(request));
         var localPath = Path.GetFullPath(request.Path);
+        var session = request.SessionId is { } sessionId ? _sessions.Get(sessionId) : null;
         if (request.ContinuationToken is not null)
-            return Task.FromResult(ContinueBrowse(request, PaneKind.Local, localPath));
+        {
+            var continuation = ContinueBrowse(request, PaneKind.Local, localPath);
+            if (session is not null && continuation.ContinuationToken is null)
+                await CommitSessionLocationAsync(session, PaneKind.Local, localPath, cancellationToken).ConfigureAwait(false);
+            return continuation;
+        }
         if (!Directory.Exists(localPath)) throw new DirectoryNotFoundException(localPath);
         cancellationToken.ThrowIfCancellationRequested();
         var entries = new List<FileEntry>();
@@ -400,8 +583,10 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         }
         var ordered = entries.OrderBy(static entry => entry.Kind == EntryKind.Directory ? 0 : 1)
             .ThenBy(static entry => entry.Name, StringComparer.CurrentCultureIgnoreCase).ToImmutableArray();
-        if (request.SessionId is { } sessionId) _sessions.Get(sessionId).SetLocation(PaneKind.Local, localPath);
-        return Task.FromResult(CreateBrowsePage(new(PaneKind.Local, localPath), request.SessionId, ordered, request.PageSize));
+        var page = CreateBrowsePage(new(PaneKind.Local, localPath), request.SessionId, ordered, request.PageSize);
+        if (session is not null && page.ContinuationToken is null)
+            await CommitSessionLocationAsync(session, PaneKind.Local, localPath, cancellationToken).ConfigureAwait(false);
+        return page;
     }
 
     public async Task<BrowseResult> BrowseRemoteAsync(BrowseRequest request, CancellationToken cancellationToken = default)
@@ -411,8 +596,13 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         ValidateRemotePath(request.Path, nameof(request));
         var session = _sessions.Get(sessionId);
         if (request.ContinuationToken is not null)
-            return ContinueBrowse(request, PaneKind.Remote, request.Path);
-        return await session.WithBrowseSessionAsync(async browse =>
+        {
+            var continuation = ContinueBrowse(request, PaneKind.Remote, request.Path);
+            if (continuation.ContinuationToken is null)
+                await CommitSessionLocationAsync(session, PaneKind.Remote, request.Path, cancellationToken).ConfigureAwait(false);
+            return continuation;
+        }
+        var page = await session.WithBrowseSessionAsync(async browse =>
         {
             var result = await browse.ExecuteAsync(
                 LftpCommandBuilder.BuildList(request.Path, request.Fresh),
@@ -435,7 +625,10 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             var ordered = parsed.OrderBy(static entry => entry.Kind == EntryKind.Directory ? 0 : 1)
                 .ThenBy(static entry => entry.Name, StringComparer.CurrentCultureIgnoreCase).ToImmutableArray();
             return CreateBrowsePage(new(PaneKind.Remote, request.Path), sessionId, ordered, request.PageSize);
-        }, new(PaneKind.Remote, request.Path)).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+        if (page.ContinuationToken is null)
+            await CommitSessionLocationAsync(session, PaneKind.Remote, request.Path, cancellationToken).ConfigureAwait(false);
+        return page;
     }
 
     public async Task<FileMutationResult> CreateDirectoryAsync(CreateDirectoryRequest request, CancellationToken cancellationToken = default)
@@ -668,7 +861,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 plan.Id,
                 JobKind.Transfer,
                 plan.ProfileId,
-                $"{Path.GetFileName(plan.SourcePath)} -> {Path.GetFileName(plan.DestinationPath)}",
+                JobSnapshotPolicy.CanonicalizeDerivedDisplayName(
+                    $"{Path.GetFileName(plan.SourcePath)} -> {Path.GetFileName(plan.DestinationPath)}",
+                    "Transfer"),
                 initialState,
                 now,
                 now,
@@ -678,7 +873,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 rejected.Id,
                 JobState.Failed,
                 "Transfer submission rejected.",
-                new("transfer-submission-rejected", exception.Message));
+                JobSnapshotPolicy.CanonicalizeDerivedError("transfer-submission-rejected", exception.Message));
             return new(rejected);
         }
 
@@ -686,7 +881,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             plan.Id,
             JobKind.Transfer,
             session.Profile.Id,
-            $"{Path.GetFileName(plan.SourcePath)} -> {Path.GetFileName(plan.DestinationPath)}",
+            JobSnapshotPolicy.CanonicalizeDerivedDisplayName(
+                $"{Path.GetFileName(plan.SourcePath)} -> {Path.GetFileName(plan.DestinationPath)}",
+                "Transfer"),
             initialState,
             now,
             now,
@@ -733,7 +930,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                     job.Id,
                     JobState.Failed,
                     "Transfer submission failed.",
-                    new("transfer-submission-failed", exception.Message));
+                    JobSnapshotPolicy.CanonicalizeDerivedError("transfer-submission-failed", exception.Message));
             }
             if (FindJob(job.Id)?.State is JobState.Missed or JobState.Cancelled)
                 ForgetTransferRetry(job.Id);
@@ -1089,7 +1286,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             request.Plan.Id,
             JobKind.RemoteTransfer,
             source.Profile.Id,
-            $"{RemoteName(request.Plan.SourcePath)} -> {RemoteName(request.Plan.DestinationPath)}",
+            JobSnapshotPolicy.CanonicalizeDerivedDisplayName(
+                $"{RemoteName(request.Plan.SourcePath)} -> {RemoteName(request.Plan.DestinationPath)}",
+                "Remote transfer"),
             JobState.Queued,
             now,
             now,
@@ -1181,6 +1380,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         await _remoteEdits.DisposeAsync().ConfigureAwait(false);
         await _sessions.DisposeAsync().ConfigureAwait(false);
         if (_mirrorPlanner is IDisposable disposable) disposable.Dispose();
+        _sessionStateGate.Dispose();
         _remoteTransferGate.Dispose();
         _profileTrustGate.Dispose();
         _lifetime.Dispose();
@@ -1476,7 +1676,14 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     {
         var state = _jobs.GetJobs().FirstOrDefault(job => job.Id == jobId)?.State;
         if (state is not (JobState.Queued or JobState.Running)) return;
-        try { _jobs.Transition(jobId, JobState.Failed, "Failed", new("lftp-job-failed", exception.Message)); }
+        try
+        {
+            _jobs.Transition(
+                jobId,
+                JobState.Failed,
+                "Failed",
+                JobSnapshotPolicy.CanonicalizeDerivedError("lftp-job-failed", exception.Message));
+        }
         catch (InvalidOperationException) { }
     }
 
@@ -2125,8 +2332,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
     private static void ValidateRemotePath(string path, string parameterName)
     {
-        if (string.IsNullOrWhiteSpace(path) || !path.StartsWith("/", StringComparison.Ordinal) || path.IndexOfAny(['\0', '\r', '\n']) >= 0)
-            throw new ArgumentException("A remote absolute path without protocol control characters is required.", parameterName);
+        if (!ProfileValidator.IsCanonicalRemotePath(path))
+            throw new ArgumentException("A bounded canonical remote path is required.", parameterName);
     }
 
     private void PurgeExpiredMirrorRegistrations(DateTimeOffset now)

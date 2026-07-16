@@ -14,6 +14,362 @@ namespace LFTPPilot.Tests;
 public sealed class WorkspaceTests
 {
     [Fact]
+    public async Task DurableSessionTabsRestoreDisconnectedWithStableIdsOrderAndLastPaths()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var first = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var second = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var localPath = Path.Combine(fixture.Directory.Path, "remembered-local");
+        Directory.CreateDirectory(localPath);
+
+        _ = await fixture.Service.BrowseLocalAsync(
+            new(first.SessionId, localPath), TestContext.Current.CancellationToken);
+        _ = await fixture.Service.BrowseRemoteAsync(
+            new(first.SessionId, "/remote"), TestContext.Current.CancellationToken);
+        var persisted = await fixture.Store.LoadAsync(TestContext.Current.CancellationToken);
+        Assert.Equal([first.SessionId, second.SessionId], persisted.EffectiveSessionTabs.Select(static tab => tab.SessionId));
+        var firstTab = persisted.EffectiveSessionTabs[0];
+        Assert.Equal(Path.GetFullPath(localPath), firstTab.LocalPath);
+        Assert.Equal("/remote", firstTab.RemotePath);
+        Assert.True(firstTab.ReconnectRequested);
+        var startsBeforeRestore = fixture.ProcessHost.Starts.Count;
+
+        await fixture.Service.DisposeAsync();
+        await using var restored = new AgentWorkspaceService(
+            fixture.Profiles,
+            fixture.Secrets,
+            fixture.HostKeyManager,
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.Jobs,
+            new MirrorPlanner(),
+            fixture.Options,
+            stateStore: fixture.Store);
+        await restored.RestoreSessionTabsAsync(
+            persisted.EffectiveSessionTabs, TestContext.Current.CancellationToken);
+
+        var bootstrap = await restored.BootstrapAsync(TestContext.Current.CancellationToken);
+        Assert.Equal([first.SessionId, second.SessionId], bootstrap.Sessions.Select(static session => session.SessionId));
+        Assert.All(bootstrap.Sessions, static session => Assert.False(session.IsConnected));
+        Assert.Equal(Path.GetFullPath(localPath), bootstrap.Sessions[0].LocalLocation.Path);
+        Assert.Equal("/remote", bootstrap.Sessions[0].RemoteLocation.Path);
+        Assert.Equal("agent-restarted", bootstrap.Sessions[0].Error?.Code);
+        Assert.Equal(startsBeforeRestore, fixture.ProcessHost.Starts.Count);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => restored.BrowseRemoteAsync(
+            new(first.SessionId, "/remote"), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task AskOnConnectRestoresWithoutNetworkOrCredentialAndExplicitReconnectIsSameIdempotentTab()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), "Prompt every time", ConnectionProtocol.Ftp, "files.example", 21,
+            "alice", AuthenticationKind.AskOnConnect);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var connected = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile), "first-ephemeral"), TestContext.Current.CancellationToken);
+        var persisted = await fixture.Store.LoadAsync(TestContext.Current.CancellationToken);
+        await fixture.Service.DisposeAsync();
+        var startsBeforeRestore = fixture.ProcessHost.Starts.Count;
+
+        await using var restored = new AgentWorkspaceService(
+            fixture.Profiles,
+            fixture.Secrets,
+            fixture.HostKeyManager,
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.Jobs,
+            new MirrorPlanner(),
+            fixture.Options,
+            stateStore: fixture.Store);
+        await restored.RestoreSessionTabsAsync(
+            persisted.EffectiveSessionTabs, TestContext.Current.CancellationToken);
+        Assert.Equal(startsBeforeRestore, fixture.ProcessHost.Starts.Count);
+        Assert.Empty(fixture.Secrets.GetCalls);
+        Assert.False(Assert.Single((await restored.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions).IsConnected);
+
+        var request = new SessionConnectRequest(
+            ConnectionIdentity.FromProfile(profile), "second-ephemeral", connected.SessionId);
+        var reconnects = await Task.WhenAll(
+            restored.ConnectAsync(request, TestContext.Current.CancellationToken),
+            restored.ConnectAsync(request, TestContext.Current.CancellationToken));
+
+        Assert.All(reconnects, snapshot => Assert.Equal(connected.SessionId, snapshot.SessionId));
+        Assert.All(reconnects, static snapshot => Assert.True(snapshot.IsConnected));
+        Assert.Equal(startsBeforeRestore + 1, fixture.ProcessHost.Starts.Count);
+        var idempotent = await restored.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile), ExistingSessionId: connected.SessionId),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(connected.SessionId, idempotent.SessionId);
+        Assert.Equal(startsBeforeRestore + 1, fixture.ProcessHost.Starts.Count);
+        Assert.Equal(1, fixture.ProcessHost.Starts.Count(start =>
+            start.Secrets?.Contains("first-ephemeral", StringComparer.Ordinal) == true));
+        Assert.Equal(1, fixture.ProcessHost.Starts.Count(start =>
+            start.Secrets?.Contains("second-ephemeral", StringComparer.Ordinal) == true));
+    }
+
+    [Fact]
+    public async Task ProfileIdentityChangePrunesRestoredTabBeforePublishingReplacement()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var connected = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var persisted = await fixture.Store.LoadAsync(TestContext.Current.CancellationToken);
+        await fixture.Service.DisposeAsync();
+
+        await using var restored = new AgentWorkspaceService(
+            fixture.Profiles,
+            fixture.Secrets,
+            fixture.HostKeyManager,
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.Jobs,
+            new MirrorPlanner(),
+            fixture.Options,
+            stateStore: fixture.Store);
+        await restored.RestoreSessionTabsAsync(
+            persisted.EffectiveSessionTabs, TestContext.Current.CancellationToken);
+        Assert.Contains((await restored.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions,
+            session => session.SessionId == connected.SessionId);
+
+        var changed = profile with { Host = "replacement.example" };
+        _ = await restored.SaveProfileAsync(new(changed), TestContext.Current.CancellationToken);
+
+        Assert.Empty((await restored.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions);
+        Assert.Empty((await fixture.Store.LoadAsync(TestContext.Current.CancellationToken)).EffectiveSessionTabs);
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => restored.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(changed), ExistingSessionId: connected.SessionId),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task CleanupFailureTombstoneCannotBeResurrectedByAnotherTabSave()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var closingProfile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var otherProfile = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with { Id = Guid.NewGuid(), Name = "Other" };
+        await fixture.Service.SaveProfileAsync(new(closingProfile), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(otherProfile), TestContext.Current.CancellationToken);
+        var closing = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(closingProfile)), TestContext.Current.CancellationToken);
+        fixture.ProcessHost.FailDisposeRole = "browse";
+        fixture.ProcessHost.RemainingDisposeFailures = 1;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.DisconnectAsync(
+            new(closing.SessionId), TestContext.Current.CancellationToken));
+        Assert.DoesNotContain((await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions,
+            session => session.SessionId == closing.SessionId);
+        var changed = closingProfile with { Host = "blocked.example" };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.SaveProfileAsync(
+            new(changed), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(closingProfile), ExistingSessionId: closing.SessionId),
+            TestContext.Current.CancellationToken));
+
+        var other = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(otherProfile)), TestContext.Current.CancellationToken);
+        var durable = await fixture.Store.LoadAsync(TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(durable.EffectiveSessionTabs, tab => tab.SessionId == closing.SessionId);
+        Assert.Contains(durable.EffectiveSessionTabs, tab => tab.SessionId == other.SessionId);
+
+        fixture.ProcessHost.FailDisposeRole = null;
+        Assert.True(await fixture.Service.DisconnectAsync(
+            new(closing.SessionId), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ConnectAndDisconnectPersistenceFailuresLeaveTruthfulRuntimeState()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var blockedDirectory = BlockStateWrites(fixture);
+
+        await Assert.ThrowsAnyAsync<IOException>(() => fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken));
+        Assert.Empty((await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions);
+        Assert.Contains("browse", fixture.ProcessHost.DisposedRoles);
+
+        RestoreStateWrites(blockedDirectory);
+        var connected = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        blockedDirectory = BlockStateWrites(fixture);
+        await Assert.ThrowsAnyAsync<IOException>(() => fixture.Service.DisconnectAsync(
+            new(connected.SessionId), TestContext.Current.CancellationToken));
+        Assert.Contains((await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions,
+            session => session.SessionId == connected.SessionId && session.IsConnected);
+
+        RestoreStateWrites(blockedDirectory);
+        Assert.True(await fixture.Service.DisconnectAsync(
+            new(connected.SessionId), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task PanePersistenceFailureRollsBackBeforeBootstrapCanObserveLocation()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var connected = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var before = Assert.Single((await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions);
+        var changedLocal = Path.Combine(fixture.Directory.Path, "must-rollback");
+        Directory.CreateDirectory(changedLocal);
+        var blockedDirectory = BlockStateWrites(fixture);
+
+        await Assert.ThrowsAnyAsync<IOException>(() => fixture.Service.BrowseLocalAsync(
+            new(connected.SessionId, changedLocal), TestContext.Current.CancellationToken));
+        var after = Assert.Single((await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions);
+        Assert.Equal(before.LocalLocation.Path, after.LocalLocation.Path);
+
+        RestoreStateWrites(blockedDirectory);
+    }
+
+    [Fact]
+    public async Task FailedReconnectRollbackCleanupKeepsDescriptorUntilExplicitCloseCommits()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var connected = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var persisted = await fixture.Store.LoadAsync(TestContext.Current.CancellationToken);
+        await fixture.Service.DisposeAsync();
+
+        await using var restored = new AgentWorkspaceService(
+            fixture.Profiles,
+            fixture.Secrets,
+            fixture.HostKeyManager,
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.Jobs,
+            new MirrorPlanner(),
+            fixture.Options,
+            stateStore: fixture.Store);
+        await restored.RestoreSessionTabsAsync(
+            persisted.EffectiveSessionTabs, TestContext.Current.CancellationToken);
+        var blockedDirectory = BlockStateWrites(fixture);
+        fixture.ProcessHost.FailDisposeRole = "browse";
+        fixture.ProcessHost.RemainingDisposeFailures = 1;
+
+        var reconnectFailure = await Assert.ThrowsAsync<AggregateException>(() => restored.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile), ExistingSessionId: connected.SessionId),
+            TestContext.Current.CancellationToken));
+        Assert.Contains(reconnectFailure.InnerExceptions, static exception => exception is IOException);
+        Assert.Contains(reconnectFailure.InnerExceptions, static exception =>
+            exception is InvalidOperationException &&
+            exception.Message.Contains("simulated disposal failure", StringComparison.OrdinalIgnoreCase));
+        var disconnected = Assert.Single((await restored.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions);
+        Assert.Equal(connected.SessionId, disconnected.SessionId);
+        Assert.False(disconnected.IsConnected);
+
+        RestoreStateWrites(blockedDirectory);
+        fixture.ProcessHost.FailDisposeRole = null;
+        Assert.True(await restored.DisconnectAsync(
+            new(connected.SessionId), TestContext.Current.CancellationToken));
+        Assert.Empty((await restored.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions);
+        Assert.Empty((await fixture.Store.LoadAsync(TestContext.Current.CancellationToken)).EffectiveSessionTabs);
+    }
+
+    [Fact]
+    public async Task SftpRestorePrunesMissingProfileWithoutTrustCredentialOrNetworkAccess()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(profile, "stored-password"), TestContext.Current.CancellationToken);
+        _ = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var persisted = await fixture.Store.LoadAsync(TestContext.Current.CancellationToken);
+        await fixture.Service.DisposeAsync();
+        await fixture.Profiles.DeleteAsync(profile.Id, TestContext.Current.CancellationToken);
+        var startCount = fixture.ProcessHost.Starts.Count;
+        var secretReadCount = fixture.Secrets.GetCalls.Count;
+
+        await using var restored = new AgentWorkspaceService(
+            fixture.Profiles,
+            fixture.Secrets,
+            fixture.HostKeyManager,
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.Jobs,
+            new MirrorPlanner(),
+            fixture.Options,
+            stateStore: fixture.Store);
+        await restored.RestoreSessionTabsAsync(
+            persisted.EffectiveSessionTabs, TestContext.Current.CancellationToken);
+
+        Assert.Empty((await restored.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions);
+        Assert.Empty((await fixture.Store.LoadAsync(TestContext.Current.CancellationToken)).EffectiveSessionTabs);
+        Assert.Equal(startCount, fixture.ProcessHost.Starts.Count);
+        Assert.Equal(secretReadCount, fixture.Secrets.GetCalls.Count);
+    }
+
+    [Fact]
+    public async Task RestorePrunesTabWhosePersistedConnectionIdentityNoLongerMatchesProfile()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        _ = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var persisted = await fixture.Store.LoadAsync(TestContext.Current.CancellationToken);
+        await fixture.Service.DisposeAsync();
+        await fixture.Profiles.SaveAsync(
+            profile with { Host = "out-of-band-change.example" }, TestContext.Current.CancellationToken);
+        var startCount = fixture.ProcessHost.Starts.Count;
+
+        await using var restored = new AgentWorkspaceService(
+            fixture.Profiles,
+            fixture.Secrets,
+            fixture.HostKeyManager,
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.Jobs,
+            new MirrorPlanner(),
+            fixture.Options,
+            stateStore: fixture.Store);
+        await restored.RestoreSessionTabsAsync(
+            persisted.EffectiveSessionTabs, TestContext.Current.CancellationToken);
+
+        Assert.Empty((await restored.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions);
+        Assert.Empty((await fixture.Store.LoadAsync(TestContext.Current.CancellationToken)).EffectiveSessionTabs);
+        Assert.Equal(startCount, fixture.ProcessHost.Starts.Count);
+    }
+
+    [Fact]
+    public async Task ConcurrentPaneNavigationMergesBothLocationsIntoDurableTab()
+    {
+        await using var fixture = new WorkspaceFixture(persistSessionTabs: true);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var connected = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var localPath = Path.Combine(fixture.Directory.Path, "concurrent-local");
+        Directory.CreateDirectory(localPath);
+
+        await Task.WhenAll(
+            fixture.Service.BrowseLocalAsync(
+                new(connected.SessionId, localPath), TestContext.Current.CancellationToken),
+            fixture.Service.BrowseRemoteAsync(
+                new(connected.SessionId, "/remote"), TestContext.Current.CancellationToken));
+
+        var runtime = Assert.Single((await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken)).Sessions);
+        var durable = Assert.Single((await fixture.Store.LoadAsync(TestContext.Current.CancellationToken)).EffectiveSessionTabs);
+        Assert.Equal(Path.GetFullPath(localPath), runtime.LocalLocation.Path);
+        Assert.Equal("/remote", runtime.RemoteLocation.Path);
+        Assert.Equal(runtime.LocalLocation.Path, durable.LocalPath);
+        Assert.Equal(runtime.RemoteLocation.Path, durable.RemotePath);
+    }
+
+    [Fact]
     public async Task ProfileCredentialStaysInAgentAndConnectUsesHardenedLaunch()
     {
         await using var fixture = new WorkspaceFixture();
@@ -194,7 +550,7 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
-    public async Task FailedDisconnectCleanupRemainsRegisteredAndBlocksChangedHostKeyReplacement()
+    public async Task FailedDisconnectCleanupStaysTombstonedAndBlocksChangedHostKeyReplacement()
     {
         await using var fixture = new WorkspaceFixture();
         fixture.HostKeys.AutoTrust = false;
@@ -218,7 +574,7 @@ public sealed class WorkspaceTests
             new(session.SessionId), TestContext.Current.CancellationToken));
         Assert.Contains("simulated disposal failure", cleanupFailure.Message, StringComparison.OrdinalIgnoreCase);
         var bootstrap = await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken);
-        Assert.Contains(bootstrap.Sessions, candidate => candidate.SessionId == session.SessionId);
+        Assert.DoesNotContain(bootstrap.Sessions, candidate => candidate.SessionId == session.SessionId);
         var replacement = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveSftpHostKeyAsync(
             new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
             TestContext.Current.CancellationToken));
@@ -1715,7 +2071,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var now = DateTimeOffset.UtcNow;
         var mirror = new JobSnapshot(Guid.NewGuid(), JobKind.Mirror, Guid.NewGuid(), "Reviewed mirror", JobState.Failed,
-            now, now, Error: new("mirror-failed", "Changed after review"), RetryAvailable: true);
+            now, now, Error: new("mirror-failed", "Changed after review"));
         fixture.Jobs.Restore([mirror]);
 
         var error = await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.RetryJobAsync(
@@ -1749,7 +2105,7 @@ public sealed class WorkspaceTests
         Assert.Equal(JobState.Scheduled, durable.State);
         Assert.Equal(plan.RunAt, durable.RunAt);
         Assert.DoesNotContain("scheduled-secret",
-            await File.ReadAllTextAsync(Path.Combine(fixture.Directory.Path, "jobs.json"), TestContext.Current.CancellationToken),
+            await File.ReadAllTextAsync(fixture.StatePath, TestContext.Current.CancellationToken),
             StringComparison.Ordinal);
 
         time.Advance(TimeSpan.FromHours(1));
@@ -3751,6 +4107,20 @@ public sealed class WorkspaceTests
         }
     }
 
+    private static string BlockStateWrites(WorkspaceFixture fixture)
+    {
+        var directory = Path.GetDirectoryName(fixture.StatePath)!;
+        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        File.WriteAllText(directory, "This file deliberately blocks creation of the durable-state directory.");
+        return directory;
+    }
+
+    private static void RestoreStateWrites(string blockedDirectory)
+    {
+        if (File.Exists(blockedDirectory)) File.Delete(blockedDirectory);
+        Directory.CreateDirectory(blockedDirectory);
+    }
+
     private static void CreateDirectoryJunction(string linkPath, string targetPath)
     {
         using var process = Process.Start(new ProcessStartInfo
@@ -3773,7 +4143,8 @@ public sealed class WorkspaceTests
         public WorkspaceFixture(
             bool createService = true,
             TimeProvider? timeProvider = null,
-            string? durableStorePath = null)
+            string? durableStorePath = null,
+            bool persistSessionTabs = false)
         {
             Directory = new();
             Profiles = new();
@@ -3784,7 +4155,8 @@ public sealed class WorkspaceTests
             ProcessHost = new();
             Runtime = new();
             Jobs = new();
-            Store = new(durableStorePath ?? Path.Combine(Directory.Path, "jobs.json"));
+            StatePath = durableStorePath ?? Path.Combine(Directory.Path, "state", "agent-state.json");
+            Store = new(StatePath);
             Scheduler = new(Jobs, Store, timeProvider);
             Options = AgentWorkspaceOptions.CreateDefault(Directory.Path) with
             {
@@ -3795,7 +4167,17 @@ public sealed class WorkspaceTests
                 ConsoleTimeout = TimeSpan.FromSeconds(1),
             };
             Service = createService
-                ? new(Profiles, Secrets, HostKeyManager, ProcessHost, Runtime, Jobs, new MirrorPlanner(), Options, scheduler: Scheduler)
+                ? new(
+                    Profiles,
+                    Secrets,
+                    HostKeyManager,
+                    ProcessHost,
+                    Runtime,
+                    Jobs,
+                    new MirrorPlanner(),
+                    Options,
+                    scheduler: Scheduler,
+                    stateStore: persistSessionTabs ? Store : null)
                 : null!;
         }
 
@@ -3808,6 +4190,7 @@ public sealed class WorkspaceTests
         public FakeProcessHost ProcessHost { get; }
         public FakeRuntimeProvider Runtime { get; }
         public JobCoordinator Jobs { get; }
+        public string StatePath { get; }
         public DurableJobStore Store { get; }
         public RunOnceScheduler Scheduler { get; }
         public AgentWorkspaceOptions Options { get; }

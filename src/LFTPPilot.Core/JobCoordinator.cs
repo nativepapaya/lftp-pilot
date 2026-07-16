@@ -32,6 +32,7 @@ public sealed class JobCoordinator : IJobCoordinator
         if (job.Id == Guid.Empty) throw new ArgumentException("A job identifier is required.", nameof(job));
         if (job.State is not (JobState.Queued or JobState.Scheduled))
             throw new ArgumentException("New jobs must be queued or scheduled.", nameof(job));
+        JobSnapshotPolicy.ValidateForEnqueue(job, DateTimeOffset.UtcNow);
 
         lock (_gate)
         {
@@ -51,7 +52,14 @@ public sealed class JobCoordinator : IJobCoordinator
                 throw new InvalidOperationException($"A job cannot transition from {current.State} to {state}.");
             if (state == JobState.Failed && error is null)
                 throw new ArgumentException("A failed job requires an error.", nameof(error));
-            updated = current with { State = state, Status = status ?? current.Status, Error = error, UpdatedAt = DateTimeOffset.UtcNow };
+            updated = current with
+            {
+                State = state,
+                Status = status ?? current.Status,
+                Error = error,
+                UpdatedAt = NextUpdatedAt(current),
+            };
+            JobSnapshotPolicy.Validate(updated);
             _jobs[jobId] = updated;
         }
         PublishJobChanged(updated);
@@ -69,8 +77,9 @@ public sealed class JobCoordinator : IJobCoordinator
                 State = JobState.Cancelled,
                 Status = reason ?? "Cancelled",
                 Error = null,
-                UpdatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = NextUpdatedAt(job),
             };
+            JobSnapshotPolicy.Validate(updated);
             _jobs[jobId] = updated;
         }
         PublishJobChanged(updated);
@@ -92,8 +101,9 @@ public sealed class JobCoordinator : IJobCoordinator
                 Progress = null,
                 Status = status ?? "Retry queued.",
                 Error = null,
-                UpdatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = NextUpdatedAt(current),
             };
+            JobSnapshotPolicy.Validate(updated);
             _jobs[jobId] = updated;
         }
         PublishJobChanged(updated);
@@ -103,10 +113,22 @@ public sealed class JobCoordinator : IJobCoordinator
     public void Restore(IEnumerable<JobSnapshot> jobs)
     {
         ArgumentNullException.ThrowIfNull(jobs);
+        var snapshots = jobs.ToArray();
+        foreach (var snapshot in snapshots) JobSnapshotPolicy.Validate(snapshot);
+        if (snapshots.Select(static snapshot => snapshot.Id).Distinct().Count() != snapshots.Length)
+            throw new ArgumentException("Restored jobs cannot contain duplicate identifiers.", nameof(jobs));
         lock (_gate)
         {
-            foreach (var job in jobs) _jobs[job.Id] = job;
+            foreach (var job in snapshots) _jobs[job.Id] = job;
         }
+    }
+
+    private static DateTimeOffset NextUpdatedAt(JobSnapshot current)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (current.CreatedAt > now) now = current.CreatedAt;
+        if (current.UpdatedAt > now) now = current.UpdatedAt;
+        return now;
     }
 
     private void PublishJobChanged(JobSnapshot job)

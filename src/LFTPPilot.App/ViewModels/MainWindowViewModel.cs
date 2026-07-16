@@ -95,9 +95,7 @@ public sealed class MainWindowViewModel : ObservableObject
             RemoteTransfer.LoadProfiles(bootstrap.Profiles);
             await Mirror.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);
             await RemoteTransfer.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);
-            Sessions.Clear();
-            foreach (var seed in bootstrap.Sessions) AddSession(seed);
-            Console.LoadSessions(Sessions);
+            ApplySessionBootstrap(bootstrap.Sessions);
 
             if (requestedProfileId is Guid id)
             {
@@ -209,22 +207,96 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private void AddSession(Models.WorkspaceSessionSeed seed)
     {
+        var profile = Connections.Profiles.FirstOrDefault(candidate => candidate.Id == seed.Snapshot.ProfileId);
+        if (profile is null) return;
         var existing = Sessions.FirstOrDefault(session => session.SessionId == seed.Snapshot.SessionId);
         if (existing is not null)
         {
+            existing.ApplySeed(seed, profile);
             SelectedSession = existing;
             return;
         }
 
-        var profile = Connections.Profiles.FirstOrDefault(candidate => candidate.Id == seed.Snapshot.ProfileId);
-        if (profile is null) return;
+        var session = CreateSession(seed, profile);
+        Sessions.Add(session);
+        SelectedSession = session;
+        Console.LoadSessions(Sessions);
+    }
+
+    private void ApplySessionBootstrap(IReadOnlyList<Models.WorkspaceSessionSeed> seeds)
+    {
+        ArgumentNullException.ThrowIfNull(seeds);
+        var selectedSessionId = SelectedSession?.SessionId;
+        var seenSessionIds = new HashSet<Guid>();
+        var desiredSessionIds = new HashSet<Guid>();
+        var desired = new List<(Models.WorkspaceSessionSeed Seed, ConnectionProfile Profile)>();
+        foreach (var seed in seeds)
+        {
+            if (!seenSessionIds.Add(seed.Snapshot.SessionId))
+            {
+                Activity.Log.Insert(0, new(
+                    DateTimeOffset.Now,
+                    "Warning",
+                    "Session restore",
+                    $"The Agent returned duplicate saved tab {seed.Snapshot.SessionId}; only the first record was shown."));
+                continue;
+            }
+
+            var profile = Connections.Profiles.FirstOrDefault(candidate => candidate.Id == seed.Snapshot.ProfileId);
+            if (profile is null)
+            {
+                Activity.Log.Insert(0, new(
+                    DateTimeOffset.Now,
+                    "Warning",
+                    "Session restore",
+                    $"Saved tab {seed.Snapshot.SessionId} referenced a missing profile and was not shown."));
+                continue;
+            }
+            desiredSessionIds.Add(seed.Snapshot.SessionId);
+            desired.Add((seed, profile));
+        }
+
+        for (var desiredIndex = 0; desiredIndex < desired.Count; desiredIndex++)
+        {
+            var (seed, profile) = desired[desiredIndex];
+            var session = Sessions.FirstOrDefault(candidate => candidate.SessionId == seed.Snapshot.SessionId);
+            if (session is null)
+            {
+                session = CreateSession(seed, profile);
+                Sessions.Insert(desiredIndex, session);
+            }
+            else
+            {
+                session.ApplySeed(seed, profile);
+                var currentIndex = Sessions.IndexOf(session);
+                if (currentIndex != desiredIndex) Sessions.Move(currentIndex, desiredIndex);
+            }
+        }
+
+        for (var index = Sessions.Count - 1; index >= 0; index--)
+        {
+            if (!desiredSessionIds.Contains(Sessions[index].SessionId)) Sessions.RemoveAt(index);
+        }
+
+        SelectedSession = selectedSessionId is { } selectedId
+            ? Sessions.FirstOrDefault(candidate => candidate.SessionId == selectedId) ?? Sessions.FirstOrDefault()
+            : Sessions.FirstOrDefault();
+        Console.LoadSessions(Sessions);
+    }
+
+    private SessionViewModel CreateSession(Models.WorkspaceSessionSeed seed, ConnectionProfile profile)
+    {
         var session = new SessionViewModel(_agent, seed, profile);
         session.JobQueued += (_, job) => Activity.Add(job);
         session.TransferOutcomeUnconfirmed += (_, submission) => RememberUnconfirmedTransfer(submission);
-        Sessions.Add(session);
+        session.StateRefreshRequested += (_, _) => RequestStateRefresh();
+        session.PropertyChanged += (_, args) =>
+        {
+            if (string.Equals(args.PropertyName, nameof(SessionViewModel.IsConnected), StringComparison.Ordinal))
+                Console.LoadSessions(Sessions);
+        };
         ApplyTransferSubmissionGuard(session);
-        SelectedSession = session;
-        Console.LoadSessions(Sessions);
+        return session;
     }
 
     private void ReportError(Exception exception)
@@ -271,6 +343,10 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             Connections.Upsert(profile);
             foreach (var session in Sessions.Where(candidate => candidate.ProfileId == profile.Id)) session.UpdateProfile(profile);
+            // Identity-changing saves invalidate durable disconnected tabs in the
+            // Agent. A bootstrap is authoritative for both that removal and
+            // cosmetic profile updates that may race with this event.
+            RequestStateRefresh();
         }
         else if (engineEvent.Name is "profile.deleted" or "session.connected")
         {

@@ -47,14 +47,14 @@ public static class ProfileValidator
             issues.Add(new("sshKeyPath", "device-path", "Windows device-namespace SSH key paths are not supported."));
         if (profile.SshKeyPath is not null && ContainsProtocolControl(profile.SshKeyPath))
             issues.Add(new("sshKeyPath", "control-character", "The SSH key path contains a prohibited control character."));
-        if (profile.InitialRemotePath is not null && !IsRemoteAbsolute(profile.InitialRemotePath))
-            issues.Add(new("initialRemotePath", "absolute", "The initial remote path must begin with '/'."));
+        if (profile.InitialRemotePath is not null && !IsCanonicalRemotePath(profile.InitialRemotePath))
+            issues.Add(new("initialRemotePath", "absolute", "The initial remote path must be a bounded canonical path beginning with '/'."));
         if (profile.InitialLocalPath is not null && !Path.IsPathFullyQualified(profile.InitialLocalPath))
             issues.Add(new("initialLocalPath", "absolute", "The initial local path must be fully qualified."));
         foreach (var bookmark in profile.EffectiveBookmarks)
         {
-            if (string.IsNullOrWhiteSpace(bookmark) || bookmark.Length > 4096 || !IsRemoteAbsolute(bookmark))
-                issues.Add(new("bookmarks", "format", "Bookmarks must be non-empty absolute remote paths."));
+            if (!IsCanonicalRemotePath(bookmark))
+                issues.Add(new("bookmarks", "format", "Bookmarks must be bounded canonical remote paths."));
         }
 
         return issues.ToImmutable();
@@ -77,6 +77,13 @@ public static class ProfileValidator
     internal static bool ContainsProtocolControl(string value) => value.IndexOfAny(['\0', '\r', '\n']) >= 0;
 
     internal static bool IsRemoteAbsolute(string value) => value.StartsWith("/", StringComparison.Ordinal) && !ContainsProtocolControl(value);
+
+    public static bool IsCanonicalRemotePath(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && value.Length <= 4096 && IsRemoteAbsolute(value) &&
+        !value.Contains("//", StringComparison.Ordinal) &&
+        !value.Split('/', StringSplitOptions.None).Any(static segment => segment is "." or "..") &&
+        value.Split('/', StringSplitOptions.RemoveEmptyEntries).Length <= 128 &&
+        (value.Length == 1 || !value.EndsWith("/", StringComparison.Ordinal));
 
     private static bool IsWindowsDevicePath(string value)
     {
@@ -144,7 +151,7 @@ public static class PlanValidator
         if (definition.ProfileId == Guid.Empty) issues.Add(new("profileId", "required", "The profile identifier cannot be empty."));
         ValidateLocalMirrorRoot(definition.LocalRoot, issues);
         ValidateRemoteMirrorRoot(definition.RemoteRoot, issues);
-        ValidatePath(definition.Name, "name", issues);
+        ValidateMirrorName(definition.Name, issues);
         if (!Enum.IsDefined(definition.Direction)) issues.Add(new("direction", "unsupported", "The mirror direction is not supported."));
         if (definition.ParallelFiles is < 1 or > 16) issues.Add(new("parallelFiles", "range", "Parallel files must be between 1 and 16."));
         if (definition.SegmentsPerFile is < 1 or > 64) issues.Add(new("segmentsPerFile", "range", "Segments per file must be between 1 and 64."));
@@ -233,6 +240,19 @@ public static class PlanValidator
     {
         if (string.IsNullOrWhiteSpace(value)) issues.Add(new(field, "required", $"{field} is required."));
         else if (ProfileValidator.ContainsProtocolControl(value)) issues.Add(new(field, "control-character", $"{field} contains a prohibited control character."));
+    }
+
+    private static void ValidateMirrorName(string? value, ICollection<ValidationIssue> issues)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            issues.Add(new("name", "required", "name is required."));
+        else
+        {
+            if (value.Length > JobSnapshotPolicy.MaximumDisplayNameLength)
+                issues.Add(new("name", "length", $"name cannot exceed {JobSnapshotPolicy.MaximumDisplayNameLength} characters."));
+            if (JobSnapshotPolicy.ContainsControlCharacter(value))
+                issues.Add(new("name", "control-character", "name contains a prohibited control character."));
+        }
     }
 }
 

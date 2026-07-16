@@ -35,10 +35,15 @@ public sealed class SessionRegistry : IAsyncDisposable
     private readonly SftpHostKeyManager _hostKeys;
     private readonly AgentWorkspaceOptions _options;
     private readonly ConcurrentDictionary<Guid, WorkspaceSession> _sessions = [];
+    private readonly ConcurrentDictionary<Guid, PersistedSessionTab> _disconnectedTabs = [];
+    private readonly ConcurrentDictionary<Guid, string> _disconnectedDisplayNames = [];
+    private readonly ConcurrentDictionary<Guid, WorkspaceSession> _closingSessions = [];
     private readonly object _lifecycleGate = new();
+    private readonly Dictionary<Guid, TaskCompletionSource<SessionSnapshot>> _reconnectsInFlight = [];
     private TaskCompletionSource? _connectsDrained;
     private TaskCompletionSource? _disposeCompletion;
     private int _connectsInFlight;
+    private int _nextTabOrder;
     private volatile bool _closing;
 
     public SessionRegistry(
@@ -61,16 +66,55 @@ public sealed class SessionRegistry : IAsyncDisposable
     }
 
     public IReadOnlyList<SessionSnapshot> GetSnapshots() => _sessions.Values
-        .Select(static session => session.Snapshot)
-        .OrderBy(static session => session.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+        .Select(static session => (session.Snapshot, session.TabOrder))
+        .Concat(_disconnectedTabs.Values.Select(tab => (CreateDisconnectedSnapshot(tab), tab.Order)))
+        .OrderBy(static item => item.Item2)
+        .Select(static item => item.Item1)
         .ToArray();
+
+    internal IReadOnlyList<PersistedSessionTab> GetPersistedTabs() => _sessions.Values
+        .Select(static session => session.ToPersistedTab())
+        .Concat(_disconnectedTabs.Values)
+        .OrderBy(static tab => tab.Order)
+        .ToArray();
+
+    internal void RestoreTabs(
+        IEnumerable<PersistedSessionTab> tabs,
+        IReadOnlyDictionary<Guid, ConnectionProfile> profiles)
+    {
+        ArgumentNullException.ThrowIfNull(tabs);
+        ArgumentNullException.ThrowIfNull(profiles);
+        lock (_lifecycleGate)
+        {
+            ObjectDisposedException.ThrowIf(_closing, this);
+            if (_sessions.Count != 0 || _disconnectedTabs.Count != 0 || _reconnectsInFlight.Count != 0)
+                throw new InvalidOperationException("Session tabs can only be restored into an empty registry.");
+            var maximumOrder = -1;
+            foreach (var tab in tabs.OrderBy(static tab => tab.Order))
+            {
+                if (!profiles.TryGetValue(tab.ProfileId, out var profile) ||
+                    ConnectionIdentity.FromProfile(profile) != tab.IdentityAtSave)
+                {
+                    continue;
+                }
+                if (!_disconnectedTabs.TryAdd(tab.SessionId, tab))
+                    throw new InvalidDataException("The durable session-tab state contains a duplicate identifier.");
+                _disconnectedDisplayNames[tab.SessionId] = profile.Name;
+                maximumOrder = Math.Max(maximumOrder, tab.Order);
+            }
+            _nextTabOrder = maximumOrder + 1;
+        }
+    }
 
     internal WorkspaceSession Get(Guid sessionId)
     {
         ObjectDisposedException.ThrowIf(_closing, this);
-        return _sessions.TryGetValue(sessionId, out var session)
-            ? session
-            : throw new KeyNotFoundException($"Session {sessionId} was not found.");
+        if (_sessions.TryGetValue(sessionId, out var session)) return session;
+        if (_closingSessions.ContainsKey(sessionId))
+            throw new InvalidOperationException($"Session {sessionId} is closing and cannot accept new operations.");
+        if (_disconnectedTabs.ContainsKey(sessionId))
+            throw new InvalidOperationException($"Session tab {sessionId} is disconnected and must be reconnected before remote operations can run.");
+        throw new KeyNotFoundException($"Session {sessionId} was not found.");
     }
 
     internal WorkspaceSession GetActive(Guid sessionId)
@@ -87,66 +131,270 @@ public sealed class SessionRegistry : IAsyncDisposable
         .FirstOrDefault()
         ?? throw new InvalidOperationException($"Profile {profileId} must be actively connected before starting a remote-to-remote transfer.");
 
+    internal bool HasClosingProfile(Guid profileId) =>
+        _closingSessions.Values.Any(session => session.Profile.Id == profileId);
+
+    internal WorkspaceSession? GetClosing(Guid sessionId) =>
+        _closingSessions.TryGetValue(sessionId, out var session) ? session : null;
+
+    internal SessionSnapshot? GetActiveSnapshot(Guid sessionId, ConnectionIdentity expectedIdentity)
+    {
+        lock (_lifecycleGate)
+        {
+            ObjectDisposedException.ThrowIf(_closing, this);
+            if (_closingSessions.ContainsKey(sessionId))
+                throw new InvalidOperationException("The session is still closing and cannot be reconnected yet.");
+            if (!_sessions.TryGetValue(sessionId, out var active)) return null;
+            if (active.IdentityAtSave != expectedIdentity)
+                throw new InvalidOperationException("The active session does not match the requested profile identity.");
+            return active.Snapshot;
+        }
+    }
+
     public async Task<SessionSnapshot> ConnectAsync(ConnectionProfile profile, string? credential, CancellationToken cancellationToken = default)
+    {
+        var result = await ConnectAsync(profile, credential, existingSessionId: null, cancellationToken).ConfigureAwait(false);
+        return result.Snapshot;
+    }
+
+    internal async Task<SessionConnectionResult> ConnectAsync(
+        ConnectionProfile profile,
+        string? credential,
+        Guid? existingSessionId,
+        CancellationToken cancellationToken = default)
     {
         ProfileValidator.ThrowIfInvalid(profile);
         using var reservation = AcquireConnectReservation();
-        var id = Guid.NewGuid();
-        var browse = await StartConnectedProcessAsync(id, profile, credential, "browse", cancellationToken).ConfigureAwait(false);
-        var localPath = !string.IsNullOrWhiteSpace(profile.InitialLocalPath) && Directory.Exists(profile.InitialLocalPath)
-            ? profile.InitialLocalPath
-            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var remotePath = string.IsNullOrWhiteSpace(profile.InitialRemotePath) ? "/" : profile.InitialRemotePath;
-        var snapshot = new SessionSnapshot(id, profile.Id, profile.Name, true, new(PaneKind.Local, localPath), new(PaneKind.Remote, remotePath), DateTimeOffset.UtcNow);
-        var session = new WorkspaceSession(this, profile, credential, browse, snapshot);
-        bool accepted;
+        var identity = ConnectionIdentity.FromProfile(profile);
+        var id = existingSessionId ?? Guid.NewGuid();
+        PersistedSessionTab? replacedTab = null;
+        Task<SessionSnapshot>? concurrentReconnect = null;
+        TaskCompletionSource<SessionSnapshot>? reconnectCompletion = null;
+        var tabOrder = -1;
+        var localPath = string.Empty;
+        var remotePath = string.Empty;
+
         lock (_lifecycleGate)
         {
-            accepted = !_closing;
-            if (!_sessions.TryAdd(id, session))
-                accepted = false;
+            ObjectDisposedException.ThrowIf(_closing, this);
+            if (existingSessionId is { } requestedId)
+            {
+                if (_closingSessions.ContainsKey(requestedId))
+                    throw new InvalidOperationException("The session is still closing and cannot be reconnected yet.");
+                if (_sessions.TryGetValue(requestedId, out var active))
+                {
+                    if (active.Profile.Id != profile.Id || active.IdentityAtSave != identity)
+                        throw new InvalidOperationException("The active session does not match the requested profile identity.");
+                    return new(active.Snapshot, null, IsNewRegistration: false);
+                }
+                if (_reconnectsInFlight.TryGetValue(requestedId, out var pending))
+                {
+                    concurrentReconnect = pending.Task;
+                }
+                else
+                {
+                    if (!_disconnectedTabs.TryGetValue(requestedId, out replacedTab))
+                        throw new KeyNotFoundException($"Disconnected session tab {requestedId} was not found.");
+                    if (replacedTab.ProfileId != profile.Id || replacedTab.IdentityAtSave != identity)
+                        throw new InvalidOperationException("The disconnected session tab does not match the requested profile identity.");
+                    tabOrder = replacedTab.Order;
+                    localPath = replacedTab.LocalPath;
+                    remotePath = replacedTab.RemotePath;
+                    reconnectCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _ = reconnectCompletion.Task.ContinueWith(
+                        static completed => _ = completed.Exception,
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted,
+                        TaskScheduler.Default);
+                    _reconnectsInFlight.Add(requestedId, reconnectCompletion);
+                }
+            }
+            else
+            {
+                if (_sessions.Count + _disconnectedTabs.Count + _closingSessions.Count + _reconnectsInFlight.Count >= DurableJobStore.MaximumSessionTabs)
+                    throw new InvalidOperationException($"No more than {DurableJobStore.MaximumSessionTabs} session tabs can be open.");
+                tabOrder = ReserveNextTabOrder();
+                localPath = !string.IsNullOrWhiteSpace(profile.InitialLocalPath) && Directory.Exists(profile.InitialLocalPath)
+                    ? Path.GetFullPath(profile.InitialLocalPath)
+                    : Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+                remotePath = NormalizeRemotePath(profile.InitialRemotePath);
+            }
         }
-        if (!accepted)
+
+        if (concurrentReconnect is not null)
         {
-            Exception? disposalError = null;
-            try
-            {
-                await session.DisposeAsync().ConfigureAwait(false);
-                TryRemoveSession(id, session);
-            }
-            catch (Exception exception)
-            {
-                disposalError = exception;
-            }
-            if (_closing)
-            {
-                var closed = new ObjectDisposedException(nameof(SessionRegistry), "The session registry closed before the connection could be registered.");
-                if (disposalError is not null)
-                    throw new AggregateException(closed.Message, closed, disposalError);
-                throw closed;
-            }
-            if (disposalError is not null) throw disposalError;
-            throw new InvalidOperationException("Could not register the connected session.");
+            var concurrentSnapshot = await concurrentReconnect.WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (concurrentSnapshot.ProfileId != profile.Id)
+                throw new InvalidOperationException("The concurrent reconnect completed for a different profile.");
+            return new(concurrentSnapshot, null, IsNewRegistration: false);
         }
-        return snapshot;
+
+        ILftpSession? browse = null;
+        WorkspaceSession? session = null;
+        try
+        {
+            browse = await StartConnectedProcessAsync(id, profile, credential, "browse", cancellationToken).ConfigureAwait(false);
+            var snapshot = new SessionSnapshot(
+                id,
+                profile.Id,
+                profile.Name,
+                true,
+                new(PaneKind.Local, localPath),
+                new(PaneKind.Remote, remotePath),
+                DateTimeOffset.UtcNow);
+            session = new WorkspaceSession(this, profile, identity, credential, browse, snapshot, tabOrder);
+            bool accepted;
+            lock (_lifecycleGate)
+            {
+                accepted = !_closing;
+                if (accepted && existingSessionId is not null)
+                {
+                    accepted = _disconnectedTabs.TryGetValue(id, out var currentTab) &&
+                        currentTab == replacedTab && _disconnectedTabs.TryRemove(id, out _);
+                    if (accepted) _disconnectedDisplayNames.TryRemove(id, out _);
+                }
+                if (accepted && !_sessions.TryAdd(id, session)) accepted = false;
+                if (existingSessionId is not null) _reconnectsInFlight.Remove(id);
+            }
+            if (!accepted)
+            {
+                if (existingSessionId is not null && replacedTab is not null)
+                    _disconnectedTabs.TryAdd(id, replacedTab);
+                throw new ObjectDisposedException(nameof(SessionRegistry),
+                    "The session registry closed or the tab changed before the connection could be registered.");
+            }
+            reconnectCompletion?.TrySetResult(snapshot);
+            return new(snapshot, replacedTab, IsNewRegistration: true);
+        }
+        catch (Exception exception)
+        {
+            lock (_lifecycleGate)
+            {
+                if (existingSessionId is not null) _reconnectsInFlight.Remove(id);
+            }
+            reconnectCompletion?.TrySetException(exception);
+            if (session is not null)
+            {
+                TryRemoveSession(id, session);
+                if (replacedTab is not null)
+                {
+                    _disconnectedTabs.TryAdd(id, replacedTab);
+                    _disconnectedDisplayNames[id] = profile.Name;
+                }
+            }
+            if (browse is not null)
+                try
+                {
+                    if (session is not null) await session.DisposeAsync().ConfigureAwait(false);
+                    else await browse.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception disposalException)
+                {
+                    throw new AggregateException("The failed connection process could not be stopped cleanly.", exception, disposalException);
+                }
+            throw;
+        }
     }
 
     public async Task<bool> DisconnectAsync(Guid sessionId)
     {
-        if (!_sessions.TryGetValue(sessionId, out var session)) return false;
+        if (GetClosing(sessionId) is { } closing)
+        {
+            await DisposeDetachedAsync(closing).ConfigureAwait(false);
+            return true;
+        }
+        var preparation = PrepareDisconnect(sessionId);
+        if (preparation is null) return false;
+        var detached = DetachDisconnect(preparation);
+        if (detached is null) return preparation.ActiveSession is null;
+        await DisposeDetachedAsync(detached).ConfigureAwait(false);
+        return true;
+    }
+
+    internal SessionDisconnectPreparation? PrepareDisconnect(Guid sessionId)
+    {
+        lock (_lifecycleGate)
+        {
+            ObjectDisposedException.ThrowIf(_closing, this);
+            if (_reconnectsInFlight.ContainsKey(sessionId))
+                throw new InvalidOperationException("The session tab is currently reconnecting.");
+            if (_disconnectedTabs.TryGetValue(sessionId, out var disconnected))
+                return new(disconnected, null);
+            return _sessions.TryGetValue(sessionId, out var session)
+                ? new(session.ToPersistedTab(), session)
+                : null;
+        }
+    }
+
+    internal IReadOnlyList<SessionDisconnectPreparation> PrepareDisconnectProfile(Guid profileId)
+    {
+        lock (_lifecycleGate)
+        {
+            ObjectDisposedException.ThrowIf(_closing, this);
+            if (_reconnectsInFlight.Keys.Any(id =>
+                _disconnectedTabs.TryGetValue(id, out var tab) && tab.ProfileId == profileId))
+            {
+                throw new InvalidOperationException("A profile session is currently reconnecting.");
+            }
+            return _sessions.Values.Where(session => session.Profile.Id == profileId)
+                .Select(session => new SessionDisconnectPreparation(session.ToPersistedTab(), session))
+                .Concat(_disconnectedTabs.Values.Where(tab => tab.ProfileId == profileId)
+                    .Select(static tab => new SessionDisconnectPreparation(tab, null)))
+                .OrderBy(static item => item.PersistedTab.Order)
+                .ToArray();
+        }
+    }
+
+    internal WorkspaceSession? DetachDisconnect(SessionDisconnectPreparation preparation)
+    {
+        ArgumentNullException.ThrowIfNull(preparation);
+        var sessionId = preparation.PersistedTab.SessionId;
+        lock (_lifecycleGate)
+        {
+            ObjectDisposedException.ThrowIf(_closing, this);
+            if (preparation.ActiveSession is null)
+            {
+                if (!_disconnectedTabs.TryGetValue(sessionId, out var current) || current != preparation.PersistedTab ||
+                    !_disconnectedTabs.TryRemove(sessionId, out _))
+                {
+                    throw new InvalidOperationException("The disconnected session tab changed before it could be detached.");
+                }
+                _disconnectedDisplayNames.TryRemove(sessionId, out _);
+                return null;
+            }
+
+            if (!_sessions.TryGetValue(sessionId, out var active) || !ReferenceEquals(active, preparation.ActiveSession) ||
+                _closingSessions.ContainsKey(sessionId))
+            {
+                throw new InvalidOperationException("The connected session changed before it could be detached.");
+            }
+            active.MarkClosing();
+            if (!_sessions.TryRemove(sessionId, out var removed) || !ReferenceEquals(removed, active) ||
+                !_closingSessions.TryAdd(sessionId, active))
+            {
+                throw new InvalidOperationException("The connected session could not be tombstoned for cleanup.");
+            }
+            return active;
+        }
+    }
+
+    internal async Task DisposeDetachedAsync(WorkspaceSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
         await session.DisposeAsync().ConfigureAwait(false);
-        return TryRemoveSession(sessionId, session);
+        _closingSessions.TryRemove(new KeyValuePair<Guid, WorkspaceSession>(session.Snapshot.SessionId, session));
     }
 
     public async Task DisconnectProfileAsync(Guid profileId)
     {
-        var ids = _sessions.Where(pair => pair.Value.Profile.Id == profileId).Select(static pair => pair.Key).ToArray();
+        var preparations = PrepareDisconnectProfile(profileId);
         var errors = new List<Exception>();
-        foreach (var id in ids)
+        foreach (var preparation in preparations)
         {
             try
             {
-                await DisconnectAsync(id).ConfigureAwait(false);
+                var detached = DetachDisconnect(preparation);
+                if (detached is not null) await DisposeDetachedAsync(detached).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException))
             {
@@ -155,6 +403,35 @@ public sealed class SessionRegistry : IAsyncDisposable
         }
         if (errors.Count == 1) throw errors[0];
         if (errors.Count > 1) throw new AggregateException("Multiple profile sessions failed to stop cleanly.", errors);
+    }
+
+    internal void RestoreDisconnectedTabs(IEnumerable<PersistedSessionTab> tabs, string? displayName = null)
+    {
+        ArgumentNullException.ThrowIfNull(tabs);
+        lock (_lifecycleGate)
+        {
+            ObjectDisposedException.ThrowIf(_closing, this);
+            foreach (var tab in tabs)
+            {
+                if (_sessions.ContainsKey(tab.SessionId) || !_disconnectedTabs.TryAdd(tab.SessionId, tab))
+                    throw new InvalidOperationException($"Session tab {tab.SessionId} could not be restored after a persistence failure.");
+                _disconnectedDisplayNames[tab.SessionId] = displayName ?? "Disconnected session";
+                _nextTabOrder = Math.Max(_nextTabOrder, tab.Order + 1);
+            }
+        }
+    }
+
+    internal async Task RollbackConnectionAsync(SessionConnectionResult connection)
+    {
+        if (!connection.IsNewRegistration) return;
+        if (!_sessions.TryGetValue(connection.Snapshot.SessionId, out var session))
+            throw new InvalidOperationException("The connected session could not be found for persistence rollback.");
+        var preparation = new SessionDisconnectPreparation(session.ToPersistedTab(), session);
+        var detached = DetachDisconnect(preparation)
+            ?? throw new InvalidOperationException("The connected session could not be detached for persistence rollback.");
+        if (connection.ReplacedTab is not null)
+            RestoreDisconnectedTabs([connection.ReplacedTab], connection.Snapshot.DisplayName);
+        await DisposeDetachedAsync(detached).ConfigureAwait(false);
     }
 
     internal Task<ILftpSession> StartAuxiliaryAsync(WorkspaceSession session, string role, CancellationToken cancellationToken) =>
@@ -297,6 +574,18 @@ public sealed class SessionRegistry : IAsyncDisposable
                     errors.Add(exception);
                 }
             }
+            foreach (var pair in _closingSessions.ToArray())
+            {
+                try
+                {
+                    await pair.Value.DisposeAsync().ConfigureAwait(false);
+                    _closingSessions.TryRemove(new KeyValuePair<Guid, WorkspaceSession>(pair.Key, pair.Value));
+                }
+                catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException))
+                {
+                    errors.Add(exception);
+                }
+            }
             if (errors.Count == 1) throw errors[0];
             if (errors.Count > 1) throw new AggregateException("Multiple workspace sessions failed to stop cleanly.", errors);
             completion.TrySetResult();
@@ -322,6 +611,48 @@ public sealed class SessionRegistry : IAsyncDisposable
         }
         drained?.TrySetResult();
     }
+
+    private int ReserveNextTabOrder()
+    {
+        var used = _sessions.Values.Select(static session => session.TabOrder)
+            .Concat(_disconnectedTabs.Values.Select(static tab => tab.Order))
+            .ToHashSet();
+        for (var candidate = Math.Max(0, _nextTabOrder); candidate < DurableJobStore.MaximumSessionTabs; candidate++)
+        {
+            if (!used.Contains(candidate))
+            {
+                _nextTabOrder = candidate + 1;
+                return candidate;
+            }
+        }
+        for (var candidate = 0; candidate < Math.Max(0, _nextTabOrder); candidate++)
+        {
+            if (!used.Contains(candidate)) return candidate;
+        }
+        throw new InvalidOperationException("No durable session-tab order is available.");
+    }
+
+    private static string NormalizeRemotePath(string? path)
+    {
+        var value = string.IsNullOrWhiteSpace(path) ? "/" : path;
+        if (!ProfileValidator.IsCanonicalRemotePath(value))
+        {
+            throw new ArgumentException("The initial remote path must be a canonical, bounded absolute path.", nameof(path));
+        }
+        return value;
+    }
+
+    private SessionSnapshot CreateDisconnectedSnapshot(PersistedSessionTab tab) => new(
+        tab.SessionId,
+        tab.ProfileId,
+        _disconnectedDisplayNames.TryGetValue(tab.SessionId, out var displayName) ? displayName : "Disconnected session",
+        false,
+        new(PaneKind.Local, tab.LocalPath),
+        new(PaneKind.Remote, tab.RemotePath),
+        DateTimeOffset.UtcNow,
+        tab.ReconnectRequested
+            ? new("agent-restarted", "Reconnect this restored tab to resume remote operations.", IsTransient: true)
+            : null);
 
     private bool TryRemoveSession(Guid sessionId, WorkspaceSession session)
     {
@@ -459,10 +790,20 @@ public sealed class SessionRegistry : IAsyncDisposable
     }
 }
 
+internal sealed record SessionConnectionResult(
+    SessionSnapshot Snapshot,
+    PersistedSessionTab? ReplacedTab,
+    bool IsNewRegistration);
+
+internal sealed record SessionDisconnectPreparation(
+    PersistedSessionTab PersistedTab,
+    WorkspaceSession? ActiveSession);
+
 internal sealed class WorkspaceSession : IAsyncDisposable
 {
     private readonly SessionRegistry _registry;
     private readonly object _lifecycleGate = new();
+    private readonly object _snapshotGate = new();
     private readonly SemaphoreSlim _roleGate = new(1, 1);
     private readonly SemaphoreSlim _transferOperationGate = new(1, 1);
     private readonly SemaphoreSlim _validationOperationGate = new(1, 1);
@@ -477,19 +818,48 @@ internal sealed class WorkspaceSession : IAsyncDisposable
     private int _activeOperations;
     private volatile bool _closing;
 
-    public WorkspaceSession(SessionRegistry registry, ConnectionProfile profile, string? credential, ILftpSession browse, SessionSnapshot snapshot)
+    public WorkspaceSession(
+        SessionRegistry registry,
+        ConnectionProfile profile,
+        ConnectionIdentity identityAtSave,
+        string? credential,
+        ILftpSession browse,
+        SessionSnapshot snapshot,
+        int tabOrder)
     {
         _registry = registry;
         Profile = profile;
+        IdentityAtSave = identityAtSave;
         Credential = credential;
         _browse = browse;
         _snapshot = snapshot;
+        TabOrder = tabOrder;
     }
 
     public ConnectionProfile Profile { get; }
+    public ConnectionIdentity IdentityAtSave { get; }
     public string? Credential { get; private set; }
+    public int TabOrder { get; }
     public SessionSnapshot Snapshot => Volatile.Read(ref _snapshot);
     public bool IsActive => !_closing && Snapshot.IsConnected && _browse.IsRunning;
+
+    public PersistedSessionTab ToPersistedTab()
+    {
+        var snapshot = Snapshot;
+        return new(
+            snapshot.SessionId,
+            snapshot.ProfileId,
+            IdentityAtSave,
+            Path.GetFullPath(snapshot.LocalLocation.Path),
+            snapshot.RemoteLocation.Path,
+            TabOrder,
+            ReconnectRequested: true);
+    }
+
+    internal void MarkClosing()
+    {
+        lock (_lifecycleGate) _closing = true;
+    }
 
     public void SetLocation(PaneKind kind, string path)
     {
@@ -499,11 +869,23 @@ internal sealed class WorkspaceSession : IAsyncDisposable
 
     private void SetLocationCore(PaneKind kind, string path)
     {
-        var snapshot = Snapshot;
-        var updated = kind == PaneKind.Local
-            ? snapshot with { LocalLocation = new(PaneKind.Local, path), UpdatedAt = DateTimeOffset.UtcNow }
-            : snapshot with { RemoteLocation = new(PaneKind.Remote, path), UpdatedAt = DateTimeOffset.UtcNow };
-        Volatile.Write(ref _snapshot, updated);
+        lock (_snapshotGate)
+        {
+            var snapshot = _snapshot;
+            var updated = kind == PaneKind.Local
+                ? snapshot with { LocalLocation = new(PaneKind.Local, path), UpdatedAt = DateTimeOffset.UtcNow }
+                : snapshot with { RemoteLocation = new(PaneKind.Remote, path), UpdatedAt = DateTimeOffset.UtcNow };
+            Volatile.Write(ref _snapshot, updated);
+        }
+    }
+
+    internal void RestoreSnapshot(SessionSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        using var lease = AcquireOperationLease();
+        if (snapshot.SessionId != Snapshot.SessionId || snapshot.ProfileId != Profile.Id)
+            throw new InvalidOperationException("A different session snapshot cannot be restored.");
+        lock (_snapshotGate) Volatile.Write(ref _snapshot, snapshot);
     }
 
     public async Task<T> WithBrowseSessionAsync<T>(

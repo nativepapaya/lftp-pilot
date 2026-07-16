@@ -205,6 +205,143 @@ public sealed class LiveAgentWorkspaceClientTests
     }
 
     [Fact]
+    public async Task DisconnectedBootstrapTabsRetainOrderAndPathsWithoutAnyBrowseRequest()
+    {
+        const int processId = 507;
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), "Restored FTP", ConnectionProtocol.Ftp, "example.test", 21, "user", AuthenticationKind.AskOnConnect);
+        var now = DateTimeOffset.UtcNow;
+        var first = new SessionSnapshot(
+            Guid.NewGuid(), profile.Id, profile.Name, false,
+            new(PaneKind.Local, @"C:\First"), new(PaneKind.Remote, "/first"), now,
+            new("agent-restarted", "The Agent restarted."));
+        var second = new SessionSnapshot(
+            Guid.NewGuid(), profile.Id, profile.Name, false,
+            new(PaneKind.Local, @"C:\Second"), new(PaneKind.Remote, "/second"), now,
+            new("credential-required", "Reconnect explicitly."));
+        var bootstrap = new WorkspaceBootstrap(
+            AgentProtocol.CurrentVersion,
+            new RuntimeStatus(true, true, "test"),
+            [profile],
+            [second, first],
+            [],
+            []);
+        var engine = new MutationReplyEngineClient(processId, "unused", new { }, bootstrap: bootstrap);
+        var client = CreateClient(engine, processId);
+        try
+        {
+            var workspace = await client.LoadAsync(TestContext.Current.CancellationToken);
+
+            Assert.Equal([second.SessionId, first.SessionId], workspace.Sessions.Select(static seed => seed.Snapshot.SessionId));
+            Assert.Equal(@"C:\Second", workspace.Sessions[0].Snapshot.LocalLocation.Path);
+            Assert.Equal("/second", workspace.Sessions[0].Snapshot.RemoteLocation.Path);
+            Assert.All(workspace.Sessions, seed =>
+            {
+                Assert.Empty(seed.LocalEntries);
+                Assert.Empty(seed.RemoteEntries);
+            });
+            Assert.Equal(0, engine.Attempts);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task InvalidDisconnectedBootstrapIdentityIsRejectedBeforeBrowse(bool duplicateSessionId)
+    {
+        const int processId = 508;
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), "Restored FTP", ConnectionProtocol.Ftp, "example.test", 21, "user", AuthenticationKind.Password);
+        var now = DateTimeOffset.UtcNow;
+        var first = new SessionSnapshot(
+            Guid.NewGuid(), profile.Id, profile.Name, false,
+            new(PaneKind.Local, @"C:\First"), new(PaneKind.Remote, "/first"), now);
+        var second = first with
+        {
+            SessionId = duplicateSessionId ? first.SessionId : Guid.NewGuid(),
+            ProfileId = duplicateSessionId ? profile.Id : Guid.NewGuid(),
+        };
+        var bootstrap = new WorkspaceBootstrap(
+            AgentProtocol.CurrentVersion,
+            new RuntimeStatus(true, true, "test"),
+            [profile],
+            [first, second],
+            [],
+            []);
+        var engine = new MutationReplyEngineClient(processId, "unused", new { }, bootstrap: bootstrap);
+        var client = CreateClient(engine, processId);
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                client.LoadAsync(TestContext.Current.CancellationToken));
+            Assert.Equal(0, engine.Attempts);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ExplicitReconnectSendsRestoredSessionIdAndRequiresExactIdInReply()
+    {
+        const int processId = 509;
+        var restoredSessionId = Guid.NewGuid();
+        var engine = new ConfirmedConnectBrowseFailureEngineClient(processId, returnedSessionId: restoredSessionId);
+        var client = CreateClient(engine, processId);
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), "Restored FTP", ConnectionProtocol.Ftp, "example.test", 21, "user", AuthenticationKind.AskOnConnect);
+        try
+        {
+            var seed = await client.ConnectAsync(
+                profile,
+                "once-only-secret",
+                TestContext.Current.CancellationToken,
+                existingSessionId: restoredSessionId);
+
+            Assert.Equal(restoredSessionId, seed.Snapshot.SessionId);
+            Assert.Equal(restoredSessionId, engine.LastConnectRequest?.ExistingSessionId);
+            Assert.Equal("once-only-secret", engine.LastConnectRequest?.EphemeralCredential);
+            Assert.Equal(1, engine.ConnectAttempts);
+            Assert.Equal(2, engine.BrowseAttempts);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ReconnectReplyForDifferentSessionIdIsAnUnknownMutationOutcome()
+    {
+        const int processId = 510;
+        var engine = new ConfirmedConnectBrowseFailureEngineClient(processId);
+        var client = CreateClient(engine, processId);
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), "Restored FTP", ConnectionProtocol.Ftp, "example.test", 21, "user", AuthenticationKind.Password);
+        try
+        {
+            var exception = await Assert.ThrowsAsync<AgentRequestOutcomeUnknownException>(() => client.ConnectAsync(
+                profile,
+                cancellationToken: TestContext.Current.CancellationToken,
+                existingSessionId: Guid.NewGuid()));
+
+            Assert.Equal(WorkspaceMethods.SessionConnect, exception.Method);
+            Assert.IsType<InvalidDataException>(exception.InnerException);
+            Assert.Equal(1, engine.ConnectAttempts);
+            Assert.Equal(0, engine.BrowseAttempts);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task MismatchedConnectSessionIsAnUnknownOutcomeBeforePaneHydration()
     {
         const int processId = 506;
@@ -795,15 +932,19 @@ public sealed class LiveAgentWorkspaceClientTests
         }
     }
 
-    private sealed class ConfirmedConnectBrowseFailureEngineClient(int processId, bool mismatchedProfile = false) : IEngineClient
+    private sealed class ConfirmedConnectBrowseFailureEngineClient(
+        int processId,
+        bool mismatchedProfile = false,
+        Guid? returnedSessionId = null) : IEngineClient
     {
-        private readonly Guid _sessionId = Guid.NewGuid();
+        private readonly Guid _sessionId = returnedSessionId ?? Guid.NewGuid();
         private int _browseAttempts;
         private int _connectAttempts;
         private int _disposed;
 
         public int BrowseAttempts => Volatile.Read(ref _browseAttempts);
         public int ConnectAttempts => Volatile.Read(ref _connectAttempts);
+        public SessionConnectRequest? LastConnectRequest { get; private set; }
 
         public Task<JsonElement> RequestAsync(
             string method,
@@ -828,6 +969,7 @@ public sealed class LiveAgentWorkspaceClientTests
             {
                 Interlocked.Increment(ref _connectAttempts);
                 var request = Assert.IsType<SessionConnectRequest>(payload);
+                LastConnectRequest = request;
                 var snapshot = new SessionSnapshot(
                     _sessionId,
                     mismatchedProfile ? Guid.NewGuid() : request.ExpectedIdentity.ProfileId,

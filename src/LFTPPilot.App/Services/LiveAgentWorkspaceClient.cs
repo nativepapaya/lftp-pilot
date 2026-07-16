@@ -113,10 +113,21 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         var bootstrap = await RequestAsync<WorkspaceBootstrap>(WorkspaceMethods.Bootstrap,
             cancellationToken: cancellationToken, retryOnDisconnect: true).ConfigureAwait(false);
         var sessions = new List<WorkspaceSessionSeed>();
+        var profileIds = bootstrap.Profiles.Select(static profile => profile.Id).ToHashSet();
+        var sessionIds = new HashSet<Guid>();
         foreach (var snapshot in bootstrap.Sessions)
         {
-            var local = await TryBrowseAsync(snapshot.SessionId, PaneKind.Local, snapshot.LocalLocation.Path, cancellationToken).ConfigureAwait(false);
-            var remote = await TryBrowseAsync(snapshot.SessionId, PaneKind.Remote, snapshot.RemoteLocation.Path, cancellationToken).ConfigureAwait(false);
+            ValidateBootstrapSession(snapshot);
+            if (!sessionIds.Add(snapshot.SessionId))
+                throw new InvalidDataException("The Agent returned duplicate persisted session identifiers.");
+            if (!profileIds.Contains(snapshot.ProfileId))
+                throw new InvalidDataException("The Agent returned a persisted session for a missing profile.");
+            var local = snapshot.IsConnected
+                ? await TryBrowseAsync(snapshot.SessionId, PaneKind.Local, snapshot.LocalLocation.Path, cancellationToken).ConfigureAwait(false)
+                : [];
+            var remote = snapshot.IsConnected
+                ? await TryBrowseAsync(snapshot.SessionId, PaneKind.Remote, snapshot.RemoteLocation.Path, cancellationToken).ConfigureAwait(false)
+                : [];
             sessions.Add(new(snapshot, local, remote));
         }
 
@@ -175,9 +186,15 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
             }).ConfigureAwait(false);
     }
 
-    public async Task<WorkspaceSessionSeed> ConnectAsync(ConnectionProfile profile, string? ephemeralCredential = null, CancellationToken cancellationToken = default)
+    public async Task<WorkspaceSessionSeed> ConnectAsync(
+        ConnectionProfile profile,
+        string? ephemeralCredential = null,
+        CancellationToken cancellationToken = default,
+        Guid? existingSessionId = null)
     {
         ArgumentNullException.ThrowIfNull(profile);
+        if (existingSessionId == Guid.Empty)
+            throw new ArgumentException("A restored session identifier cannot be empty.", nameof(existingSessionId));
         if (profile.Protocol == ConnectionProtocol.Sftp)
         {
             var inspection = await InspectSftpHostKeyAsync(profile, cancellationToken).ConfigureAwait(false);
@@ -186,11 +203,13 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         }
 
         var snapshot = await RequestAsync<SessionSnapshot>(WorkspaceMethods.SessionConnect,
-            new SessionConnectRequest(ConnectionIdentity.FromProfile(profile), ephemeralCredential), cancellationToken,
+            new SessionConnectRequest(ConnectionIdentity.FromProfile(profile), ephemeralCredential, existingSessionId), cancellationToken,
             retryOnDisconnect: false, semantics: RequestSemantics.Mutation,
             responseValidator: result =>
             {
-                if (result.SessionId == Guid.Empty || result.ProfileId != profile.Id || !result.IsConnected ||
+                if (result.SessionId == Guid.Empty ||
+                    existingSessionId is { } restoredSessionId && result.SessionId != restoredSessionId ||
+                    result.ProfileId != profile.Id || !result.IsConnected ||
                     string.IsNullOrWhiteSpace(result.DisplayName) ||
                     result.LocalLocation.Kind != PaneKind.Local || string.IsNullOrWhiteSpace(result.LocalLocation.Path) ||
                     result.RemoteLocation.Kind != PaneKind.Remote || string.IsNullOrWhiteSpace(result.RemoteLocation.Path))
@@ -682,7 +701,7 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
     {
         var workspace = await RequestAsync<WorkspaceBootstrap>(WorkspaceMethods.Bootstrap,
             cancellationToken: cancellationToken, retryOnDisconnect: true).ConfigureAwait(false);
-        return workspace.Sessions.FirstOrDefault(session => session.ProfileId == profileId)?.SessionId
+        return workspace.Sessions.FirstOrDefault(session => session.ProfileId == profileId && session.IsConnected)?.SessionId
             ?? throw new InvalidOperationException("Connect this profile before using the operation.");
     }
 
@@ -717,6 +736,18 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
             string.IsNullOrWhiteSpace(job.DisplayName) || job.CreatedAt == default || job.UpdatedAt == default)
         {
             throw new InvalidDataException("The Agent returned a job that did not match the submitted mutation.");
+        }
+    }
+
+    private static void ValidateBootstrapSession(SessionSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (snapshot.SessionId == Guid.Empty || snapshot.ProfileId == Guid.Empty ||
+            string.IsNullOrWhiteSpace(snapshot.DisplayName) ||
+            snapshot.LocalLocation.Kind != PaneKind.Local || string.IsNullOrWhiteSpace(snapshot.LocalLocation.Path) ||
+            snapshot.RemoteLocation.Kind != PaneKind.Remote || string.IsNullOrWhiteSpace(snapshot.RemoteLocation.Path))
+        {
+            throw new InvalidDataException("The Agent returned an invalid persisted session tab.");
         }
     }
 
