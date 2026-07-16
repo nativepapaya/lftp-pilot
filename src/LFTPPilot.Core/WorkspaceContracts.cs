@@ -21,6 +21,9 @@ public static class WorkspaceMethods
     public const string JobRetry = "jobs.retry";
     public const string MirrorPreview = "mirrors.preview";
     public const string MirrorApprove = "mirrors.approve";
+    public const string MirrorDefinitionList = "mirrors.definitions.list";
+    public const string MirrorDefinitionSave = "mirrors.definitions.save";
+    public const string MirrorDefinitionDelete = "mirrors.definitions.delete";
     public const string ConsoleExecute = "console.execute";
     public const string RemoteTransferPlan = "remoteTransfers.plan";
     public const string RemoteTransferEnqueue = "remoteTransfers.enqueue";
@@ -38,7 +41,10 @@ public sealed record WorkspaceBootstrap(
     ImmutableArray<ConnectionProfile> Profiles,
     ImmutableArray<SessionSnapshot> Sessions,
     ImmutableArray<JobSnapshot> Jobs,
-    ImmutableArray<RemoteEditSession> RemoteEdits);
+    ImmutableArray<RemoteEditSession> RemoteEdits)
+{
+    public ImmutableArray<MirrorDefinition> MirrorDefinitions { get; init; } = [];
+}
 
 public sealed record ProfileSaveRequest(ConnectionProfile Profile, string? Credential = null);
 public sealed record ProfileDeleteRequest(Guid ProfileId);
@@ -89,6 +95,8 @@ public sealed record TransferEnqueueRequest(Guid SessionId, TransferPlan Plan);
 public sealed record TransferEnqueueResult(JobSnapshot Job);
 public sealed record JobRetryRequest(Guid JobId);
 public sealed record JobRetryResult(JobSnapshot Job);
+public sealed record MirrorDefinitionSaveRequest(MirrorDefinition Definition);
+public sealed record MirrorDefinitionDeleteRequest(Guid DefinitionId);
 public sealed record MirrorPreviewRequest(Guid SessionId, MirrorDefinition Definition);
 public sealed record MirrorApproveRequest(
     Guid SessionId,

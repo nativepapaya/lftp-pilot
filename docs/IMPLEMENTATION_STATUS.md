@@ -73,6 +73,13 @@ still needs real servers, signed packages, or additional product development.
   work of the affected type while it reconciles a lost reply with the exact
   original ID. A deterministic fingerprint binds the exact ordered action list
   displayed by the App to the Agent-held preview before approval is consumed.
+- Reusable mirror definitions persist as bounded package-scoped data and are
+  selected, edited, saved, or deleted from the native Mirror surface. They
+  contain only validated planning inputs: previews, action lists, approval
+  tokens, deletion consent, fingerprints, and generated commands are never
+  durable. Definition and profile mutations revoke affected unconsumed
+  previews, and lost mutation replies block new mirror work until a fresh
+  Agent bootstrap reconciles the stable definition identifier.
 - Read-only isolated advanced console; local shell syntax and structured
   mutation/transfer commands are blocked.
 - Reviewed FTP-family remote-to-remote file plans and jobs prefer FXP with
@@ -114,7 +121,7 @@ still needs real servers, signed packages, or additional product development.
 - Exercise managed-cache editing, concurrent target changes, staging promotion,
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.
-- Save reusable mirror definitions and add non-modal recursive remote search.
+- Add non-modal recursive remote search.
 - Implement SFTP/mixed remote-to-remote client relay with distinct source and
   destination processes so each endpoint retains its own pinned host-key
   configuration.

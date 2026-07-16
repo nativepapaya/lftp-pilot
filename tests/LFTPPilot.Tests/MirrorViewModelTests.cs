@@ -10,6 +10,160 @@ namespace LFTPPilot.Tests;
 public sealed class MirrorViewModelTests
 {
     [Fact]
+    public async Task SavedDefinitionRoundTripPreservesIdentityPatternsAndPolicyLimits()
+    {
+        var profile = Profile();
+        var saved = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Saved upload", MirrorDirection.Upload,
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "/incoming",
+            Includes: ["release;candidate/**", " leading and trailing spaces /** "],
+            Excludes: ["*.tmp"], DeleteExtraneous: true, ParallelFiles: 4,
+            SegmentsPerFile: MirrorDefinitionPolicy.MaximumSegmentsPerFile,
+            RateLimitBytesPerSecond: MirrorDefinitionPolicy.MaximumRateLimitBytesPerSecond);
+        var agent = new ReplayGuardAgent(unknownOnFirst: false);
+        var viewModel = new MirrorViewModel(agent);
+        viewModel.LoadProfiles([profile]);
+        viewModel.LoadDefinitions([saved]);
+        viewModel.SelectedDefinition = saved;
+
+        Assert.Same(Assert.Single(viewModel.Profiles), viewModel.SelectedProfile);
+        Assert.Same(Assert.Single(viewModel.SavedDefinitions), viewModel.SelectedDefinition);
+        Assert.Equal(saved.Id, viewModel.SelectedDefinition?.Id);
+        Assert.Equal(string.Join(Environment.NewLine, saved.EffectiveIncludes), viewModel.Includes);
+        Assert.Equal(MirrorDefinitionPolicy.MaximumSegmentsPerFile, viewModel.SegmentsPerFile);
+        Assert.Equal(953674.31640625d, viewModel.RateLimitMibPerSecond);
+        viewModel.PreviewCommand.Execute(null);
+        await WaitUntilAsync(() => viewModel.HasPreview);
+        var firstPreview = Assert.Single(agent.PreviewedDefinitions);
+        Assert.Equal(saved.Id, firstPreview.Id);
+        Assert.Equal(saved.EffectiveIncludes, firstPreview.EffectiveIncludes);
+        Assert.Equal(MirrorDefinitionPolicy.MaximumSegmentsPerFile, firstPreview.SegmentsPerFile);
+        Assert.Equal(MirrorDefinitionPolicy.MaximumRateLimitBytesPerSecond, firstPreview.RateLimitBytesPerSecond);
+
+        viewModel.Name = "Saved upload v2";
+        Assert.False(viewModel.HasPreview);
+        Assert.False(viewModel.DeletionsApproved);
+        viewModel.SaveDefinitionCommand.Execute(null);
+        await WaitUntilAsync(() => agent.SaveCalls == 1 && viewModel.SaveDefinitionCommand.CanExecute(null));
+
+        var updated = Assert.Single(agent.SavedDefinitions.Values);
+        Assert.Equal(saved.Id, updated.Id);
+        Assert.Equal("Saved upload v2", updated.Name);
+        Assert.False(viewModel.HasPreview);
+        var selectedAfterUpdate = Assert.Single(viewModel.SavedDefinitions);
+        Assert.Same(selectedAfterUpdate, viewModel.SelectedDefinition);
+
+        viewModel.SaveDefinitionCommand.Execute(null);
+        await WaitUntilAsync(() => agent.SaveCalls == 2 && viewModel.SaveDefinitionCommand.CanExecute(null));
+        Assert.Same(selectedAfterUpdate, Assert.Single(viewModel.SavedDefinitions));
+        Assert.Same(selectedAfterUpdate, viewModel.SelectedDefinition);
+
+        var refreshedProfile = profile with { };
+        var refreshedDefinition = selectedAfterUpdate with { };
+        viewModel.LoadProfiles([refreshedProfile]);
+        viewModel.LoadDefinitions([refreshedDefinition]);
+        Assert.Same(Assert.Single(viewModel.Profiles), viewModel.SelectedProfile);
+        Assert.Same(Assert.Single(viewModel.SavedDefinitions), viewModel.SelectedDefinition);
+
+        viewModel.PreviewCommand.Execute(null);
+        await WaitUntilAsync(() => viewModel.HasPreview);
+        Assert.Equal(saved.Id, agent.PreviewedDefinitions[^1].Id);
+        Assert.Equal(saved.EffectiveIncludes, agent.PreviewedDefinitions[^1].EffectiveIncludes);
+        Assert.Equal(MirrorDefinitionPolicy.MaximumSegmentsPerFile, agent.PreviewedDefinitions[^1].SegmentsPerFile);
+        Assert.Equal(MirrorDefinitionPolicy.MaximumRateLimitBytesPerSecond, agent.PreviewedDefinitions[^1].RateLimitBytesPerSecond);
+
+        viewModel.DeleteDefinitionCommand.Execute(null);
+        await WaitUntilAsync(() => agent.DeleteCalls == 1 && viewModel.SelectedDefinition is null);
+        Assert.False(viewModel.HasPreview);
+        Assert.Empty(viewModel.SavedDefinitions);
+        Assert.Null(viewModel.SelectedDefinition);
+    }
+
+    [Fact]
+    public async Task DefinitionMutationDiscardsLatePreviewAndBlocksRunAfterUnknownSave()
+    {
+        var agent = new ReplayGuardAgent(
+            unknownOnFirst: false,
+            saveOutcomeUnknown: true,
+            holdSave: true,
+            holdPreview: true);
+        var viewModel = new MirrorViewModel(agent);
+        viewModel.LoadProfiles([Profile()]);
+        var refresh = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        viewModel.StateRefreshRequested += (_, _) => refresh.TrySetResult(true);
+
+        viewModel.PreviewCommand.Execute(null);
+        await agent.PreviewStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        viewModel.SaveDefinitionCommand.Execute(null);
+        await agent.SaveStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        Assert.False(viewModel.CanPreview);
+        Assert.False(viewModel.CanSaveDefinition);
+        Assert.False(viewModel.CanRun);
+        Assert.False(viewModel.NewDefinitionCommand.CanExecute(null));
+
+        agent.AllowPreviewCompletion.TrySetResult(true);
+        await WaitUntilAsync(() => viewModel.Status.Contains("not made available", StringComparison.OrdinalIgnoreCase));
+        Assert.False(viewModel.HasPreview);
+        Assert.False(viewModel.CanRun);
+
+        viewModel.PreviewCommand.Execute(null);
+        Assert.Equal(1, agent.PreviewCalls);
+
+        agent.AllowSaveCompletion.TrySetResult(true);
+        await refresh.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        Assert.False(viewModel.HasPreview);
+        Assert.False(viewModel.CanPreview);
+        Assert.False(viewModel.CanRun);
+        Assert.Contains("outcome is unknown", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task UnknownDefinitionSaveBlocksPreviewUntilBootstrapReconcilesTheStableDraftId()
+    {
+        var profile = Profile();
+        var agent = new ReplayGuardAgent(unknownOnFirst: false, saveOutcomeUnknown: true);
+        var viewModel = new MirrorViewModel(agent);
+        viewModel.LoadProfiles([profile]);
+        var refresh = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        viewModel.StateRefreshRequested += (_, _) => refresh.TrySetResult(true);
+
+        viewModel.SaveDefinitionCommand.Execute(null);
+        await refresh.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        Assert.False(viewModel.CanPreview);
+        Assert.False(viewModel.CanSaveDefinition);
+        var committed = Assert.Single(agent.SavedDefinitions.Values);
+        viewModel.LoadDefinitions([committed]);
+
+        Assert.True(viewModel.CanPreview);
+        Assert.Equal(committed.Id, viewModel.SelectedDefinition?.Id);
+        viewModel.PreviewCommand.Execute(null);
+        await WaitUntilAsync(() => viewModel.HasPreview);
+        Assert.Equal(committed.Id, Assert.Single(agent.PreviewedDefinitions).Id);
+    }
+
+    [Fact]
+    public async Task MissingPendingDefinitionAfterRefreshBecomesAnExplicitUnsavedDraft()
+    {
+        var agent = new ReplayGuardAgent(unknownOnFirst: false, saveOutcomeUnknown: true);
+        var viewModel = new MirrorViewModel(agent);
+        viewModel.LoadProfiles([Profile()]);
+        var refresh = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        viewModel.StateRefreshRequested += (_, _) => refresh.TrySetResult(true);
+
+        viewModel.SaveDefinitionCommand.Execute(null);
+        await refresh.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        viewModel.LoadDefinitions([]);
+
+        Assert.Null(viewModel.SelectedDefinition);
+        Assert.True(viewModel.CanSaveDefinition);
+        Assert.True(viewModel.CanPreview);
+        Assert.Contains("unsaved mirror", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("remain blocked", viewModel.Status, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task UnknownApprovalConsumesPreviewAndReconcilesOnlyTheSamePreviewId()
     {
         var profile = Profile();
@@ -237,22 +391,37 @@ public sealed class MirrorViewModelTests
     private sealed class ReplayGuardAgent(
         bool alwaysUnknown = false,
         Exception? reconciliationFailure = null,
-        bool unknownOnFirst = true) : IAgentWorkspaceClient
+        bool unknownOnFirst = true,
+        bool saveOutcomeUnknown = false,
+        bool holdSave = false,
+        bool holdPreview = false) : IAgentWorkspaceClient
     {
         public int PreviewCalls { get; private set; }
         public int ApproveCalls { get; private set; }
+        public int SaveCalls { get; private set; }
+        public int DeleteCalls { get; private set; }
         public List<Guid> ApprovedPreviewIds { get; } = [];
         public List<bool> DeletionApprovals { get; } = [];
+        public List<MirrorDefinition> PreviewedDefinitions { get; } = [];
+        public Dictionary<Guid, MirrorDefinition> SavedDefinitions { get; } = [];
+        public TaskCompletionSource<bool> PreviewStarted { get; } = NewSignal();
+        public TaskCompletionSource<bool> SaveStarted { get; } = NewSignal();
+        public TaskCompletionSource<bool> AllowPreviewCompletion { get; } = NewSignal();
+        public TaskCompletionSource<bool> AllowSaveCompletion { get; } = NewSignal();
         public bool IsConnected => true;
         public event EventHandler<EngineEvent>? EventReceived { add { } remove { } }
         public event EventHandler? StateInvalidated { add { } remove { } }
 
-        public Task<MirrorUiPreview> PreviewMirrorAsync(
+        public async Task<MirrorUiPreview> PreviewMirrorAsync(
             MirrorDefinition definition,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             PreviewCalls++;
+            PreviewedDefinitions.Add(definition);
+            PreviewStarted.TrySetResult(true);
+            if (holdPreview)
+                await AllowPreviewCompletion.Task.WaitAsync(cancellationToken);
             var now = DateTimeOffset.UtcNow;
             var preview = new MirrorPreview(
                 Guid.NewGuid(),
@@ -262,7 +431,7 @@ public sealed class MirrorViewModelTests
                 ImmutableArray.Create(new MirrorAction(MirrorActionKind.DeleteFile, "stale.txt")),
                 "test-fingerprint",
                 "test-approval-token");
-            return Task.FromResult(new MirrorUiPreview(definition, preview));
+            return new MirrorUiPreview(definition, preview);
         }
 
         public Task<JobSnapshot> ApproveMirrorAsync(
@@ -291,6 +460,34 @@ public sealed class MirrorViewModelTests
                 JobState.Queued,
                 now,
                 now));
+        }
+
+        public async Task<MirrorDefinition> SaveMirrorDefinitionAsync(
+            MirrorDefinition definition,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            SaveCalls++;
+            SaveStarted.TrySetResult(true);
+            if (holdSave)
+                await AllowSaveCompletion.Task.WaitAsync(cancellationToken);
+            SavedDefinitions[definition.Id] = definition;
+            if (saveOutcomeUnknown)
+            {
+                throw new AgentRequestOutcomeUnknownException(
+                    WorkspaceMethods.MirrorDefinitionSave,
+                    new IOException("simulated lost definition-save reply"));
+            }
+            return definition;
+        }
+
+        public Task<bool> DeleteMirrorDefinitionAsync(
+            Guid definitionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            DeleteCalls++;
+            return Task.FromResult(SavedDefinitions.Remove(definitionId));
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -322,6 +519,9 @@ public sealed class MirrorViewModelTests
         public Task StopAgentAsync(CancellationToken cancellationToken = default) => Unsupported<object?>();
         public Task<AppUpdateStatus> CheckForUpdatesAsync(CancellationToken cancellationToken = default) => Unsupported<AppUpdateStatus>();
         public Task OpenUpdateInstallerAsync(CancellationToken cancellationToken = default) => Unsupported<object?>();
+
+        private static TaskCompletionSource<bool> NewSignal() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         private static Task<T> Unsupported<T>() => Task.FromException<T>(new NotSupportedException());
     }

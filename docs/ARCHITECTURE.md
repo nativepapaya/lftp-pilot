@@ -53,6 +53,14 @@ the App while keeping both package trees read-only.
   preview envelope and ordered action list the App displayed. The Agent compares
   it to the stored preview before consumption, while its HMAC and fresh second
   dry run remain the execution-side authority.
+- Saved mirror definitions use a separate bounded, atomic package-scoped store
+  containing only validated planning inputs. Preview output, review
+  fingerprints, approval tokens, deletion consent, generated commands, and
+  execution state never enter that store. Definition and profile mutations
+  share the Agent's profile/trust gate with preview approval, revoke affected
+  unconsumed previews, and remove a profile's definitions before deleting its
+  metadata so an orphaned definition cannot later be rebound to a recreated
+  endpoint.
 - Remote editing accepts only a session and canonical remote file path; the
   Agent chooses the package-scoped cache path. Reviews bind strong local and
   remote identities, while dirty/watcher-failure state is returned in bootstrap

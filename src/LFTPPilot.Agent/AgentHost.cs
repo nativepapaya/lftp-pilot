@@ -40,7 +40,8 @@ public sealed partial class AgentHost : IAsyncDisposable
         ILftpRuntimeProvider? runtimeProvider = null,
         IMirrorPlanner? mirrorPlanner = null,
         AgentWorkspaceOptions? workspaceOptions = null,
-        Func<int, bool>? clientAuthorizer = null)
+        Func<int, bool>? clientAuthorizer = null,
+        IMirrorDefinitionStore? mirrorDefinitionStore = null)
     {
         _coordinator = new();
         _store = new(statePath);
@@ -55,7 +56,8 @@ public sealed partial class AgentHost : IAsyncDisposable
             _workspace = new(profileStore, secretStore!, hostKeyManager!, processHost!, runtimeProvider!, _coordinator, mirrorPlanner!, workspaceOptions!,
                 (kind, name, payload, jobId, sessionId) => _events.Publish(kind, name, payload, jobId, sessionId),
                 _scheduler,
-                _store);
+                _store,
+                mirrorDefinitionStore);
         }
     }
 

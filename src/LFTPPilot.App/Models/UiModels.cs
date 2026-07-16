@@ -15,7 +15,10 @@ public sealed record UiWorkspaceBootstrap(
     IReadOnlyList<HistoryRecord> History,
     IReadOnlyList<ActivityLogEntry> Log,
     bool IsDemoMode,
-    string AgentStatus);
+    string AgentStatus)
+{
+    public IReadOnlyList<MirrorDefinition> MirrorDefinitions { get; init; } = [];
+}
 
 public sealed record ActivityLogEntry(
     DateTimeOffset Timestamp,

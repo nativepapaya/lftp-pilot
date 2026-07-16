@@ -9,6 +9,7 @@ public sealed record PackageDataPaths(string LocalState, string LocalCache, stri
     public string HostKeys => Path.Combine(LocalState, "host-keys");
     public string Secrets => Path.Combine(LocalState, "secrets");
     public string History => Path.Combine(LocalState, "history");
+    public string MirrorDefinitions => Path.Combine(LocalState, "mirror-definitions");
     public string RuntimeHome => Path.Combine(LocalState, "lftp-home");
     public string RemoteEdits => Path.Combine(LocalCache, "remote-edits");
 
@@ -22,7 +23,7 @@ public sealed record PackageDataPaths(string LocalState, string LocalCache, stri
 
     public void EnsureCreated()
     {
-        foreach (string path in new[] { LocalState, LocalCache, Temporary, Profiles, HostKeys, Secrets, History, RuntimeHome, RemoteEdits })
+        foreach (string path in new[] { LocalState, LocalCache, Temporary, Profiles, HostKeys, Secrets, History, MirrorDefinitions, RuntimeHome, RemoteEdits })
             Directory.CreateDirectory(path);
     }
 

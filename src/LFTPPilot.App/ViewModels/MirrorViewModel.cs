@@ -11,15 +11,17 @@ public sealed class MirrorViewModel : ObservableObject
 {
     private readonly IAgentWorkspaceClient _agent;
     private ConnectionProfile? _selectedProfile;
+    private MirrorDefinition? _selectedDefinition;
     private MirrorDirection _direction = MirrorDirection.Upload;
     private string _name = "New mirror";
     private string _localRoot = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
     private string _remoteRoot = "/srv/releases";
     private string _includes = string.Empty;
-    private string _excludes = ".git/**;*.tmp";
+    private string _excludes = string.Join(Environment.NewLine, ".git/**", "*.tmp");
     private bool _deleteExtraneous;
     private int _parallelFiles = 2;
     private int _segmentsPerFile = 1;
+    private double _rateLimitMibPerSecond;
     private bool _deletionsApproved;
     private MirrorUiPreview? _currentPreview;
     private MirrorUiPreview? _uncertainPreview;
@@ -28,11 +30,18 @@ public sealed class MirrorViewModel : ObservableObject
     private bool _uncertainReconciliationAttempted;
     private int _previewRevision;
     private int _reconciliationInProgress;
+    private bool _definitionMutationInProgress;
+    private bool _definitionMutationUncertain;
+    private Guid? _pendingDefinitionId;
+    private Guid _draftDefinitionId = Guid.NewGuid();
     private string _status = "Create a dry-run preview before starting.";
 
     public MirrorViewModel(IAgentWorkspaceClient agent)
     {
         _agent = agent;
+        NewDefinitionCommand = new RelayCommand(_ => StartNewDefinition(), _ => !DefinitionInteractionBlocked);
+        SaveDefinitionCommand = new AsyncRelayCommand(_ => SaveDefinitionAsync(), _ => CanSaveDefinition, ReportError);
+        DeleteDefinitionCommand = new AsyncRelayCommand(_ => DeleteDefinitionAsync(), _ => CanDeleteDefinition, ReportError);
         PreviewCommand = new AsyncRelayCommand(_ => PreviewAsync(), _ => CanPreview, ReportError);
         RunCommand = new AsyncRelayCommand(_ => RunAsync(), _ => CanRun, ReportError);
     }
@@ -40,12 +49,39 @@ public sealed class MirrorViewModel : ObservableObject
     public event EventHandler<JobSnapshot>? JobQueued;
     public event EventHandler? StateRefreshRequested;
     public ObservableCollection<ConnectionProfile> Profiles { get; } = [];
+    public ObservableCollection<MirrorDefinition> SavedDefinitions { get; } = [];
     public ObservableCollection<MirrorAction> PreviewActions { get; } = [];
     public IReadOnlyList<MirrorDirection> Directions { get; } = Enum.GetValues<MirrorDirection>();
+    public RelayCommand NewDefinitionCommand { get; }
+    public AsyncRelayCommand SaveDefinitionCommand { get; }
+    public AsyncRelayCommand DeleteDefinitionCommand { get; }
     public AsyncRelayCommand PreviewCommand { get; }
     public AsyncRelayCommand RunCommand { get; }
 
-    public ConnectionProfile? SelectedProfile { get => _selectedProfile; set { if (SetProperty(ref _selectedProfile, value)) InvalidatePreview(); } }
+    public ConnectionProfile? SelectedProfile
+    {
+        get => _selectedProfile;
+        set
+        {
+            if (ReferenceEquals(_selectedProfile, value)) return;
+            _selectedProfile = value;
+            OnPropertyChanged();
+            InvalidatePreview();
+        }
+    }
+    public MirrorDefinition? SelectedDefinition
+    {
+        get => _selectedDefinition;
+        set
+        {
+            if (ReferenceEquals(_selectedDefinition, value)) return;
+            _selectedDefinition = value;
+            OnPropertyChanged();
+            InvalidatePreview();
+            if (value is not null) ApplyDefinition(value);
+            NotifyDefinitionCommands();
+        }
+    }
     public MirrorDirection Direction { get => _direction; set { if (SetProperty(ref _direction, value)) InvalidatePreview(); } }
     public string Name { get => _name; set { if (SetProperty(ref _name, value)) InvalidatePreview(); } }
     public string LocalRoot { get => _localRoot; set { if (SetProperty(ref _localRoot, value)) InvalidatePreview(); } }
@@ -54,14 +90,37 @@ public sealed class MirrorViewModel : ObservableObject
     public string Excludes { get => _excludes; set { if (SetProperty(ref _excludes, value)) InvalidatePreview(); } }
     public bool DeleteExtraneous { get => _deleteExtraneous; set { if (SetProperty(ref _deleteExtraneous, value)) InvalidatePreview(); } }
     public int ParallelFiles { get => _parallelFiles; set { if (SetProperty(ref _parallelFiles, Math.Clamp(value, 1, 16))) InvalidatePreview(); } }
-    public int SegmentsPerFile { get => _segmentsPerFile; set { if (SetProperty(ref _segmentsPerFile, Math.Clamp(value, 1, 16))) InvalidatePreview(); } }
+    public int SegmentsPerFile
+    {
+        get => _segmentsPerFile;
+        set
+        {
+            if (SetProperty(ref _segmentsPerFile, Math.Clamp(value, 1, MirrorDefinitionPolicy.MaximumSegmentsPerFile)))
+                InvalidatePreview();
+        }
+    }
+    public double RateLimitMibPerSecond
+    {
+        get => _rateLimitMibPerSecond;
+        set
+        {
+            var maximum = MirrorDefinitionPolicy.MaximumRateLimitBytesPerSecond / (1024d * 1024d);
+            var bounded = double.IsFinite(value) ? Math.Clamp(value, 0, maximum) : 0;
+            if (SetProperty(ref _rateLimitMibPerSecond, bounded)) InvalidatePreview();
+        }
+    }
     public bool DeletionsApproved { get => _deletionsApproved; set { if (SetProperty(ref _deletionsApproved, value)) { OnPropertyChanged(nameof(CanRun)); RunCommand.NotifyCanExecuteChanged(); } } }
     public string Status { get => _status; private set => SetProperty(ref _status, value); }
     public bool HasPreview => _currentPreview is not null;
     public bool RequiresDeletionApproval => _currentPreview is { } current &&
         (current.Definition.DeleteExtraneous || current.Preview.ContainsDeletions);
-    public bool CanPreview => !_awaitingWorkspaceResync && SelectedProfile is not null;
-    public bool CanRun => HasPreview && (!RequiresDeletionApproval || DeletionsApproved);
+    private bool DefinitionInteractionBlocked =>
+        _awaitingWorkspaceResync || _definitionMutationInProgress || _definitionMutationUncertain;
+    public bool CanSaveDefinition => !DefinitionInteractionBlocked && SelectedProfile is not null;
+    public bool CanDeleteDefinition => !DefinitionInteractionBlocked && SelectedDefinition is not null;
+    public bool CanPreview => !DefinitionInteractionBlocked && SelectedProfile is not null;
+    public bool CanRun => !DefinitionInteractionBlocked && HasPreview &&
+        (!RequiresDeletionApproval || DeletionsApproved);
 
     public void LoadProfiles(IEnumerable<ConnectionProfile> profiles)
     {
@@ -71,6 +130,32 @@ public sealed class MirrorViewModel : ObservableObject
         SelectedProfile = selectedId is { } id
             ? Profiles.FirstOrDefault(profile => profile.Id == id) ?? Profiles.FirstOrDefault()
             : Profiles.FirstOrDefault();
+        NotifyPreviewState();
+    }
+
+    public void LoadDefinitions(IEnumerable<MirrorDefinition> definitions)
+    {
+        ArgumentNullException.ThrowIfNull(definitions);
+        var mutationWasUncertain = _definitionMutationUncertain;
+        var selectedId = _pendingDefinitionId ?? SelectedDefinition?.Id;
+        var loaded = definitions.OrderBy(static definition => definition.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(static definition => definition.Id)
+            .ToArray();
+        foreach (var definition in loaded) PlanValidator.Validate(definition);
+        SavedDefinitions.Clear();
+        foreach (var definition in loaded) SavedDefinitions.Add(definition);
+        _definitionMutationUncertain = false;
+        _pendingDefinitionId = null;
+        SelectedDefinition = selectedId is { } id
+            ? SavedDefinitions.FirstOrDefault(definition => definition.Id == id)
+            : null;
+        if (mutationWasUncertain)
+        {
+            Status = SelectedDefinition is null
+                ? "Workspace refreshed. The uncertain saved-definition mutation left no saved definition; the current fields are now an unsaved mirror."
+                : "Workspace refreshed. The selected saved mirror reflects the Agent's authoritative state; create a fresh dry-run preview before running it.";
+        }
+        NotifyDefinitionCommands();
         NotifyPreviewState();
     }
 
@@ -133,19 +218,194 @@ public sealed class MirrorViewModel : ObservableObject
         ResolveUncertainApproval($"The Agent confirmed mirror job {job.Id}.");
     }
 
+    private void StartNewDefinition()
+    {
+        if (DefinitionInteractionBlocked) return;
+        ResetDefinitionEditor();
+        Status = "New unsaved mirror. Save it for reuse or create a fresh dry-run preview.";
+    }
+
+    private void ResetDefinitionEditor()
+    {
+        SelectedDefinition = null;
+        _draftDefinitionId = Guid.NewGuid();
+        Name = "New mirror";
+        Direction = MirrorDirection.Upload;
+        LocalRoot = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        RemoteRoot = "/srv/releases";
+        Includes = string.Empty;
+        Excludes = string.Join(Environment.NewLine, ".git/**", "*.tmp");
+        DeleteExtraneous = false;
+        ParallelFiles = 2;
+        SegmentsPerFile = 1;
+        RateLimitMibPerSecond = 0;
+        InvalidatePreview();
+    }
+
+    private async Task SaveDefinitionAsync()
+    {
+        if (!CanSaveDefinition || SelectedProfile is null) return;
+        var definition = BuildDefinition(SelectedDefinition?.Id ?? _draftDefinitionId);
+        PlanValidator.Validate(definition);
+        _definitionMutationInProgress = true;
+        InvalidatePreview();
+        _pendingDefinitionId = definition.Id;
+        Status = SelectedDefinition is null ? "Saving mirror definition..." : "Saving mirror definition changes...";
+        try
+        {
+            var saved = await _agent.SaveMirrorDefinitionAsync(definition).ConfigureAwait(true);
+            var savedItem = UpsertSavedDefinition(saved);
+            _pendingDefinitionId = null;
+            SelectedDefinition = savedItem;
+            Status = "Mirror definition saved. Create a fresh dry-run preview before running it.";
+        }
+        catch (AgentRequestOutcomeUnknownException exception)
+        {
+            MarkDefinitionMutationUncertain($"The save outcome is unknown. {exception.Message}");
+        }
+        catch (AgentRequestRejectedException exception)
+        {
+            _pendingDefinitionId = null;
+            Status = $"The Agent rejected the saved mirror definition. {exception.Message}";
+            NotifyDefinitionCommands();
+        }
+        finally
+        {
+            _definitionMutationInProgress = false;
+            if (!_definitionMutationUncertain) _pendingDefinitionId = null;
+            NotifyPreviewState();
+        }
+    }
+
+    private async Task DeleteDefinitionAsync()
+    {
+        if (!CanDeleteDefinition || SelectedDefinition is not { } definition) return;
+        _definitionMutationInProgress = true;
+        InvalidatePreview();
+        _pendingDefinitionId = definition.Id;
+        Status = "Deleting saved mirror definition...";
+        try
+        {
+            _ = await _agent.DeleteMirrorDefinitionAsync(definition.Id).ConfigureAwait(true);
+            var existing = SavedDefinitions.FirstOrDefault(item => item.Id == definition.Id);
+            if (existing is not null) SavedDefinitions.Remove(existing);
+            _pendingDefinitionId = null;
+            ResetDefinitionEditor();
+            Status = "Saved mirror definition deleted. Any earlier preview was discarded.";
+        }
+        catch (AgentRequestOutcomeUnknownException exception)
+        {
+            MarkDefinitionMutationUncertain($"The delete outcome is unknown. {exception.Message}");
+        }
+        catch (AgentRequestRejectedException exception)
+        {
+            _pendingDefinitionId = null;
+            Status = $"The Agent rejected the saved mirror deletion. {exception.Message}";
+            NotifyDefinitionCommands();
+        }
+        finally
+        {
+            _definitionMutationInProgress = false;
+            if (!_definitionMutationUncertain) _pendingDefinitionId = null;
+            NotifyPreviewState();
+        }
+    }
+
+    private void ApplyDefinition(MirrorDefinition definition)
+    {
+        SelectedProfile = Profiles.FirstOrDefault(profile => profile.Id == definition.ProfileId);
+        Name = definition.Name;
+        Direction = definition.Direction;
+        LocalRoot = definition.LocalRoot;
+        RemoteRoot = definition.RemoteRoot;
+        Includes = string.Join(Environment.NewLine, definition.EffectiveIncludes);
+        Excludes = string.Join(Environment.NewLine, definition.EffectiveExcludes);
+        DeleteExtraneous = definition.DeleteExtraneous;
+        ParallelFiles = definition.ParallelFiles;
+        SegmentsPerFile = definition.SegmentsPerFile;
+        RateLimitMibPerSecond = definition.RateLimitBytesPerSecond is { } rate
+            ? rate / (1024d * 1024d)
+            : 0;
+        InvalidatePreview();
+        if (!_awaitingWorkspaceResync)
+            Status = "Saved mirror loaded. Create a fresh dry-run preview before running it.";
+    }
+
+    private MirrorDefinition BuildDefinition(Guid id)
+    {
+        if (SelectedProfile is null) throw new InvalidOperationException("Select a connection for this mirror.");
+        long? rateLimit = null;
+        if (RateLimitMibPerSecond > 0)
+        {
+            var bytes = Math.Round(RateLimitMibPerSecond * 1024d * 1024d, MidpointRounding.AwayFromZero);
+            rateLimit = Math.Clamp((long)bytes, 1, MirrorDefinitionPolicy.MaximumRateLimitBytesPerSecond);
+        }
+        return new(
+            id,
+            SelectedProfile.Id,
+            Name.Trim(),
+            Direction,
+            LocalRoot.Trim(),
+            RemoteRoot.Trim(),
+            SplitPatterns(Includes),
+            SplitPatterns(Excludes),
+            DeleteExtraneous,
+            ParallelFiles,
+            SegmentsPerFile,
+            rateLimit);
+    }
+
+    private MirrorDefinition UpsertSavedDefinition(MirrorDefinition definition)
+    {
+        var previous = SavedDefinitions.FirstOrDefault(item => item.Id == definition.Id);
+        if (previous is not null && DefinitionsEqual(previous, definition)) return previous;
+        if (previous is not null) SavedDefinitions.Remove(previous);
+        var insertion = 0;
+        while (insertion < SavedDefinitions.Count &&
+            string.Compare(SavedDefinitions[insertion].Name, definition.Name, StringComparison.CurrentCultureIgnoreCase) <= 0)
+        {
+            insertion++;
+        }
+        SavedDefinitions.Insert(insertion, definition);
+        return definition;
+    }
+
+    private static bool DefinitionsEqual(MirrorDefinition left, MirrorDefinition right) =>
+        left.Id == right.Id &&
+        left.ProfileId == right.ProfileId &&
+        string.Equals(left.Name, right.Name, StringComparison.Ordinal) &&
+        left.Direction == right.Direction &&
+        string.Equals(left.LocalRoot, right.LocalRoot, StringComparison.Ordinal) &&
+        string.Equals(left.RemoteRoot, right.RemoteRoot, StringComparison.Ordinal) &&
+        left.EffectiveIncludes.SequenceEqual(right.EffectiveIncludes, StringComparer.Ordinal) &&
+        left.EffectiveExcludes.SequenceEqual(right.EffectiveExcludes, StringComparer.Ordinal) &&
+        left.DeleteExtraneous == right.DeleteExtraneous &&
+        left.ParallelFiles == right.ParallelFiles &&
+        left.SegmentsPerFile == right.SegmentsPerFile &&
+        left.RateLimitBytesPerSecond == right.RateLimitBytesPerSecond;
+
+    private void MarkDefinitionMutationUncertain(string status)
+    {
+        _definitionMutationUncertain = true;
+        InvalidatePreview();
+        Status = $"{status} Saved-definition actions and new previews remain blocked while workspace state is refreshed.";
+        NotifyPreviewState();
+        StateRefreshRequested?.Invoke(this, EventArgs.Empty);
+    }
+
     private async Task PreviewAsync()
     {
         if (!CanPreview || SelectedProfile is null) return;
         var revision = _previewRevision;
-        var definition = new MirrorDefinition(
-            Guid.NewGuid(), SelectedProfile.Id, Name.Trim(), Direction, LocalRoot.Trim(), RemoteRoot.Trim(),
-            SplitPatterns(Includes), SplitPatterns(Excludes), DeleteExtraneous, ParallelFiles, SegmentsPerFile);
+        var definition = BuildDefinition(SelectedDefinition?.Id ?? _draftDefinitionId);
         Status = "Running isolated LFTP dry run...";
         var preview = await _agent.PreviewMirrorAsync(definition).ConfigureAwait(true);
-        if (revision != _previewRevision || _awaitingWorkspaceResync)
+        if (revision != _previewRevision || DefinitionInteractionBlocked)
         {
             Status = _awaitingWorkspaceResync
                 ? "The mirror approval outcome is still unconfirmed. The newly returned dry run was not made available."
+                : DefinitionInteractionBlocked
+                    ? "Saved-definition state is changing or unconfirmed. The newly returned dry run was not made available."
                 : "Settings changed while the dry run was running. Create a fresh preview.";
             return;
         }
@@ -217,6 +477,14 @@ public sealed class MirrorViewModel : ObservableObject
         OnPropertyChanged(nameof(CanRun));
         PreviewCommand.NotifyCanExecuteChanged();
         RunCommand.NotifyCanExecuteChanged();
+        NotifyDefinitionCommands();
+    }
+
+    private void NotifyDefinitionCommands()
+    {
+        NewDefinitionCommand.NotifyCanExecuteChanged();
+        SaveDefinitionCommand.NotifyCanExecuteChanged();
+        DeleteDefinitionCommand.NotifyCanExecuteChanged();
     }
 
     private void ResolveUncertainApproval(string status)
@@ -271,7 +539,7 @@ public sealed class MirrorViewModel : ObservableObject
         OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException;
 
     private static ImmutableArray<string> SplitPatterns(string value) => value
-        .Split([';', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
         .ToImmutableArray();
 
     private void ReportError(Exception exception) => Status = exception.Message;

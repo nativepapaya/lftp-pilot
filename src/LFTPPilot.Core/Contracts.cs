@@ -44,6 +44,13 @@ public interface IMirrorPlanner
     string BuildExecutionCommand(MirrorDefinition definition, MirrorPreview preview, string? approvalToken, DateTimeOffset? now = null);
 }
 
+public interface IMirrorDefinitionStore
+{
+    Task<IReadOnlyList<MirrorDefinition>> GetAllAsync(CancellationToken cancellationToken = default);
+    Task SaveAsync(MirrorDefinition definition, CancellationToken cancellationToken = default);
+    Task DeleteAsync(Guid definitionId, CancellationToken cancellationToken = default);
+}
+
 public interface IProfileStore
 {
     Task<IReadOnlyList<ConnectionProfile>> GetAllAsync(CancellationToken cancellationToken = default);

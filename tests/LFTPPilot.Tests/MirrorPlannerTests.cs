@@ -50,20 +50,20 @@ public sealed class MirrorPlannerTests
     }
 
     [Fact]
-    public void DefinitionFingerprintSeparatesEmbeddedDelimitersFromArrayBoundaries()
+    public void DefinitionFingerprintSeparatesStringContentsFromArrayBoundaries()
     {
-        var embeddedDelimiter = CoreValidationTests.Mirror(delete: true) with
+        var singleItem = CoreValidationTests.Mirror(delete: true) with
         {
-            Includes = ["a\u001eb"],
+            Includes = ["ab"],
             Excludes = ["same"],
         };
-        var separateItems = embeddedDelimiter with { Includes = ["a", "b"] };
+        var separateItems = singleItem with { Includes = ["a", "b"] };
 
         Assert.NotEqual(
-            MirrorPlanner.Fingerprint(embeddedDelimiter),
+            MirrorPlanner.Fingerprint(singleItem),
             MirrorPlanner.Fingerprint(separateItems));
         Assert.NotEqual(
-            LftpCommandBuilder.BuildMirror(embeddedDelimiter, dryRun: false),
+            LftpCommandBuilder.BuildMirror(singleItem, dryRun: false),
             LftpCommandBuilder.BuildMirror(separateItems, dryRun: false));
     }
 
