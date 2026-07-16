@@ -51,7 +51,8 @@ public sealed class MirrorViewModel : ObservableObject
     public bool DeletionsApproved { get => _deletionsApproved; set { if (SetProperty(ref _deletionsApproved, value)) { OnPropertyChanged(nameof(CanRun)); RunCommand.NotifyCanExecuteChanged(); } } }
     public string Status { get => _status; private set => SetProperty(ref _status, value); }
     public bool HasPreview => _currentPreview is not null;
-    public bool RequiresDeletionApproval => _currentPreview?.Definition.DeleteExtraneous == true;
+    public bool RequiresDeletionApproval => _currentPreview is { } current &&
+        (current.Definition.DeleteExtraneous || current.Preview.ContainsDeletions);
     public bool CanRun => HasPreview && (!RequiresDeletionApproval || DeletionsApproved);
 
     public void LoadProfiles(IEnumerable<ConnectionProfile> profiles)

@@ -10,6 +10,9 @@ still needs real servers, signed packages, or additional product development.
 - Native WinUI 3 session tabs and virtualized dual file panes with sorting,
   multi-selection, synchronized resizable columns, keyboard actions, native
   context menus, inbound Explorer drag/drop, and per-profile Quick Access.
+  Internal drag/drop uses bounded, expiring opaque tokens and is accepted only
+  by the opposite pane in the same session; plain text and cross-session drops
+  cannot become transfer requests.
 - Structured local and remote create-directory, rename/move, and permanently
   delete operations. Deletion is confirmation-gated, and recursive directory
   deletion has a separate warning and choice.
@@ -24,15 +27,26 @@ still needs real servers, signed packages, or additional product development.
   redaction, and no credential-bearing process arguments.
 - LFTP-backed uploads/downloads, resume and skip policies, segmented `pget`,
   rate controls, per-profile native LFTP queues, cancellation-safe queue
-  retirement, explicit failed-transfer retry, mirror/reverse-mirror previews,
-  and multi-session concurrency. Retry is an Agent-owned, bounded operation:
+  retirement, typed regular-file and directory transfers, explicit
+  failed-transfer retry, mirror/reverse-mirror previews, and multi-session
+  concurrency. Folder transfers use non-pruning `mirror`/`mirror --reverse`
+  commands with no source or extraneous-target deletion options, skip nested
+  links, and replace changed plain files through LFTP temporary files without
+  timestamped backup debris or in-place hard-link writes. Skip and other
+  no-clobber jobs temporarily disable that mode so existing targets remain
+  protected. Folder jobs freshly validate endpoint kinds for immediate,
+  scheduled, and retried work. Each attempt receives an exact fresh dry run;
+  deletion, type-collision replacement, and root-wide jobs are redirected to
+  the separately reviewed Mirror workflow. Retry is an Agent-owned, bounded
+  operation:
   it revalidates the exact originating session and source/destination policy,
   waits for prior scheduled/active attempt cleanup, prevents duplicate
   submission, and clears stale retry capability after an Agent restart rather
   than persisting executable paths as job history.
-- Fresh mirror dry runs, bounded structured action parsing, explicit deletion
-  approval, definition binding, expiry, and an immediate second dry run before
-  a deletion-capable execution. Dry-run script text is never executed.
+- Fresh mirror dry runs, bounded case-exact structured action parsing, explicit
+  deletion approval, definition binding, expiry, and an immediate matching
+  second dry run plus endpoint validation before every execution. Dry-run
+  script text is never executed.
 - Read-only isolated advanced console; local shell syntax and structured
   mutation/transfer commands are blocked.
 - Reviewed remote-to-remote file plans and jobs. FTP-family pairs prefer FXP
@@ -72,8 +86,8 @@ still needs real servers, signed packages, or additional product development.
 - Save reusable mirror definitions and add non-modal recursive remote search.
 - Add the tray surface, idle-exit policy, transfer progress/history plumbing,
   and wire notifications, taskbar progress, Jump Lists, and support-bundle UI.
-- Complete outbound Explorer drag/drop for remote files and richer directory
-  transfer semantics.
+- Complete outbound Explorer drag/drop for remote files and add richer folder
+  transfer controls such as reusable filters and per-tree parallelism.
 - Independently review and stage the exact native and managed third-party
   license/redistribution/corresponding-source evidence, create the trusted-test
   certificate, then validate an

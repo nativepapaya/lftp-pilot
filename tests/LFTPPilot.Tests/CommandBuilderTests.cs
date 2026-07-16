@@ -50,6 +50,7 @@ public sealed class CommandBuilderTests
     {
         var command = LftpCommandBuilder.BuildMirror(CoreValidationTests.Mirror(), dryRun: true);
         Assert.Contains("--dry-run", command, StringComparison.Ordinal);
+        Assert.Contains("--no-symlinks --overwrite", command, StringComparison.Ordinal);
         Assert.Contains("--use-pget-n=3", command, StringComparison.Ordinal);
         Assert.Contains("\"/srv/data\" \"/c/Data\"", command, StringComparison.Ordinal);
         Assert.EndsWith("set net:limit-rate 0:0", command, StringComparison.Ordinal);
@@ -60,9 +61,27 @@ public sealed class CommandBuilderTests
     {
         var command = LftpCommandBuilder.BuildMirror(CoreValidationTests.Mirror(MirrorDirection.Upload), dryRun: false);
         Assert.Contains("--reverse", command, StringComparison.Ordinal);
+        Assert.Contains("--no-symlinks --overwrite", command, StringComparison.Ordinal);
         Assert.DoesNotContain("--use-pget-n", command, StringComparison.Ordinal);
         Assert.Contains("\"/c/Data\" \"/srv/data\"", command, StringComparison.Ordinal);
         Assert.EndsWith("set net:limit-rate 0:0", command, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(@"C:\", "/c")]
+    [InlineData(@"\\server\share\", "//server/share")]
+    public void MirrorWindowsRootsNeverEmitATrailingSlashThatAppendsTheSourceName(string localRoot, string expected)
+    {
+        var definition = CoreValidationTests.Mirror() with { LocalRoot = localRoot };
+
+        var download = LftpCommandBuilder.BuildMirror(definition, dryRun: true);
+        var upload = LftpCommandBuilder.BuildMirror(
+            definition with { Direction = MirrorDirection.Upload }, dryRun: true);
+
+        Assert.Contains($"\"/srv/data\" \"{expected}\"", download, StringComparison.Ordinal);
+        Assert.Contains($"\"{expected}\" \"/srv/data\"", upload, StringComparison.Ordinal);
+        Assert.DoesNotContain($"\"{expected}/\"", download, StringComparison.Ordinal);
+        Assert.DoesNotContain($"\"{expected}/\"", upload, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -79,7 +98,7 @@ public sealed class CommandBuilderTests
     {
         var plan = new TransferPlan(Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Download, "/remote.bin", @"C:\Out\remote.bin", TransferMode.Skip, 1, 4096);
         var command = LftpCommandBuilder.BuildTransfer(plan, background: false);
-        Assert.Equal("set net:limit-rate 4096:4096; set xfer:clobber no; get \"/remote.bin\" -o \"/c/Out/remote.bin\"; set xfer:clobber yes; set net:limit-rate 0:0", command);
+        Assert.Equal("set net:limit-rate 4096:4096; set xfer:use-temp-file no; set xfer:clobber no; get \"/remote.bin\" -o \"/c/Out/remote.bin\"; set xfer:clobber yes; set xfer:use-temp-file yes; set net:limit-rate 0:0", command);
         Assert.Throws<InvalidOperationException>(() => LftpCommandBuilder.BuildTransfer(plan, background: true));
     }
 
@@ -92,11 +111,12 @@ public sealed class CommandBuilderTests
         var command = LftpCommandBuilder.BuildQueuedTransfer(
             plan, "QUEUE_ALIAS", "QUEUE_OK", "QUEUE_FAILED", "SUBMIT_OK", "SUBMIT_FAILED");
 
-        Assert.StartsWith("alias QUEUE_ALIAS \"( ( set net:limit-rate 4096:4096 && set xfer:clobber no && get", command, StringComparison.Ordinal);
+        Assert.StartsWith("alias QUEUE_ALIAS \"( ( set net:limit-rate 4096:4096 && set xfer:use-temp-file no && set xfer:clobber no && get", command, StringComparison.Ordinal);
         Assert.Contains("; ( queue QUEUE_ALIAS && echo \"SUBMIT_OK\"", command, StringComparison.Ordinal);
         Assert.DoesNotContain("queue ( (", command, StringComparison.Ordinal);
         Assert.Equal(3, command.Split("set net:limit-rate 0:0", StringSplitOptions.None).Length);
         Assert.Equal(3, command.Split("set xfer:clobber yes", StringSplitOptions.None).Length);
+        Assert.Equal(3, command.Split("set xfer:use-temp-file yes", StringSplitOptions.None).Length);
         Assert.Contains("echo \\\"QUEUE_OK\\\"", command, StringComparison.Ordinal);
         Assert.Contains("echo \\\"QUEUE_FAILED\\\"", command, StringComparison.Ordinal);
         Assert.Equal(4, command.Split("alias QUEUE_ALIAS", StringSplitOptions.None).Length);
@@ -132,6 +152,72 @@ public sealed class CommandBuilderTests
     }
 
     [Fact]
+    public void DirectoryDownloadUsesGuardedMirrorWithoutExtraneousDeleteFlags()
+    {
+        var plan = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Download, "/remote folder", @"C:\Out\local folder",
+            TransferMode.Resume, Segments: 8, RateLimitBytesPerSecond: 4096, SourceKind: TransferSourceKind.Directory);
+
+        var command = LftpCommandBuilder.BuildTransfer(plan, background: false);
+
+        Assert.Equal(
+            "set net:limit-rate 4096:4096; mirror --continue --no-symlinks --overwrite --use-pget-n=8 \"/remote folder\" \"/c/Out/local folder\"; set net:limit-rate 0:0",
+            command);
+        AssertGuardedDirectoryMirrorCommand(command);
+    }
+
+    [Fact]
+    public void DirectoryUploadUsesGuardedReverseMirrorWithoutExtraneousDeleteFlags()
+    {
+        var plan = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Upload, @"C:\Source folder", "/remote folder",
+            SourceKind: TransferSourceKind.Directory);
+
+        var command = LftpCommandBuilder.BuildTransfer(plan, background: false);
+
+        Assert.Equal("mirror --reverse --no-symlinks --overwrite \"/c/Source folder\" \"/remote folder\"", command);
+        AssertGuardedDirectoryMirrorCommand(command);
+    }
+
+    [Fact]
+    public void DirectoryTransferPreviewMatchesProductionCoreWithoutRateMutation()
+    {
+        var plan = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Upload, @"C:\Source folder\", "/remote folder",
+            TransferMode.Resume, RateLimitBytesPerSecond: 4096, SourceKind: TransferSourceKind.Directory);
+
+        var command = LftpCommandBuilder.BuildDirectoryTransferPreview(plan);
+
+        Assert.Equal(
+            "mirror --verbose=1 --dry-run --reverse --continue --no-symlinks --overwrite \"/c/Source folder\" \"/remote folder\"",
+            command);
+        Assert.DoesNotContain("net:limit-rate", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("--script", command, StringComparison.Ordinal);
+        AssertGuardedDirectoryMirrorCommand(command);
+
+        var download = plan with
+        {
+            Direction = TransferDirection.Download,
+            SourcePath = "/remote folder",
+            DestinationPath = @"C:\Destination folder\",
+            Segments = 8,
+        };
+        var downloadCommand = LftpCommandBuilder.BuildDirectoryTransferPreview(download);
+        Assert.Contains("--use-pget-n=8", downloadCommand, StringComparison.Ordinal);
+        Assert.Contains("\"/c/Destination folder\"", downloadCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"/c/Destination folder/\"", downloadCommand, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DirectoryTransferPreviewRejectsFilePlans()
+    {
+        var plan = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Download, "/remote.bin", @"C:\Out\remote.bin");
+
+        Assert.Throws<ArgumentException>(() => LftpCommandBuilder.BuildDirectoryTransferPreview(plan));
+    }
+
+    [Fact]
     public void StructuredFileMutationsQuotePathsAndSelectNonRecursiveDeletionByDefault()
     {
         Assert.Equal("mkdir -p \"/new directory\"", LftpCommandBuilder.BuildCreateDirectory("/new directory"));
@@ -139,6 +225,15 @@ public sealed class CommandBuilderTests
         Assert.Equal("rm \"/file.txt\"", LftpCommandBuilder.BuildDelete("/file.txt", isDirectory: false, recursive: true));
         Assert.Equal("rmdir \"/empty\"", LftpCommandBuilder.BuildDelete("/empty", isDirectory: true, recursive: false));
         Assert.Equal("rm -r \"/tree\"", LftpCommandBuilder.BuildDelete("/tree", isDirectory: true, recursive: true));
+    }
+
+    private static void AssertGuardedDirectoryMirrorCommand(string command)
+    {
+        Assert.Contains("--no-symlinks", command, StringComparison.Ordinal);
+        Assert.Contains("--overwrite", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("--delete", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("--Remove-source", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("--Move", command, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -161,7 +256,7 @@ public sealed class CommandBuilderTests
         var relay = fxp with { Id = Guid.NewGuid(), Mode = RemoteTransferMode.ClientRelay, Overwrite = true };
 
         Assert.Equal(
-            "set ftp:use-fxp true; set xfer:clobber no; get \"slot:source/source file.bin\" -o \"slot:destination/target.bin\"",
+            "set ftp:use-fxp true; set xfer:use-temp-file no; set xfer:clobber no; get \"slot:source/source file.bin\" -o \"slot:destination/target.bin\"; set xfer:clobber yes; set xfer:use-temp-file yes",
             LftpCommandBuilder.BuildRemoteTransfer(fxp));
         Assert.Equal(
             "set ftp:use-fxp false; get -e \"slot:source/source file.bin\" -o \"slot:destination/target.bin\"",

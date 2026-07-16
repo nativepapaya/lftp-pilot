@@ -373,22 +373,25 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     public async Task<TransferEnqueueResult> EnqueueTransferAsync(TransferEnqueueRequest request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        PlanValidator.Validate(request.Plan);
+        ArgumentNullException.ThrowIfNull(request);
+        var plan = CanonicalizeTransferPlan(request.Plan);
+        PlanValidator.Validate(plan);
+        ValidateTransferPaths(plan);
         var session = _sessions.Get(request.SessionId);
-        if (session.Profile.Id != request.Plan.ProfileId) throw new ArgumentException("The transfer profile does not match the connected session.", nameof(request));
-        ValidateTransferPaths(request.Plan);
+        if (session.Profile.Id != plan.ProfileId) throw new ArgumentException("The transfer profile does not match the connected session.", nameof(request));
+        await RevalidateTransferAsync(session, plan, cancellationToken).ConfigureAwait(false);
         var now = _scheduler?.UtcNow ?? DateTimeOffset.UtcNow;
-        if (request.Plan.RunAt is { } runAt)
+        if (plan.RunAt is { } runAt)
         {
             if (_scheduler is null) throw new InvalidOperationException("Run-once transfers require the Agent scheduler.");
             if (runAt <= now) throw new ArgumentException("A run-once transfer requires a future run time.", nameof(request));
             var scheduledJobId = Guid.NewGuid();
-            var scheduledRetryAvailable = TryRememberTransfer(scheduledJobId, session, request.Plan);
+            var scheduledRetryAvailable = TryRememberTransfer(scheduledJobId, session, plan);
             var scheduled = _jobs.Enqueue(new(
                 scheduledJobId,
                 JobKind.Transfer,
                 session.Profile.Id,
-                $"{Path.GetFileName(request.Plan.SourcePath)} -> {Path.GetFileName(request.Plan.DestinationPath)}",
+                $"{Path.GetFileName(plan.SourcePath)} -> {Path.GetFileName(plan.DestinationPath)}",
                 JobState.Scheduled,
                 now,
                 now,
@@ -399,7 +402,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             {
                 await _scheduler.ScheduleAsync(
                     scheduled,
-                    token => RunScheduledTransferAsync(session, request.Plan, scheduled.Id, token),
+                    token => RunScheduledTransferAsync(session, plan, scheduled.Id, token),
                     cancellationToken).ConfigureAwait(false);
             }
             catch
@@ -410,12 +413,12 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             return new(scheduled);
         }
 
-        var shouldSkip = request.Plan.Mode == TransferMode.Skip &&
-            await DestinationExistsAsync(session, request.Plan, cancellationToken).ConfigureAwait(false);
+        var shouldSkip = plan.Mode == TransferMode.Skip &&
+            await DestinationExistsAsync(session, plan, cancellationToken).ConfigureAwait(false);
         var jobId = Guid.NewGuid();
-        var retryAvailable = !shouldSkip && TryRememberTransfer(jobId, session, request.Plan);
+        var retryAvailable = !shouldSkip && TryRememberTransfer(jobId, session, plan);
         var job = _jobs.Enqueue(new(jobId, JobKind.Transfer, session.Profile.Id,
-            $"{Path.GetFileName(request.Plan.SourcePath)} -> {Path.GetFileName(request.Plan.DestinationPath)}",
+            $"{Path.GetFileName(plan.SourcePath)} -> {Path.GetFileName(plan.DestinationPath)}",
             JobState.Queued, now, now, RetryAvailable: retryAvailable));
         if (shouldSkip)
         {
@@ -423,7 +426,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             job = _jobs.Transition(job.Id, JobState.Completed, "Skipped because the destination already exists");
             return new(job);
         }
-        TrackJob(job.Id, token => RunTransferAsync(session, request.Plan, job.Id, token));
+        TrackJob(job.Id, token => RunTransferAsync(session, plan, job.Id, token));
         return new(job);
     }
 
@@ -434,7 +437,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         var current = _jobs.GetJobs().FirstOrDefault(job => job.Id == request.JobId)
             ?? throw new KeyNotFoundException($"Job {request.JobId} was not found.");
         if (current.Kind != JobKind.Transfer)
-            throw new NotSupportedException("Only failed file transfers can currently be retried. Mirrors require a fresh preview, and remote-to-remote transfers require a new route review.");
+            throw new NotSupportedException("Only failed file or directory transfers can currently be retried. Mirrors require a fresh preview, and remote-to-remote transfers require a new route review.");
         if (current.State != JobState.Failed) throw new InvalidOperationException("Only a failed transfer can be retried.");
         if (!current.RetryAvailable || !TryGetTransferRetry(request.JobId, out var retryContext))
             throw new InvalidOperationException("The Agent no longer has the validated transfer details needed to retry this job. Queue a new transfer instead.");
@@ -442,10 +445,10 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         await WaitForPriorAttemptCleanupAsync(request.JobId, cancellationToken).ConfigureAwait(false);
         var retryPlan = retryContext.Plan with { Id = Guid.NewGuid(), RunAt = null };
         PlanValidator.Validate(retryPlan);
-        ValidateTransferPaths(retryPlan);
         var session = _sessions.GetActive(retryContext.SessionId);
         if (session.Profile.Id != retryPlan.ProfileId)
             throw new InvalidOperationException("The originating transfer session no longer matches the reviewed profile. Queue a new transfer instead.");
+        await RevalidateTransferAsync(session, retryPlan, cancellationToken).ConfigureAwait(false);
         var shouldSkip = retryPlan.Mode == TransferMode.Skip &&
             await DestinationExistsAsync(session, retryPlan, cancellationToken).ConfigureAwait(false);
 
@@ -465,9 +468,11 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     public async Task<MirrorPreview> PreviewMirrorAsync(MirrorPreviewRequest request, CancellationToken cancellationToken = default)
     {
         PlanValidator.Validate(request.Definition);
+        ValidateMirrorLocalRoot(request.Definition);
         var session = _sessions.Get(request.SessionId);
         if (session.Profile.Id != request.Definition.ProfileId) throw new ArgumentException("The mirror profile does not match the connected session.", nameof(request));
         await using var previewSession = await session.CreateEphemeralAsync("mirror-preview", cancellationToken).ConfigureAwait(false);
+        await ValidateMirrorRemoteRootAsync(previewSession, request.Definition, cancellationToken).ConfigureAwait(false);
         var result = await previewSession.ExecuteAsync(LftpCommandBuilder.BuildMirror(request.Definition, dryRun: true), _options.MirrorPreviewTimeout, cancellationToken).ConfigureAwait(false);
         SessionRegistry.ThrowIfFailed(result, "Mirror preview");
         var preview = _mirrorPlanner.CreatePreview(request.Definition, result.Lines.Select(static line => line.Line));
@@ -479,19 +484,19 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     public Task<MirrorApproveResult> ApproveMirrorAsync(MirrorApproveRequest request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (request.Definition.DeleteExtraneous && !request.DeletionsApproved)
-            throw new InvalidOperationException("Deletion-capable mirrors require a separate explicit deletion approval.");
         if (!_previews.TryGetValue(request.PreviewId, out var stored) || stored.SessionId != request.SessionId)
             throw new InvalidOperationException("The mirror preview was not found. Generate a fresh preview.");
+        var requiresDeletionReview = stored.Definition.DeleteExtraneous || stored.Preview.ContainsDeletions;
+        if (requiresDeletionReview && !request.DeletionsApproved)
+            throw new InvalidOperationException("A mirror preview containing deletion actions requires separate explicit deletion approval.");
         var command = _mirrorPlanner.BuildExecutionCommand(request.Definition, stored.Preview, request.ApprovalToken);
         var session = _sessions.Get(request.SessionId);
         if (session.Profile.Id != request.Definition.ProfileId) throw new ArgumentException("The mirror profile does not match the connected session.", nameof(request));
         if (!_previews.TryRemove(request.PreviewId, out _)) throw new InvalidOperationException("The mirror preview was already approved.");
         var now = DateTimeOffset.UtcNow;
         var job = _jobs.Enqueue(new(Guid.NewGuid(), JobKind.Mirror, session.Profile.Id, request.Definition.Name, JobState.Queued, now, now));
-        TrackJob(job.Id, token => request.Definition.DeleteExtraneous
-            ? RunApprovedMirrorAsync(session, request.Definition, stored.Preview, command, job.Id, token)
-            : RunCommandJobAsync(session, command, job.Id, _options.TransferTimeout, token));
+        TrackJob(job.Id, token => RunApprovedMirrorAsync(
+            session, request.Definition, stored.Preview, command, job.Id, token));
         return Task.FromResult(new MirrorApproveResult(job));
     }
 
@@ -604,13 +609,46 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         return true;
     }
 
-    private async Task RunTransferAsync(WorkspaceSession session, TransferPlan plan, Guid jobId, CancellationToken cancellationToken)
+    private async Task RunTransferAsync(
+        WorkspaceSession session,
+        TransferPlan plan,
+        Guid jobId,
+        CancellationToken cancellationToken)
     {
         try
         {
-            if (plan.Direction == TransferDirection.Download) Directory.CreateDirectory(Path.GetDirectoryName(plan.DestinationPath)!);
-            _jobs.Transition(jobId, JobState.Running, "Submitted to the per-site LFTP transfer queue.");
-            await session.ExecuteQueuedTransferAsync(plan, cancellationToken).ConfigureAwait(false);
+            if (plan.SourceKind == TransferSourceKind.Directory)
+            {
+                _jobs.Transition(jobId, JobState.Running, "Waiting for the guarded foreground directory transfer session.");
+                await RunGuardedDirectoryTransferAsync(session, plan, jobId, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                _jobs.Transition(jobId, JobState.Completed, "Completed through the guarded foreground directory transfer session.");
+                return;
+            }
+            _jobs.Transition(jobId, JobState.Running, "Waiting for a reserved per-site LFTP transfer slot.");
+            await session.ExecuteQueuedTransferAsync(
+                plan,
+                async (_, token) =>
+                {
+                    _jobs.Transition(jobId, JobState.Running, "Reserved an LFTP transfer slot; revalidating source and destination.");
+                    await session.WithValidationSessionAsync(async validation =>
+                    {
+                        await RevalidateTransferEndpointsAsync(validation, plan, token).ConfigureAwait(false);
+                        if (plan.Mode == TransferMode.Skip &&
+                            await DestinationExistsAsync(session, plan, token).ConfigureAwait(false))
+                        {
+                            throw new TransferSkippedException();
+                        }
+                        if (plan.Direction == TransferDirection.Download &&
+                            Path.GetDirectoryName(plan.DestinationPath) is { Length: > 0 } destinationParent)
+                        {
+                            Directory.CreateDirectory(destinationParent);
+                            RequireLocalDestinationKind(plan.DestinationPath, plan.SourceKind);
+                        }
+                        return true;
+                    }, token).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             _jobs.Transition(jobId, JobState.Completed, "Completed through the per-site LFTP transfer queue.");
         }
@@ -618,7 +656,11 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             _jobs.TryCancel(jobId, "Cancelled");
         }
-        catch (Exception exception) when (exception is IOException or InvalidDataException or InvalidOperationException or TimeoutException or UnauthorizedAccessException)
+        catch (TransferSkippedException)
+        {
+            _jobs.Transition(jobId, JobState.Completed, "Skipped because the destination already exists");
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or InvalidDataException or InvalidOperationException or NotSupportedException or TimeoutException or UnauthorizedAccessException)
         {
             TryFailJob(jobId, exception);
         }
@@ -632,11 +674,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     {
         try
         {
-            ValidateTransferPaths(plan);
-            if (plan.Mode == TransferMode.Skip && await DestinationExistsAsync(session, plan, cancellationToken).ConfigureAwait(false))
+            if (plan.SourceKind == TransferSourceKind.Directory)
             {
-                _jobs.Transition(jobId, JobState.Running, "Checking destination at the scheduled time.");
-                _jobs.Transition(jobId, JobState.Completed, "Skipped because the destination already exists.");
+                await RunTransferAsync(session, plan, jobId, cancellationToken).ConfigureAwait(false);
                 return;
             }
             await RunTransferAsync(session, plan, jobId, cancellationToken).ConfigureAwait(false);
@@ -645,7 +685,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             _jobs.TryCancel(jobId, "Cancelled");
         }
-        catch (Exception exception) when (exception is ArgumentException or IOException or InvalidDataException or InvalidOperationException or TimeoutException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is ArgumentException or IOException or InvalidDataException or InvalidOperationException or NotSupportedException or TimeoutException or UnauthorizedAccessException)
         {
             TryFailJob(jobId, exception);
         }
@@ -704,31 +744,6 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         throw new IOException($"The remote collision check failed closed: {error}");
     }
 
-    private async Task RunCommandJobAsync(WorkspaceSession session, string command, Guid jobId, TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        try
-        {
-            var result = await session.WithTransferSessionAsync(
-                transfer =>
-                {
-                    _jobs.Transition(jobId, JobState.Running, "Running");
-                    return transfer.ExecuteAsync(command, timeout, cancellationToken);
-                },
-                cancellationToken).ConfigureAwait(false);
-            SessionRegistry.ThrowIfFailed(result, "LFTP job");
-            cancellationToken.ThrowIfCancellationRequested();
-            _jobs.Transition(jobId, JobState.Completed, "Completed");
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            _jobs.TryCancel(jobId, "Cancelled");
-        }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException or UnauthorizedAccessException)
-        {
-            TryFailJob(jobId, exception);
-        }
-    }
-
     private async Task RunApprovedMirrorAsync(
         WorkspaceSession session,
         MirrorDefinition definition,
@@ -742,6 +757,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             await session.WithTransferSessionAsync(async transfer =>
             {
                 _jobs.Transition(jobId, JobState.Running, "Revalidating reviewed mirror actions");
+                ValidateMirrorLocalRoot(definition);
+                await ValidateMirrorRemoteRootAsync(transfer, definition, cancellationToken).ConfigureAwait(false);
                 var verificationResult = await transfer.ExecuteAsync(
                     LftpCommandBuilder.BuildMirror(definition, dryRun: true),
                     _options.MirrorPreviewTimeout,
@@ -750,6 +767,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 var verification = _mirrorPlanner.CreatePreview(definition, verificationResult.Lines.Select(static line => line.Line));
                 if (!verification.Actions.SequenceEqual(reviewedPreview.Actions))
                     throw new InvalidOperationException("The mirror actions changed after review. Generate and approve a new preview.");
+                ValidateMirrorLocalRoot(definition);
+                await ValidateMirrorRemoteRootAsync(transfer, definition, cancellationToken).ConfigureAwait(false);
 
                 var executionResult = await transfer.ExecuteAsync(executionCommand, _options.TransferTimeout, cancellationToken).ConfigureAwait(false);
                 SessionRegistry.ThrowIfFailed(executionResult, "LFTP mirror job");
@@ -864,21 +883,13 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     }
 
     private async Task<FileEntry?> TryStatRemoteAsync(WorkspaceSession session, string path, CancellationToken cancellationToken)
+        => await TryStatRemoteAsync(session.Browse, path, cancellationToken).ConfigureAwait(false);
+
+    private async Task<FileEntry?> TryStatRemoteAsync(ILftpSession process, string path, CancellationToken cancellationToken)
     {
-        var result = await session.Browse.ExecuteAsync(LftpCommandBuilder.BuildStat(path), _options.BrowseTimeout, cancellationToken).ConfigureAwait(false);
-        if (result.TimedOut) throw new TimeoutException("The remote path check timed out.");
-        if (result.Failure is not null) throw new IOException($"The remote path check failed: {result.Failure}");
-        if (result.Truncated) throw new InvalidDataException("The remote path check produced too much output.");
-        var error = LftpOutputParser.FirstError(result.Lines);
-        if (error is not null)
-        {
-            if (error.Contains("no such", StringComparison.OrdinalIgnoreCase) || error.Contains("not found", StringComparison.OrdinalIgnoreCase)) return null;
-            throw new IOException($"The remote path check failed closed: {error}");
-        }
-        var entries = LftpOutputParser.ParseLongListing(result.Lines.Select(static line => line.Line), RemoteParent(path));
-        if (entries.Length != 1)
-            throw new InvalidDataException("The server did not return one parseable file entry for the remote path check.");
-        return entries[0];
+        var validatedPath = ValidateRemoteTransferPath(path, nameof(path));
+        var result = await process.ExecuteAsync(LftpCommandBuilder.BuildStat(validatedPath, fresh: true), _options.BrowseTimeout, cancellationToken).ConfigureAwait(false);
+        return FreshRemoteStatParser.Parse(result, validatedPath, "The fresh remote path check");
     }
 
     private void InvalidateBrowseSnapshots(PaneKind kind, Guid? sessionId)
@@ -926,11 +937,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             ? RemoteTransferMode.Fxp
             : RemoteTransferMode.ClientRelay;
 
-    private static string RemoteParent(string path)
-    {
-        var separator = path.LastIndexOf('/');
-        return separator <= 0 ? "/" : path[..separator];
-    }
+    private static string NormalizeRemotePath(string path) => path == "/" ? path : path.TrimEnd('/');
 
     private static string RemoteName(string path)
     {
@@ -1042,20 +1049,363 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         right,
         kind == PaneKind.Local ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
+    private static TransferPlan CanonicalizeTransferPlan(TransferPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return plan.Direction switch
+        {
+            TransferDirection.Download => plan with
+            {
+                SourcePath = ValidateRemoteTransferPath(plan.SourcePath, nameof(plan)),
+                DestinationPath = CanonicalizeLocalTransferPath(plan.DestinationPath, nameof(plan)),
+            },
+            TransferDirection.Upload => plan with
+            {
+                SourcePath = CanonicalizeLocalTransferPath(plan.SourcePath, nameof(plan)),
+                DestinationPath = ValidateRemoteTransferPath(plan.DestinationPath, nameof(plan)),
+            },
+            _ => plan,
+        };
+    }
+
     private static void ValidateTransferPaths(TransferPlan plan)
     {
+        if (plan.SourceKind == TransferSourceKind.Directory &&
+            (IsQuickDirectoryRoot(plan.SourcePath) || IsQuickDirectoryRoot(plan.DestinationPath)))
+        {
+            throw new NotSupportedException(
+                "Quick directory transfers cannot use a local filesystem root, UNC share root, or the remote server root. Use the reviewed Mirror workflow instead.");
+        }
         if (plan.Direction == TransferDirection.Download)
         {
-            ValidateRemotePath(plan.SourcePath, nameof(plan));
-            if (!Path.IsPathFullyQualified(plan.DestinationPath)) throw new ArgumentException("A download destination must be a fully qualified local path.", nameof(plan));
+            _ = ValidateRemoteTransferPath(plan.SourcePath, nameof(plan));
+            _ = CanonicalizeLocalTransferPath(plan.DestinationPath, nameof(plan));
         }
         else
         {
             if (plan.Mode == TransferMode.Skip)
                 throw new NotSupportedException("No-overwrite upload cannot be guaranteed portably across the supported protocols; choose resume or overwrite explicitly.");
-            if (!Path.IsPathFullyQualified(plan.SourcePath) || !File.Exists(plan.SourcePath)) throw new ArgumentException("An upload source must be an existing fully qualified local file.", nameof(plan));
-            ValidateRemotePath(plan.DestinationPath, nameof(plan));
+            _ = CanonicalizeLocalTransferPath(plan.SourcePath, nameof(plan));
+            _ = ValidateRemoteTransferPath(plan.DestinationPath, nameof(plan));
         }
+    }
+
+    private static bool IsQuickDirectoryRoot(string path)
+    {
+        if (string.Equals(path, "/", StringComparison.Ordinal)) return true;
+        if (!Path.IsPathFullyQualified(path)) return false;
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath);
+        return root is not null && string.Equals(
+            fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task RevalidateTransferAsync(
+        WorkspaceSession session,
+        TransferPlan plan,
+        CancellationToken cancellationToken)
+    {
+        await session.WithValidationSessionAsync(async validation =>
+        {
+            await RevalidateTransferEndpointsAsync(validation, plan, cancellationToken).ConfigureAwait(false);
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
+        await PreflightDirectoryTransferAsync(session, plan, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task RevalidateTransferEndpointsAsync(
+        ILftpSession process,
+        TransferPlan plan,
+        CancellationToken cancellationToken)
+    {
+        ValidateTransferPaths(plan);
+        if (plan.Direction == TransferDirection.Download)
+        {
+            await ValidateRemoteEndpointTreeAsync(
+                process, plan.SourcePath, plan.SourceKind, required: true, "download source", cancellationToken).ConfigureAwait(false);
+            RequireLocalDestinationKind(plan.DestinationPath, plan.SourceKind);
+            return;
+        }
+
+        RequireLocalSourceKind(plan.SourcePath, plan.SourceKind);
+        await ValidateRemoteEndpointTreeAsync(
+            process, plan.DestinationPath, plan.SourceKind, required: false, "upload destination", cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task PreflightDirectoryTransferAsync(
+        WorkspaceSession session,
+        TransferPlan plan,
+        CancellationToken cancellationToken)
+    {
+        if (plan.SourceKind != TransferSourceKind.Directory) return;
+        await using var previewSession = await session.CreateEphemeralAsync("directory-transfer-preview", cancellationToken).ConfigureAwait(false);
+        await ValidateDirectoryTransferPreviewAsync(previewSession, plan, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ValidateDirectoryTransferPreviewAsync(
+        ILftpSession process,
+        TransferPlan plan,
+        CancellationToken cancellationToken)
+    {
+        var definition = new MirrorDefinition(
+            plan.Id,
+            plan.ProfileId,
+            "Automatic directory transfer safety preflight",
+            plan.Direction == TransferDirection.Download ? MirrorDirection.Download : MirrorDirection.Upload,
+            plan.Direction == TransferDirection.Download ? plan.DestinationPath : plan.SourcePath,
+            plan.Direction == TransferDirection.Download ? plan.SourcePath : plan.DestinationPath,
+            ParallelFiles: 1,
+            SegmentsPerFile: plan.Segments);
+        var result = await process.ExecuteAsync(
+            LftpCommandBuilder.BuildDirectoryTransferPreview(plan),
+            _options.MirrorPreviewTimeout,
+            cancellationToken).ConfigureAwait(false);
+        SessionRegistry.ThrowIfFailed(result, "Directory transfer safety preview");
+        MirrorPreview preview;
+        try
+        {
+            preview = _mirrorPlanner.CreatePreview(definition, result.Lines.Select(static line => line.Line));
+        }
+        catch (InvalidDataException exception)
+        {
+            throw new InvalidOperationException(
+                "The directory transfer dry-run could not be proven non-destructive. Use the reviewed Mirror workflow instead.",
+                exception);
+        }
+        if (preview.ContainsDeletions)
+            throw new InvalidOperationException(
+                "The directory transfer dry-run proposed deletion or type-collision replacement. Use the reviewed Mirror workflow instead.");
+    }
+
+    private async Task RunGuardedDirectoryTransferAsync(
+        WorkspaceSession session,
+        TransferPlan plan,
+        Guid jobId,
+        CancellationToken cancellationToken)
+    {
+        await session.WithTransferSessionAsync(async transfer =>
+        {
+            _jobs.Transition(jobId, JobState.Running, "Revalidating the directory transfer on its guarded LFTP session.");
+            await RevalidateTransferEndpointsAsync(transfer, plan, cancellationToken).ConfigureAwait(false);
+            if (plan.Direction == TransferDirection.Download &&
+                Path.GetDirectoryName(plan.DestinationPath) is { Length: > 0 } destinationParent)
+            {
+                Directory.CreateDirectory(destinationParent);
+                RequireLocalDestinationKind(plan.DestinationPath, plan.SourceKind);
+            }
+            await ValidateDirectoryTransferPreviewAsync(transfer, plan, cancellationToken).ConfigureAwait(false);
+            await RevalidateTransferEndpointsAsync(transfer, plan, cancellationToken).ConfigureAwait(false);
+            _jobs.Transition(jobId, JobState.Running, "Running the guarded foreground directory transfer.");
+            var result = await transfer.ExecuteAsync(
+                LftpCommandBuilder.BuildTransfer(plan, background: false),
+                _options.TransferTimeout,
+                cancellationToken).ConfigureAwait(false);
+            SessionRegistry.ThrowIfFailed(result, "Guarded directory transfer");
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void RequireLocalSourceKind(string path, TransferSourceKind expectedKind)
+    {
+        ValidateLocalTransferAncestors(path);
+        var actualKind = TryGetLocalTransferKind(path)
+            ?? throw new ArgumentException("The local upload source must exist before the transfer can run.", nameof(path));
+        if (actualKind != expectedKind)
+            throw new IOException($"The local upload source is a {Describe(actualKind)}, but the transfer declares a {Describe(expectedKind)} source.");
+    }
+
+    private static void RequireLocalDestinationKind(string path, TransferSourceKind expectedKind)
+    {
+        ValidateLocalTransferAncestors(path);
+        var actualKind = TryGetLocalTransferKind(path);
+        if (actualKind is not null && actualKind != expectedKind)
+            throw new IOException($"The existing local download destination is a {Describe(actualKind.Value)}, but this transfer requires a {Describe(expectedKind)} destination.");
+    }
+
+    private static TransferSourceKind? TryGetLocalTransferKind(string path)
+    {
+        var attributes = TryGetLocalTransferAttributes(path);
+        return attributes is { } value ? ClassifyLocalTransferAttributes(value) : null;
+    }
+
+    private static FileAttributes? TryGetLocalTransferAttributes(string path)
+    {
+        try { return File.GetAttributes(path); }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+    }
+
+    private static void ValidateLocalTransferAncestors(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath)
+            ?? throw new ArgumentException("A rooted local transfer path is required.", nameof(path));
+        var current = Path.GetDirectoryName(fullPath);
+        while (!string.IsNullOrEmpty(current))
+        {
+            if (TryGetLocalTransferAttributes(current) is { } attributes)
+                ValidateLocalTransferAncestorAttributes(attributes);
+            if (string.Equals(
+                    current.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase)) break;
+            var parent = Path.GetDirectoryName(current.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase)) break;
+            current = parent;
+        }
+    }
+
+    internal static void ValidateLocalTransferAncestorAttributes(FileAttributes attributes)
+    {
+        if (ClassifyLocalTransferAttributes(attributes) != TransferSourceKind.Directory)
+            throw new IOException("A local transfer path has a non-directory ancestor.");
+    }
+
+    internal static TransferSourceKind ClassifyLocalTransferAttributes(FileAttributes attributes)
+    {
+        if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+            throw new NotSupportedException("Local reparse points and special entries are not followed for transfers.");
+        return (attributes & FileAttributes.Directory) != 0
+            ? TransferSourceKind.Directory
+            : TransferSourceKind.File;
+    }
+
+    private static void RequireRemoteTransferKind(FileEntry entry, TransferSourceKind expectedKind, string role)
+    {
+        var actualKind = entry.Kind switch
+        {
+            EntryKind.File => TransferSourceKind.File,
+            EntryKind.Directory => TransferSourceKind.Directory,
+            EntryKind.SymbolicLink or EntryKind.Other => throw new NotSupportedException(
+                $"The remote {role} is a symbolic link or special entry. LFTP Pilot does not follow these entries for transfers."),
+            _ => throw new InvalidDataException($"The remote {role} has an unsupported entry kind."),
+        };
+        if (actualKind != expectedKind)
+            throw new IOException($"The remote {role} is a {Describe(actualKind)}, but this transfer requires a {Describe(expectedKind)} entry.");
+    }
+
+    private static string Describe(TransferSourceKind kind) => kind == TransferSourceKind.Directory ? "directory" : "file";
+
+    private static string CanonicalizeLocalTransferPath(string path, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Length > 32_767 ||
+            path.IndexOfAny(['\0', '\r', '\n']) >= 0 || !Path.IsPathFullyQualified(path) || IsDeviceNamespacePath(path))
+        {
+            throw new ArgumentException("A bounded, fully qualified, non-device local path is required.", parameterName);
+        }
+
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new ArgumentException("The local transfer path could not be canonicalized safely.", parameterName, exception);
+        }
+
+        if (fullPath.Length > 32_767 || IsDeviceNamespacePath(fullPath))
+            throw new ArgumentException("A bounded, fully qualified, non-device local path is required.", parameterName);
+        return fullPath;
+    }
+
+    private static void ValidateMirrorLocalRoot(MirrorDefinition definition)
+    {
+        if (ContainsLocalDotSegment(definition.LocalRoot))
+            throw new ArgumentException("The mirror local root cannot contain current-directory or parent-directory segments.", nameof(definition));
+        var localRoot = CanonicalizeLocalTransferPath(definition.LocalRoot, nameof(definition));
+
+        ValidateLocalTransferAncestors(localRoot);
+        var kind = TryGetLocalTransferKind(localRoot);
+        if (definition.Direction == MirrorDirection.Upload && kind is null)
+            throw new DirectoryNotFoundException("The local upload mirror root does not exist.");
+        if (kind is not null && kind != TransferSourceKind.Directory)
+            throw new IOException("The mirror local root must be a directory and cannot be a link or special entry.");
+    }
+
+    private static bool ContainsLocalDotSegment(string path) =>
+        path.Split(['\\', '/'], StringSplitOptions.None).Any(static segment => segment is "." or "..");
+
+    private async Task ValidateMirrorRemoteRootAsync(
+        ILftpSession process,
+        MirrorDefinition definition,
+        CancellationToken cancellationToken)
+    {
+        await ValidateRemoteEndpointTreeAsync(
+            process,
+            definition.RemoteRoot,
+            TransferSourceKind.Directory,
+            required: definition.Direction == MirrorDirection.Download,
+            "mirror root",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ValidateRemoteEndpointTreeAsync(
+        ILftpSession process,
+        string path,
+        TransferSourceKind expectedKind,
+        bool required,
+        string role,
+        CancellationToken cancellationToken)
+    {
+        path = ValidateRemoteTransferPath(path, nameof(path));
+        if (path == "/")
+        {
+            if (expectedKind != TransferSourceKind.Directory)
+                throw new IOException($"The remote {role} is the server root directory, but this transfer requires a file.");
+            return;
+        }
+
+        var components = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var prefix = string.Empty;
+        for (var index = 0; index < components.Length; index++)
+        {
+            prefix += "/" + components[index];
+            var entry = await TryStatRemoteAsync(process, prefix, cancellationToken).ConfigureAwait(false);
+            var isTarget = index == components.Length - 1;
+            if (entry is null)
+            {
+                if (required)
+                    throw new FileNotFoundException($"The remote {role} or one of its ancestors was not found.", prefix);
+                return;
+            }
+
+            if (isTarget)
+            {
+                RequireRemoteTransferKind(entry, expectedKind, role);
+                continue;
+            }
+
+            if (entry.Kind != EntryKind.Directory)
+            {
+                if (entry.Kind is EntryKind.SymbolicLink or EntryKind.Other)
+                    throw new NotSupportedException($"A remote ancestor of the {role} is a symbolic link or special entry. LFTP Pilot does not follow remote ancestors for transfers.");
+                throw new IOException($"A remote ancestor of the {role} is not a directory.");
+            }
+        }
+    }
+
+    private static bool IsDeviceNamespacePath(string path) =>
+        path.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith(@"\\.\", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("//?/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("//./", StringComparison.OrdinalIgnoreCase);
+
+    private static string ValidateRemoteTransferPath(string path, string parameterName)
+    {
+        ValidateRemotePath(path, parameterName);
+        if (path.Length > 4096 || path.Contains("//", StringComparison.Ordinal) ||
+            path.Split('/', StringSplitOptions.None).Any(static segment => segment is "." or "..") ||
+            path.Split('/', StringSplitOptions.RemoveEmptyEntries).Length > 128 ||
+            path.Length > 1 && path.EndsWith("/", StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "A canonical remote path of at most 4096 characters is required; duplicate separators, dot segments, and trailing separators are not allowed.",
+                parameterName);
+        }
+        return path;
     }
 
     private static void ValidateRemotePath(string path, string parameterName)
@@ -1077,6 +1427,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
     private sealed record StoredMirrorPreview(Guid SessionId, MirrorDefinition Definition, MirrorPreview Preview);
     private sealed record TransferRetryContext(Guid SessionId, TransferPlan Plan);
+    private sealed class TransferSkippedException : Exception { }
     private sealed record StoredBrowseSnapshot(
         Guid Id,
         PaneLocation Location,

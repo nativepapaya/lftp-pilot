@@ -37,12 +37,111 @@ public sealed class CoreValidationTests
         Assert.Contains(exception.Issues, issue => issue.Field == "segments");
     }
 
+    [Theory]
+    [InlineData(TransferMode.Overwrite)]
+    [InlineData(TransferMode.Skip)]
+    public void DirectoryTransferValidationRejectsFileOnlyModes(TransferMode mode)
+    {
+        var plan = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Download, "/remote/folder", @"C:\Local\folder",
+            Mode: mode, SourceKind: TransferSourceKind.Directory);
+
+        var exception = Assert.Throws<ModelValidationException>(() => PlanValidator.Validate(plan));
+
+        Assert.Contains(exception.Issues, issue => issue.Field == "mode" && issue.Code == "unsupported");
+    }
+
+    [Fact]
+    public void TransferValidationRejectsUnsupportedSourceKind()
+    {
+        var plan = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Download, "/remote/special", @"C:\Local\special",
+            SourceKind: (TransferSourceKind)99);
+
+        var exception = Assert.Throws<ModelValidationException>(() => PlanValidator.Validate(plan));
+
+        Assert.Contains(exception.Issues, issue => issue.Field == "sourceKind" && issue.Code == "unsupported");
+    }
+
+    [Theory]
+    [InlineData(TransferSourceKind.File)]
+    [InlineData(TransferSourceKind.Directory)]
+    public void UploadTransferValidationRejectsIgnoredSegmentation(TransferSourceKind sourceKind)
+    {
+        var plan = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Upload, @"C:\Local\source", "/remote/target",
+            Segments: 2, SourceKind: sourceKind);
+
+        var exception = Assert.Throws<ModelValidationException>(() => PlanValidator.Validate(plan));
+
+        Assert.Contains(exception.Issues, issue =>
+            issue.Field == "segments" && issue.Code == "unsupported");
+    }
+
+    [Fact]
+    public void DirectoryTransferValidationUsesMirrorSegmentLimit()
+    {
+        var plan = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Download, "/remote/folder", @"C:\Local\folder",
+            Segments: 17, SourceKind: TransferSourceKind.Directory);
+
+        var exception = Assert.Throws<ModelValidationException>(() => PlanValidator.Validate(plan));
+
+        Assert.Contains(exception.Issues, issue => issue.Field == "segments" && issue.Code == "range");
+    }
+
     [Fact]
     public void MirrorValidationRequiresAbsoluteRootsAndBoundedParallelism()
     {
         var definition = Mirror() with { LocalRoot = "relative", RemoteRoot = "relative", ParallelFiles = 99 };
         var exception = Assert.Throws<ModelValidationException>(() => PlanValidator.Validate(definition));
         Assert.Equal(3, exception.Issues.Count);
+    }
+
+    [Theory]
+    [InlineData("/safe/../outside")]
+    [InlineData("/safe/./outside")]
+    [InlineData("/safe//outside")]
+    [InlineData("/safe/outside/")]
+    public void MirrorValidationRejectsNonCanonicalRemoteRoots(string remoteRoot)
+    {
+        var exception = Assert.Throws<ModelValidationException>(() =>
+            PlanValidator.Validate(Mirror() with { RemoteRoot = remoteRoot }));
+
+        Assert.Contains(exception.Issues, issue => issue.Field == "remoteRoot" && issue.Code == "ambiguous");
+    }
+
+    [Fact]
+    public void MirrorValidationRejectsOverlongRemoteRoot()
+    {
+        var exception = Assert.Throws<ModelValidationException>(() =>
+            PlanValidator.Validate(Mirror() with { RemoteRoot = "/" + new string('a', 4096) }));
+
+        Assert.Contains(exception.Issues, issue => issue.Field == "remoteRoot");
+    }
+
+    [Theory]
+    [InlineData(@"C:\safe\..\outside")]
+    [InlineData("C:/safe/./outside")]
+    [InlineData(@"\\?\C:\safe")]
+    [InlineData(@"\\.\C:\safe")]
+    [InlineData(@"C:\safe\")]
+    [InlineData("C:/safe/")]
+    [InlineData(@"C:\\")]
+    public void MirrorValidationRejectsAmbiguousOrDeviceLocalRoots(string localRoot)
+    {
+        var exception = Assert.Throws<ModelValidationException>(() =>
+            PlanValidator.Validate(Mirror() with { LocalRoot = localRoot }));
+
+        Assert.Contains(exception.Issues, issue => issue.Field == "localRoot" && issue.Code is "ambiguous" or "device-path");
+    }
+
+    [Theory]
+    [InlineData(@"C:\")]
+    [InlineData(@"\\server\share\")]
+    public void MirrorValidationAllowsTrailingSeparatorOnlyForFileSystemRoots(string localRoot)
+    {
+        PlanValidator.Validate(Mirror() with { LocalRoot = localRoot });
     }
 
     [Fact]

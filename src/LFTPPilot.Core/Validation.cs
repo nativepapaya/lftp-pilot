@@ -91,8 +91,15 @@ public static class PlanValidator
         ValidatePath(plan.SourcePath, "sourcePath", issues);
         ValidatePath(plan.DestinationPath, "destinationPath", issues);
         if (!Enum.IsDefined(plan.Direction)) issues.Add(new("direction", "unsupported", "The transfer direction is not supported."));
+        if (!Enum.IsDefined(plan.SourceKind)) issues.Add(new("sourceKind", "unsupported", "The transfer source kind is not supported."));
         if (!Enum.IsDefined(plan.Mode)) issues.Add(new("mode", "unsupported", "The transfer mode is not supported."));
-        if (plan.Segments is < 1 or > 64) issues.Add(new("segments", "range", "Segments must be between 1 and 64."));
+        if (plan.SourceKind == TransferSourceKind.Directory && plan.Mode is not TransferMode.Auto and not TransferMode.Resume)
+            issues.Add(new("mode", "unsupported", "Directory transfers support only automatic and resume modes."));
+        var maximumSegments = plan.SourceKind == TransferSourceKind.Directory ? 16 : 64;
+        if (plan.Segments < 1 || plan.Segments > maximumSegments)
+            issues.Add(new("segments", "range", $"Segments must be between 1 and {maximumSegments}."));
+        if (plan.Direction == TransferDirection.Upload && plan.Segments != 1)
+            issues.Add(new("segments", "unsupported", "Upload transfers do not support segmented transfer."));
         if (plan.RateLimitBytesPerSecond is <= 0) issues.Add(new("rateLimitBytesPerSecond", "range", "A rate limit must be positive."));
         if (issues.Count != 0) throw new ModelValidationException(issues);
     }
@@ -103,8 +110,8 @@ public static class PlanValidator
         var issues = new List<ValidationIssue>();
         if (definition.Id == Guid.Empty) issues.Add(new("id", "required", "The mirror identifier cannot be empty."));
         if (definition.ProfileId == Guid.Empty) issues.Add(new("profileId", "required", "The profile identifier cannot be empty."));
-        if (string.IsNullOrWhiteSpace(definition.LocalRoot) || !Path.IsPathFullyQualified(definition.LocalRoot)) issues.Add(new("localRoot", "absolute", "The local root must be fully qualified."));
-        if (string.IsNullOrWhiteSpace(definition.RemoteRoot) || !ProfileValidator.IsRemoteAbsolute(definition.RemoteRoot)) issues.Add(new("remoteRoot", "absolute", "The remote root must begin with '/'."));
+        ValidateLocalMirrorRoot(definition.LocalRoot, issues);
+        ValidateRemoteMirrorRoot(definition.RemoteRoot, issues);
         ValidatePath(definition.Name, "name", issues);
         if (!Enum.IsDefined(definition.Direction)) issues.Add(new("direction", "unsupported", "The mirror direction is not supported."));
         if (definition.ParallelFiles is < 1 or > 16) issues.Add(new("parallelFiles", "range", "Parallel files must be between 1 and 16."));
@@ -142,6 +149,52 @@ public static class PlanValidator
         if (value.Contains("//", StringComparison.Ordinal) ||
             value.Split('/', StringSplitOptions.None).Any(static segment => segment is "." or ".."))
             issues.Add(new(field, "ambiguous", $"{field} cannot contain empty, current-directory, or parent-directory segments."));
+    }
+
+    private static void ValidateLocalMirrorRoot(string? value, ICollection<ValidationIssue> issues)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 32_767 ||
+            !Path.IsPathFullyQualified(value) || ProfileValidator.ContainsProtocolControl(value))
+        {
+            issues.Add(new("localRoot", "absolute", "The local root must be a bounded fully qualified path."));
+            return;
+        }
+
+        if (value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase) ||
+            value.StartsWith(@"\\.\", StringComparison.OrdinalIgnoreCase) ||
+            value.StartsWith("//?/", StringComparison.OrdinalIgnoreCase) ||
+            value.StartsWith("//./", StringComparison.OrdinalIgnoreCase))
+        {
+            issues.Add(new("localRoot", "device-path", "The local root cannot use a Windows device namespace."));
+        }
+        if (value.Split(['\\', '/'], StringSplitOptions.None).Any(static segment => segment is "." or ".."))
+            issues.Add(new("localRoot", "ambiguous", "The local root cannot contain current-directory or parent-directory segments."));
+        var trailingSeparatorCount = value.Reverse().TakeWhile(static character => character is '\\' or '/').Count();
+        var normalizedValue = value.Replace('/', '\\');
+        var normalizedPathRoot = Path.GetPathRoot(value)?.Replace('/', '\\');
+        if (trailingSeparatorCount > 0 &&
+            (trailingSeparatorCount != 1 || !string.Equals(
+                normalizedValue.TrimEnd('\\'),
+                normalizedPathRoot?.TrimEnd('\\'),
+                StringComparison.OrdinalIgnoreCase)))
+            issues.Add(new("localRoot", "ambiguous", "A non-root local mirror path cannot end with a directory separator."));
+    }
+
+    private static void ValidateRemoteMirrorRoot(string? value, ICollection<ValidationIssue> issues)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 4096 || !ProfileValidator.IsRemoteAbsolute(value))
+        {
+            issues.Add(new("remoteRoot", "absolute", "The remote root must be a bounded absolute path beginning with '/'."));
+            return;
+        }
+
+        if (value.Contains("//", StringComparison.Ordinal) ||
+            value.Split('/', StringSplitOptions.None).Any(static segment => segment is "." or "..") ||
+            value.Split('/', StringSplitOptions.RemoveEmptyEntries).Length > 128 ||
+            value.Length > 1 && value.EndsWith("/", StringComparison.Ordinal))
+        {
+            issues.Add(new("remoteRoot", "ambiguous", "The remote root must be canonical and cannot contain duplicate separators, dot segments, or a trailing separator."));
+        }
     }
 
     private static void ValidatePath(string? value, string field, ICollection<ValidationIssue> issues)

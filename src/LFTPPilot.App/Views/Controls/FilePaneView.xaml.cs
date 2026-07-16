@@ -1,4 +1,7 @@
+using System.Collections.Immutable;
+using LFTPPilot.App.Services;
 using LFTPPilot.App.ViewModels;
+using LFTPPilot.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -9,9 +12,14 @@ using Windows.System;
 
 namespace LFTPPilot.App.Views.Controls;
 
-public sealed class FilePaneDropEventArgs(IReadOnlyList<string> paths) : EventArgs
+public sealed class FilePaneDropEventArgs(IReadOnlyList<FilePaneTransferSource> sources) : EventArgs
 {
-    public IReadOnlyList<string> Paths { get; } = paths;
+    public IReadOnlyList<FilePaneTransferSource> Sources { get; } = sources;
+}
+
+public sealed class FilePaneDropRejectedEventArgs(FilePaneDropRejection rejection) : EventArgs
+{
+    public FilePaneDropRejection Rejection { get; } = rejection;
 }
 
 public sealed class FilePaneRemoteEditEventArgs(FileEntryViewModel entry) : EventArgs
@@ -37,6 +45,7 @@ public sealed partial class FilePaneView : UserControl
     public event EventHandler? TransferRequested;
     public event EventHandler? TransferOptionsRequested;
     public event EventHandler<FilePaneDropEventArgs>? FilesDropped;
+    public event EventHandler<FilePaneDropRejectedEventArgs>? DropRejected;
     public event EventHandler<FilePaneRemoteEditEventArgs>? RemoteEditRequested;
 
     private FilePaneViewModel? ViewModel => DataContext as FilePaneViewModel;
@@ -111,35 +120,217 @@ public sealed partial class FilePaneView : UserControl
 
     private void FilesList_DragItemsStarting(object sender, DragItemsStartingEventArgs e)
     {
-        var paths = e.Items.OfType<FileEntryViewModel>().Select(static item => item.FullPath).ToArray();
-        e.Data.SetText(string.Join(Environment.NewLine, paths));
+        if (ViewModel is not { } viewModel || !TryCreateTransferSources(e.Items.OfType<FileEntryViewModel>(), out var sources) ||
+            !FilePaneDragDropRegistry.Shared.TryIssue(viewModel.SessionId, viewModel.Kind, sources, out var token))
+        {
+            e.Data.RequestedOperation = DataPackageOperation.None;
+            return;
+        }
+
+        e.Data.SetData(FilePaneDragDropRegistry.DataFormat, token);
         e.Data.RequestedOperation = DataPackageOperation.Copy;
     }
 
-    private void FilesList_DragOver(object sender, DragEventArgs e)
+    private async void FilesList_DragOver(object sender, DragEventArgs e)
+    {
+        e.AcceptedOperation = DataPackageOperation.None;
+        if (ViewModel is not { } viewModel) return;
+
+        if (ContainsFormat(e.DataView, FilePaneDragDropRegistry.DataFormat))
+        {
+            try
+            {
+                var deferral = e.GetDeferral();
+                try
+                {
+                    var token = await e.DataView.GetDataAsync(FilePaneDragDropRegistry.DataFormat) as string;
+                    if (FilePaneDragDropRegistry.Shared.CanAccept(token, viewModel.SessionId, viewModel.Kind))
+                    {
+                        AcceptDrop(e);
+                    }
+                }
+                finally
+                {
+                    deferral.Complete();
+                }
+            }
+            catch (Exception exception)
+            {
+                System.Diagnostics.Debug.WriteLine(exception);
+            }
+
+            return;
+        }
+
+        if (ContainsFormat(e.DataView, StandardDataFormats.StorageItems) &&
+            FilePaneDragDropRegistry.CanAcceptExplorerStorageItems(viewModel.Kind))
+        {
+            AcceptDrop(e);
+        }
+    }
+
+    private async void FilesList_Drop(object sender, DragEventArgs e)
+    {
+        e.AcceptedOperation = DataPackageOperation.None;
+        if (ViewModel is not { } viewModel) return;
+
+        if (ContainsFormat(e.DataView, FilePaneDragDropRegistry.DataFormat))
+        {
+            try
+            {
+                var deferral = e.GetDeferral();
+                try
+                {
+                    var token = await e.DataView.GetDataAsync(FilePaneDragDropRegistry.DataFormat) as string;
+                    if (FilePaneDragDropRegistry.Shared.TryConsume(token, viewModel.SessionId, viewModel.Kind, out var payload))
+                    {
+                        e.AcceptedOperation = DataPackageOperation.Copy;
+                        FilesDropped?.Invoke(this, new FilePaneDropEventArgs(payload!.Sources));
+                    }
+                }
+                finally
+                {
+                    deferral.Complete();
+                }
+            }
+            catch (Exception exception)
+            {
+                System.Diagnostics.Debug.WriteLine(exception);
+            }
+
+            return;
+        }
+
+        if (!ContainsFormat(e.DataView, StandardDataFormats.StorageItems) ||
+            !FilePaneDragDropRegistry.CanAcceptExplorerStorageItems(viewModel.Kind))
+        {
+            return;
+        }
+
+        var outcomeReported = false;
+        try
+        {
+            var deferral = e.GetDeferral();
+            try
+            {
+                var storageItems = await e.DataView.GetStorageItemsAsync();
+                if (storageItems.Count == 0)
+                {
+                    outcomeReported = true;
+                    ReportDropRejection(FilePaneDropRejectionKind.Empty);
+                    return;
+                }
+
+                if (storageItems.Count > FilePaneDragDropRegistry.MaximumSources)
+                {
+                    outcomeReported = true;
+                    ReportDropRejection(FilePaneDropRejectionKind.TooManyItems);
+                    return;
+                }
+
+                var sources = ImmutableArray.CreateBuilder<FilePaneTransferSource>(storageItems.Count);
+                foreach (var item in storageItems)
+                {
+                    var source = item switch
+                    {
+                        StorageFile file => new FilePaneTransferSource(file.Path, TransferSourceKind.File),
+                        StorageFolder folder => new FilePaneTransferSource(folder.Path, TransferSourceKind.Directory),
+                        _ => null,
+                    };
+                    if (source is null)
+                    {
+                        outcomeReported = true;
+                        ReportDropRejection(FilePaneDropRejectionKind.UnsupportedItem);
+                        return;
+                    }
+
+                    sources.Add(source);
+                }
+
+                var typedSources = sources.MoveToImmutable();
+                if (!FilePaneDragDropRegistry.AreValidExplorerSources(typedSources))
+                {
+                    outcomeReported = true;
+                    ReportDropRejection(FilePaneDropRejectionKind.InvalidLocalPath);
+                    return;
+                }
+
+                e.AcceptedOperation = DataPackageOperation.Copy;
+                outcomeReported = true;
+                FilesDropped?.Invoke(this, new FilePaneDropEventArgs(typedSources));
+            }
+            finally
+            {
+                deferral.Complete();
+            }
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine(exception);
+            if (!outcomeReported) ReportDropRejection(FilePaneDropRejectionKind.DataUnavailable);
+        }
+    }
+
+    private void ReportDropRejection(FilePaneDropRejectionKind kind)
+    {
+        try
+        {
+            DropRejected?.Invoke(this, new FilePaneDropRejectedEventArgs(FilePaneDropRejection.Create(kind)));
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine(exception);
+        }
+    }
+
+    private static void AcceptDrop(DragEventArgs e)
     {
         e.AcceptedOperation = DataPackageOperation.Copy;
         e.DragUIOverride.Caption = "Queue transfer";
         e.DragUIOverride.IsCaptionVisible = true;
     }
 
-    private async void FilesList_Drop(object sender, DragEventArgs e)
+    private static bool TryCreateTransferSources(
+        IEnumerable<FileEntryViewModel> entries,
+        out ImmutableArray<FilePaneTransferSource> sources)
     {
-        var paths = new List<string>();
-        if (e.DataView.Contains(StandardDataFormats.StorageItems))
+        var builder = ImmutableArray.CreateBuilder<FilePaneTransferSource>();
+        foreach (var entry in entries)
         {
-            var items = await e.DataView.GetStorageItemsAsync();
-            paths.AddRange(items.OfType<IStorageItem>().Select(static item => item.Path).Where(static path => !string.IsNullOrWhiteSpace(path)));
-        }
-        else if (e.DataView.Contains(StandardDataFormats.Text))
-        {
-            var text = await e.DataView.GetTextAsync();
-            paths.AddRange(text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            if (builder.Count >= FilePaneDragDropRegistry.MaximumSources)
+            {
+                sources = [];
+                return false;
+            }
+
+            var kind = entry.Entry.Kind switch
+            {
+                EntryKind.File => TransferSourceKind.File,
+                EntryKind.Directory => TransferSourceKind.Directory,
+                _ => (TransferSourceKind?)null,
+            };
+            if (kind is null)
+            {
+                sources = [];
+                return false;
+            }
+
+            builder.Add(new(entry.FullPath, kind.Value));
         }
 
-        if (paths.Count > 0)
+        return FilePaneDragDropRegistry.TryCopyValidSources(builder, out sources);
+    }
+
+    private static bool ContainsFormat(DataPackageView data, string format)
+    {
+        try
         {
-            FilesDropped?.Invoke(this, new FilePaneDropEventArgs(paths));
+            return data.Contains(format);
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine(exception);
+            return false;
         }
     }
 
@@ -182,6 +373,8 @@ public sealed partial class FilePaneView : UserControl
         var selected = FilesList.SelectedItems.OfType<FileEntryViewModel>().Select(static item => item.FullPath).ToList();
         if (selected.Count == 0) return;
         var package = new DataPackage();
+        // Explicit Copy path remains text for the clipboard. Drag transfers never
+        // publish paths and accept only the opaque in-process token above.
         package.SetText(string.Join(Environment.NewLine, selected));
         Clipboard.SetContent(package);
     }

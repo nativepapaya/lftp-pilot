@@ -46,6 +46,7 @@ public sealed class FilePaneViewModel : ObservableObject
     }
 
     public PaneKind Kind { get; }
+    public Guid SessionId => _sessionId;
     public string PaneTitle => Kind == PaneKind.Local ? "This PC" : "Remote";
     public string PaneSubtitle => Kind == PaneKind.Local ? "Local files" : "LFTP session";
     public ObservableCollection<FileEntryViewModel> Entries

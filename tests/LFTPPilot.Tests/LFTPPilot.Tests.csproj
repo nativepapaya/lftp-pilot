@@ -19,4 +19,9 @@
     <ProjectReference Include="..\..\src\LFTPPilot.Engine\LFTPPilot.Engine.csproj" />
     <ProjectReference Include="..\..\src\LFTPPilot.Windows\LFTPPilot.Windows.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Keep the pure App drag/drop trust policy testable without loading WinUI. -->
+    <Compile Include="..\..\src\LFTPPilot.App\Services\FilePaneDragDropRegistry.cs" Link="App\FilePaneDragDropRegistry.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\Services\TransferQueueAggregation.cs" Link="App\TransferQueueAggregation.cs" />
+  </ItemGroup>
 </Project>

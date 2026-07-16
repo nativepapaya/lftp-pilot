@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using LFTPPilot.Agent;
@@ -25,6 +26,9 @@ public sealed class WorkspaceTests
         Assert.Equal("1", start.Environment["CHERE_INVOKING"]);
         Assert.Equal(@"C:\fake\bin", start.Environment["PATH"]);
         Assert.Contains("hunter2", start.Secrets!);
+        Assert.Contains(fixture.ProcessHost.Commands, command =>
+            command.Contains("set xfer:make-backup no", StringComparison.Ordinal) &&
+            command.Contains("set xfer:use-temp-file yes", StringComparison.Ordinal));
 
         var bootstrap = await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken);
         var serialized = JsonSerializer.Serialize(bootstrap, FramedJsonStream.SerializerOptions);
@@ -160,6 +164,504 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
+    public async Task TypedDirectoryTransfersRemainTransferJobsAndCompleteThroughTheGuardedForegroundSession()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var localSource = Path.Combine(fixture.Directory.Path, "upload-directory");
+        Directory.CreateDirectory(localSource);
+        await File.WriteAllTextAsync(Path.Combine(localSource, "nested.txt"), "data", TestContext.Current.CancellationToken);
+
+        var download = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/directory-transfer-source",
+            Path.Combine(fixture.Directory.Path, "download-directory"), TransferMode.Resume,
+            SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken);
+        var upload = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Upload, localSource, "/remote/new-directory-target",
+            TransferMode.Resume, SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken);
+
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Where(job => job.Id == download.Job.Id || job.Id == upload.Job.Id)
+            .All(job => job.State == JobState.Completed), TestContext.Current.CancellationToken);
+        Assert.Equal(JobKind.Transfer, fixture.Jobs.GetJobs().Single(job => job.Id == download.Job.Id).Kind);
+        Assert.Equal(JobKind.Transfer, fixture.Jobs.GetJobs().Single(job => job.Id == upload.Job.Id).Kind);
+        Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" && item.Command.Contains("mirror --continue", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal) &&
+            item.Command.Contains("directory-transfer-source", StringComparison.Ordinal));
+        Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" && item.Command.Contains("mirror --reverse --continue", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal) &&
+            item.Command.Contains("upload-directory", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer-queue" && item.Command.Contains("mirror", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task TransferEnqueueRequiresExistingMatchingRegularSources()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var destination = Path.Combine(fixture.Directory.Path, "download.bin");
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/missing-transfer-source", destination)),
+            TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file.bin", destination,
+                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/transfer-link", destination)),
+            TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/transfer-special", destination)),
+            TestContext.Current.CancellationToken));
+
+        var missingLocal = Path.Combine(fixture.Directory.Path, "missing-upload.bin");
+        await Assert.ThrowsAsync<ArgumentException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, missingLocal, "/remote/target.bin")),
+            TestContext.Current.CancellationToken));
+        var localFile = Path.Combine(fixture.Directory.Path, "upload.bin");
+        await File.WriteAllTextAsync(localFile, "data", TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, localFile, "/remote/target.bin",
+                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, localFile, "/remote/transfer-link")),
+            TestContext.Current.CancellationToken));
+
+        Assert.Empty(fixture.Jobs.GetJobs());
+    }
+
+    [Fact]
+    public void LocalTransferAttributeClassificationRejectsReparsePointsAndSpecialEntries()
+    {
+        Assert.Equal(TransferSourceKind.File,
+            AgentWorkspaceService.ClassifyLocalTransferAttributes(FileAttributes.Normal));
+        Assert.Equal(TransferSourceKind.Directory,
+            AgentWorkspaceService.ClassifyLocalTransferAttributes(FileAttributes.Directory));
+        Assert.Throws<NotSupportedException>(() =>
+            AgentWorkspaceService.ClassifyLocalTransferAttributes(FileAttributes.ReparsePoint));
+        Assert.Throws<NotSupportedException>(() =>
+            AgentWorkspaceService.ClassifyLocalTransferAttributes(FileAttributes.Device));
+        AgentWorkspaceService.ValidateLocalTransferAncestorAttributes(FileAttributes.Directory);
+        Assert.Throws<NotSupportedException>(() =>
+            AgentWorkspaceService.ValidateLocalTransferAncestorAttributes(FileAttributes.ReparsePoint));
+        Assert.Throws<NotSupportedException>(() =>
+            AgentWorkspaceService.ValidateLocalTransferAncestorAttributes(FileAttributes.Device));
+        Assert.Throws<IOException>(() =>
+            AgentWorkspaceService.ValidateLocalTransferAncestorAttributes(FileAttributes.Normal));
+    }
+
+    [Fact]
+    public async Task TransferEnqueueRejectsExistingDestinationsOfTheWrongKind()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var localDirectory = Path.Combine(fixture.Directory.Path, "existing-directory");
+        Directory.CreateDirectory(localDirectory);
+        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file.bin", localDirectory)),
+            TestContext.Current.CancellationToken));
+
+        var localFile = Path.Combine(fixture.Directory.Path, "existing-file.bin");
+        await File.WriteAllTextAsync(localFile, "data", TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/directory-transfer-source", localFile,
+                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file.bin",
+                Path.Combine(localFile, "child.bin"))), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, localFile, "/remote/directory-destination")),
+            TestContext.Current.CancellationToken));
+
+        var uploadDirectory = Path.Combine(fixture.Directory.Path, "upload-directory");
+        Directory.CreateDirectory(uploadDirectory);
+        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, uploadDirectory, "/remote/existing-file.bin",
+                TransferMode.Resume, SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken));
+
+        Assert.Empty(fixture.Jobs.GetJobs());
+    }
+
+    [Fact]
+    public async Task TransferEnqueueRejectsNonCanonicalRemoteAndDeviceLocalPathsWithoutSideEffects()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var commandsBefore = fixture.ProcessHost.TaggedCommands.Count;
+        var startsBefore = fixture.ProcessHost.Starts.Count;
+        var destination = Path.Combine(fixture.Directory.Path, "invalid.bin");
+        var invalidRemotePaths = new[]
+        {
+            "/safe/../outside",
+            "/safe/./outside",
+            "/safe//outside",
+            "/safe/outside/",
+            "/" + new string('a', 4096),
+            "/" + string.Join('/', Enumerable.Repeat("part", 129)),
+        };
+
+        foreach (var remotePath in invalidRemotePaths)
+        {
+            await Assert.ThrowsAsync<ArgumentException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+                new(Guid.NewGuid(), profile.Id, TransferDirection.Download, remotePath, destination)),
+                TestContext.Current.CancellationToken));
+        }
+
+        foreach (var devicePath in new[] { @"\\?\C:\outside.bin", "//?/C:/outside.bin", @"\\.\C:\outside.bin", "//./C:/outside.bin" })
+        {
+            await Assert.ThrowsAsync<ArgumentException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+                new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, devicePath, "/remote/device.bin")),
+                TestContext.Current.CancellationToken));
+        }
+        Assert.Equal(commandsBefore, fixture.ProcessHost.TaggedCommands.Count);
+        Assert.Equal(startsBefore, fixture.ProcessHost.Starts.Count);
+        Assert.Empty(fixture.Jobs.GetJobs());
+    }
+
+    [Fact]
+    public async Task TransferCanonicalizesLocalDotSegmentsOnceBeforeValidationAndExecution()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var source = Path.Combine(fixture.Directory.Path, "canonical-source.bin");
+        await File.WriteAllTextAsync(source, "data", TestContext.Current.CancellationToken);
+        var backslashPlan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload,
+            Path.Combine(fixture.Directory.Path, "reviewed", "..", "canonical-source.bin"), "/remote/canonical-backslash.bin");
+        var slashPlan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload,
+            backslashPlan.SourcePath.Replace('\\', '/'), "/remote/canonical-slash.bin");
+
+        var first = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, backslashPlan), TestContext.Current.CancellationToken);
+        var second = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, slashPlan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == first.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == second.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+
+        var submissions = fixture.ProcessHost.TaggedCommands.Where(item =>
+            item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("canonical-", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(2, submissions.Length);
+        Assert.All(submissions, item => Assert.DoesNotContain("..", item.Command, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task QuickDirectoryTransfersRejectRemoteAndLocalRootsWithoutStartingWork()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var commandsBefore = fixture.ProcessHost.TaggedCommands.Count;
+        var startsBefore = fixture.ProcessHost.Starts.Count;
+        var localDirectory = Path.Combine(fixture.Directory.Path, "non-root-source");
+        Directory.CreateDirectory(localDirectory);
+        var driveRoot = Path.GetPathRoot(fixture.Directory.Path)!;
+        var plans = new[]
+        {
+            new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/",
+                Path.Combine(fixture.Directory.Path, "server-root"), TransferMode.Resume,
+                SourceKind: TransferSourceKind.Directory),
+            new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, localDirectory, "/",
+                TransferMode.Resume, SourceKind: TransferSourceKind.Directory),
+            new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, driveRoot, "/remote/drive-root",
+                TransferMode.Resume, SourceKind: TransferSourceKind.Directory),
+            new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, @"\\server\share\", "/remote/share-root",
+                TransferMode.Resume, SourceKind: TransferSourceKind.Directory),
+            new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/directory-transfer-source", driveRoot,
+                TransferMode.Resume, SourceKind: TransferSourceKind.Directory),
+        };
+
+        foreach (var plan in plans)
+        {
+            var error = await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.EnqueueTransferAsync(
+                new(session.SessionId, plan), TestContext.Current.CancellationToken));
+            Assert.Contains("reviewed Mirror", error.Message, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(commandsBefore, fixture.ProcessHost.TaggedCommands.Count);
+        Assert.Equal(startsBefore, fixture.ProcessHost.Starts.Count);
+        Assert.Empty(fixture.Jobs.GetJobs());
+    }
+
+    [Fact]
+    public async Task RemoteAncestorLinkDriftBlocksFileAndDirectoryExecution()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var file = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/link-ancestor/file.bin",
+                Path.Combine(fixture.Directory.Path, "ancestor-file.bin"))), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == file.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("ancestor/file.bin", StringComparison.Ordinal));
+
+        var directory = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/directory-link-ancestor/source",
+                Path.Combine(fixture.Directory.Path, "ancestor-directory"), TransferMode.Resume,
+                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == directory.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" && item.Command.Contains("directory-link-ancestor/source", StringComparison.Ordinal) &&
+            item.Command.Contains("mirror", StringComparison.Ordinal) && !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+        Assert.All(new[] { file.Job.Id, directory.Job.Id }, id =>
+            Assert.Contains("ancestor", fixture.Jobs.GetJobs().Single(job => job.Id == id).Error?.Message,
+                StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData(MirrorDirection.Download, false)]
+    [InlineData(MirrorDirection.Download, true)]
+    [InlineData(MirrorDirection.Upload, false)]
+    [InlineData(MirrorDirection.Upload, true)]
+    public async Task MirrorPreviewRejectsLocalRootOrAncestorJunction(MirrorDirection direction, bool ancestor)
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var external = Path.Combine(Path.GetTempPath(), "LFTPPilot.MirrorJunction", Guid.NewGuid().ToString("N"));
+        var junction = Path.Combine(fixture.Directory.Path, "junction");
+        Directory.CreateDirectory(external);
+        if (ancestor) Directory.CreateDirectory(Path.Combine(external, "child"));
+        CreateDirectoryJunction(junction, external);
+        var localRoot = ancestor ? Path.Combine(junction, "child") : junction;
+        try
+        {
+            var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Unsafe junction", direction, localRoot, "/remote");
+            await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.PreviewMirrorAsync(
+                new(session.SessionId, definition), TestContext.Current.CancellationToken));
+
+            Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag == "mirror-preview");
+            Assert.Empty(fixture.Jobs.GetJobs());
+        }
+        finally
+        {
+            Directory.Delete(junction, recursive: false);
+            Directory.Delete(external, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task MirrorFinalCheckRejectsLocalAncestorChangedToJunctionForBothDirections()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var blockerDefinition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Gate blocker", MirrorDirection.Download,
+            fixture.Directory.Path, "/gate-blocker");
+        var blockerPreview = await fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, blockerDefinition), TestContext.Current.CancellationToken);
+        var blocker = await fixture.Service.ApproveMirrorAsync(
+            new(session.SessionId, blockerDefinition, blockerPreview.Id, blockerPreview.ApprovalToken),
+            TestContext.Current.CancellationToken);
+        await fixture.ProcessHost.TransferGateEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        var parent = Path.Combine(fixture.Directory.Path, "reviewed-parent");
+        var localRoot = Path.Combine(parent, "child");
+        Directory.CreateDirectory(localRoot);
+        var approved = new List<MirrorApproveResult>();
+        foreach (var direction in new[] { MirrorDirection.Download, MirrorDirection.Upload })
+        {
+            var suffix = direction.ToString().ToLowerInvariant();
+            var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, $"Junction drift {suffix}", direction,
+                localRoot, $"/local-root-drift-{suffix}");
+            var preview = await fixture.Service.PreviewMirrorAsync(
+                new(session.SessionId, definition), TestContext.Current.CancellationToken);
+            Assert.False(preview.ContainsDeletions);
+            approved.Add(await fixture.Service.ApproveMirrorAsync(
+                new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken));
+        }
+
+        Directory.Delete(parent, recursive: true);
+        var external = Path.Combine(Path.GetTempPath(), "LFTPPilot.MirrorDrift", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(external, "child"));
+        CreateDirectoryJunction(parent, external);
+        try
+        {
+            fixture.ProcessHost.ReleaseTransferGate.TrySetResult(true);
+            await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == blocker.Job.Id).State == JobState.Completed,
+                TestContext.Current.CancellationToken);
+            foreach (var result in approved)
+            {
+                await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == result.Job.Id).State == JobState.Failed,
+                    TestContext.Current.CancellationToken);
+            }
+
+            Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+                item.Command.Contains("/local-root-drift-", StringComparison.Ordinal) &&
+                item.Command.Contains("mirror", StringComparison.Ordinal) &&
+                !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(parent, recursive: false);
+            Directory.Delete(external, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DirectoryDownloadRejectsAnExistingLocalFileSystemRootBeforeRemoteStat()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var destinationRoot = Path.GetPathRoot(fixture.Directory.Path)!;
+        var plan = new TransferPlan(
+            Guid.NewGuid(),
+            profile.Id,
+            TransferDirection.Download,
+            "/remote/directory-transfer-source",
+            destinationRoot,
+            TransferMode.Resume,
+            SourceKind: TransferSourceKind.Directory);
+
+        var commandsBefore = fixture.ProcessHost.TaggedCommands.Count;
+        await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken));
+
+        Assert.Equal(commandsBefore, fixture.ProcessHost.TaggedCommands.Count);
+        Assert.Empty(fixture.Jobs.GetJobs());
+    }
+
+    [Fact]
+    public async Task FreshRemoteStatRejectsAListingForAPathOtherThanTheRequest()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/mismatched-stat",
+                Path.Combine(fixture.Directory.Path, "mismatched-stat.bin"))), TestContext.Current.CancellationToken));
+
+        Assert.Empty(fixture.Jobs.GetJobs());
+        Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "validation" && item.Command.StartsWith("recls -ldB ", StringComparison.Ordinal) &&
+            item.Command.Contains("mismatched-stat", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task FreshRemoteStatTreatsCleanEmptyUploadDestinationAsAbsent()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var source = Path.Combine(fixture.Directory.Path, "empty-stat-upload.bin");
+        await File.WriteAllTextAsync(source, "data", TestContext.Current.CancellationToken);
+
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source,
+                "/remote/zero-line-missing-target")), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+
+        Assert.All(fixture.ProcessHost.TaggedCommands.Where(item =>
+            item.Role == "validation" && item.Command.Contains("zero-line-missing-target", StringComparison.Ordinal)),
+            item => Assert.StartsWith("recls -ldB ", item.Command, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task WorkspaceFreshStatAcceptsPathlessOrCorrectlyBoundMissingDiagnosticsAndRejectsWrongPath()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var source = Path.Combine(fixture.Directory.Path, "missing-diagnostic-upload.bin");
+        await File.WriteAllTextAsync(source, "data", TestContext.Current.CancellationToken);
+
+        foreach (var target in new[] { "/remote/pathless-missing-target", "/remote/bound-missing-target" })
+        {
+            var transfer = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+                new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source, target)),
+                TestContext.Current.CancellationToken);
+            await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == transfer.Job.Id).State == JobState.Completed,
+                TestContext.Current.CancellationToken);
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source, "/remote/wrong-bound-missing-target")),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ExecutionFreshStatRejectsDirectoryChangedToLinkWithoutQueueSubmission()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download,
+            "/remote/stat-drift-directory", Path.Combine(fixture.Directory.Path, "stat-drift-directory"),
+            TransferMode.Resume, SourceKind: TransferSourceKind.Directory);
+
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("symbolic link", fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).Error?.Message,
+            StringComparison.OrdinalIgnoreCase);
+        var stats = fixture.ProcessHost.TaggedCommands.Where(item =>
+            item.Command.StartsWith("recls -ldB ", StringComparison.Ordinal) &&
+            item.Command.Contains("stat-drift-directory", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(2, stats.Length);
+        Assert.All(stats, item => Assert.StartsWith("recls -ldB ", item.Command, StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            (item.Role == "transfer-queue" || item.Role == "transfer") &&
+            item.Command.Contains("stat-drift-directory", StringComparison.Ordinal) &&
+            !item.Command.StartsWith("recls -ldB ", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("/remote/dir-over-file-directory")]
+    [InlineData("/remote/unrecognized-destructive-directory")]
+    public async Task AutomaticDirectoryDryRunBlocksDestructiveOrUnrecognizedOutput(string remoteSource)
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, remoteSource,
+            Path.Combine(fixture.Directory.Path, "dry-run-destination"), TransferMode.Resume,
+            SourceKind: TransferSourceKind.Directory);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken));
+
+        Assert.Contains("reviewed Mirror workflow", error.Message, StringComparison.Ordinal);
+        Assert.Empty(fixture.Jobs.GetJobs());
+        var preview = Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "directory-transfer-preview" && item.Command.Contains(remoteSource, StringComparison.Ordinal));
+        Assert.StartsWith("mirror --verbose=1 --dry-run", preview.Command, StringComparison.Ordinal);
+        Assert.Contains("--no-symlinks --overwrite", preview.Command, StringComparison.Ordinal);
+        Assert.DoesNotContain("--delete", preview.Command, StringComparison.Ordinal);
+        Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag == "transfer-queue");
+    }
+
+    [Fact]
     public async Task FailedTransferRetryIsSingleShotRevalidatedAndCompletes()
     {
         await using var fixture = new WorkspaceFixture();
@@ -232,6 +734,67 @@ public sealed class WorkspaceTests
         await Assert.ThrowsAsync<ArgumentException>(() => fixture.Service.RetryJobAsync(
             new(enqueued.Job.Id), TestContext.Current.CancellationToken));
         Assert.Equal(original, fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id));
+    }
+
+    [Fact]
+    public async Task DirectoryRetryRevalidatesTheDeclaredSourceKindBeforeResettingFailure()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var source = Path.Combine(fixture.Directory.Path, "retry-once.bin");
+        Directory.CreateDirectory(source);
+        var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source,
+            "/remote/retry-directory-target", TransferMode.Resume, SourceKind: TransferSourceKind.Directory);
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        var original = fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id);
+        Directory.Delete(source);
+        await File.WriteAllTextAsync(source, "replacement file", TestContext.Current.CancellationToken);
+
+        var error = await Assert.ThrowsAsync<IOException>(() => fixture.Service.RetryJobAsync(
+            new(enqueued.Job.Id), TestContext.Current.CancellationToken));
+        Assert.Contains("declares a directory", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(original, fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id));
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" && item.Command.Contains("mirror", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal) &&
+            item.Command.Contains("retry-once.bin", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DirectoryRetryDryRunFailurePreservesTheOriginalFailedAttempt()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var source = Path.Combine(fixture.Directory.Path, "retry-once.bin");
+        Directory.CreateDirectory(source);
+        var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source,
+            "/remote/retry-preview-target", TransferMode.Resume, SourceKind: TransferSourceKind.Directory);
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        var original = fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.RetryJobAsync(
+            new(enqueued.Job.Id), TestContext.Current.CancellationToken));
+
+        Assert.Contains("reviewed Mirror workflow", error.Message, StringComparison.Ordinal);
+        Assert.Equal(original, fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id));
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" && item.Command.Contains("mirror", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal) &&
+            item.Command.Contains("retry-once.bin", StringComparison.Ordinal));
+        Assert.Equal(3, fixture.ProcessHost.TaggedCommands.Count(item =>
+            (item.Role == "directory-transfer-preview" || item.Role == "transfer") &&
+            item.Command.Contains("--dry-run", StringComparison.Ordinal) &&
+            item.Command.Contains("retry-preview-target", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -312,6 +875,71 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
+    public async Task ScheduledDirectoryTransferRevalidatesTheDeclaredSourceKindAtRunTime()
+    {
+        var time = new ManualTimeProvider(new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero));
+        await using var fixture = new WorkspaceFixture(timeProvider: time);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var source = Path.Combine(fixture.Directory.Path, "scheduled-directory-source");
+        Directory.CreateDirectory(source);
+        var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source,
+            "/remote/scheduled-directory-target", TransferMode.Resume, RunAt: time.GetUtcNow().AddMinutes(15),
+            SourceKind: TransferSourceKind.Directory);
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        Directory.Delete(source);
+        await File.WriteAllTextAsync(source, "replacement file", TestContext.Current.CancellationToken);
+        time.Advance(TimeSpan.FromMinutes(15));
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State != JobState.Scheduled,
+            TestContext.Current.CancellationToken);
+        _ = await fixture.Store.LoadAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        var failed = fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id);
+        Assert.Contains("declares a directory", failed.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("scheduled-directory-source", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ScheduledDirectoryDryRunBlocksNewTypeCollisionWithoutQueueSubmission()
+    {
+        var time = new ManualTimeProvider(new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero));
+        await using var fixture = new WorkspaceFixture(timeProvider: time);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var source = Path.Combine(fixture.Directory.Path, "scheduled-preview-source");
+        Directory.CreateDirectory(source);
+        var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source,
+            "/remote/scheduled-preview-target", TransferMode.Resume, RunAt: time.GetUtcNow().AddMinutes(15),
+            SourceKind: TransferSourceKind.Directory);
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+
+        time.Advance(TimeSpan.FromMinutes(15));
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State != JobState.Scheduled,
+            TestContext.Current.CancellationToken);
+        _ = await fixture.Store.LoadAsync(TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("reviewed Mirror workflow", fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).Error?.Message,
+            StringComparison.Ordinal);
+        Assert.Equal(2, fixture.ProcessHost.TaggedCommands.Count(item =>
+            (item.Role == "directory-transfer-preview" || item.Role == "transfer") &&
+            item.Command.Contains("--dry-run", StringComparison.Ordinal) &&
+            item.Command.Contains("scheduled-preview-target", StringComparison.Ordinal)));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer-queue" && item.Command.Contains("scheduled-preview-source", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task CancellingRunOnceTransferPreventsExecutionAfterItsSelectedTime()
     {
         var time = new ManualTimeProvider(new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero));
@@ -335,7 +963,72 @@ public sealed class WorkspaceTests
         await Task.Yield();
 
         Assert.Equal(JobState.Cancelled, fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State);
-        Assert.DoesNotContain(fixture.ProcessHost.Commands, command => command.Contains("never-run.bin", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("never-run.bin", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CancellingDueTimeValidationPreservesBrowseAndRecreatesOnlyValidationRole()
+    {
+        var time = new ManualTimeProvider(new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero));
+        await using var fixture = new WorkspaceFixture(timeProvider: time);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var scheduled = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/scheduled-validation-cancel.bin",
+                Path.Combine(fixture.Directory.Path, "scheduled-validation-cancel.bin"),
+                RunAt: time.GetUtcNow().AddMinutes(10))), TestContext.Current.CancellationToken);
+
+        time.Advance(TimeSpan.FromMinutes(10));
+        await fixture.ProcessHost.ScheduledValidationEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        Assert.True(fixture.Service.TryCancelOperation(scheduled.Job.Id, "Cancel due-time validation"));
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == scheduled.Job.Id).State == JobState.Cancelled,
+            TestContext.Current.CancellationToken);
+
+        var browse = await fixture.Service.BrowseRemoteAsync(new(session.SessionId, "/remote"), TestContext.Current.CancellationToken);
+        Assert.NotEmpty(browse.Entries);
+        var after = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/after-scheduled-validation-cancel.bin",
+                Path.Combine(fixture.Directory.Path, "after-scheduled-validation-cancel.bin"))),
+            TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == after.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, fixture.ProcessHost.Starts.Count(start => start.Tag == "browse"));
+        Assert.Equal(2, fixture.ProcessHost.Starts.Count(start => start.Tag == "validation"));
+        Assert.Equal(1, fixture.ProcessHost.Starts.Count(start => start.Tag == "transfer-queue"));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("\"/remote/scheduled-validation-cancel.bin\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ScheduledSkipIsDecidedInsideReservedSlotWithoutSubmittingWhenDestinationAppears()
+    {
+        var time = new ManualTimeProvider(new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero));
+        await using var fixture = new WorkspaceFixture(timeProvider: time);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var destination = Path.Combine(fixture.Directory.Path, "scheduled-skip.bin");
+        var scheduled = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/scheduled-skip.bin", destination,
+                TransferMode.Skip, RunAt: time.GetUtcNow().AddMinutes(10))), TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(destination, "appeared", TestContext.Current.CancellationToken);
+
+        time.Advance(TimeSpan.FromMinutes(10));
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == scheduled.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("Skipped", fixture.Jobs.GetJobs().Single(job => job.Id == scheduled.Job.Id).Status,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role.StartsWith("transfer-policy-", StringComparison.Ordinal) &&
+            item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("scheduled-skip.bin", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -528,8 +1221,10 @@ public sealed class WorkspaceTests
         Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
             item.Role.StartsWith("transfer-policy-", StringComparison.Ordinal) &&
             item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("set xfer:use-temp-file no", StringComparison.Ordinal) &&
             item.Command.Contains("set xfer:clobber no && get", StringComparison.Ordinal) &&
-            item.Command.Split("set xfer:clobber yes", StringSplitOptions.None).Length == 3);
+            item.Command.Split("set xfer:clobber yes", StringSplitOptions.None).Length == 3 &&
+            item.Command.Split("set xfer:use-temp-file yes", StringSplitOptions.None).Length == 3);
         Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
             item.Role == "transfer-queue" && item.Command.Contains("xfer:clobber", StringComparison.Ordinal));
 
@@ -586,6 +1281,183 @@ public sealed class WorkspaceTests
             TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == third.Job.Id).State == JobState.Completed, TestContext.Current.CancellationToken);
         Assert.Equal(2, fixture.ProcessHost.Starts.Count(start => start.Tag == "transfer-queue"));
+    }
+
+    [Fact]
+    public async Task NativeQueueRevalidatesOnlyAfterReservingItsBoundedSlotAndKeepsQueueAfterValidationFailure()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var first = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/slot-block-one.bin",
+                Path.Combine(fixture.Directory.Path, "slot-block-one.bin"))), TestContext.Current.CancellationToken);
+        var second = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/slot-block-two.bin",
+                Path.Combine(fixture.Directory.Path, "slot-block-two.bin"))), TestContext.Current.CancellationToken);
+        await fixture.ProcessHost.QueueSlotsFilled.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        var drift = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file-slot-drift.bin",
+                Path.Combine(fixture.Directory.Path, "file-slot-drift.bin"))), TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Command.StartsWith("recls -ldB ", StringComparison.Ordinal) &&
+            item.Command.Contains("\"/remote/file-slot-drift.bin\"", StringComparison.Ordinal));
+
+        fixture.ProcessHost.ReleaseReservedQueueSlots.TrySetResult(true);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == first.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == second.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == drift.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("symbolic link", fixture.Jobs.GetJobs().Single(job => job.Id == drift.Job.Id).Error?.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("file-slot-drift.bin", StringComparison.Ordinal));
+
+        var afterFailure = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/after-validation-failure.bin",
+                Path.Combine(fixture.Directory.Path, "after-validation-failure.bin"))), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == afterFailure.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(1, fixture.ProcessHost.Starts.Count(start => start.Tag == "transfer-queue"));
+    }
+
+    [Fact]
+    public async Task CancellingFinalValidationRecreatesValidationSessionWithoutBreakingBrowseOrQueue()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var cancelled = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/cancel-validation.bin",
+                Path.Combine(fixture.Directory.Path, "cancel-validation.bin"))), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.ProcessHost.TaggedCommands.Any(item =>
+            item.Role == "validation" && item.Command.Contains("cancel-validation.bin", StringComparison.Ordinal)),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(fixture.Service.TryCancelOperation(cancelled.Job.Id, "Cancel validation"));
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == cancelled.Job.Id).State == JobState.Cancelled,
+            TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("cancel-validation.bin", StringComparison.Ordinal));
+
+        var after = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/after-validation-cancel.bin",
+                Path.Combine(fixture.Directory.Path, "after-validation-cancel.bin"))), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == after.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        var browse = await fixture.Service.BrowseRemoteAsync(new(session.SessionId, "/remote"), TestContext.Current.CancellationToken);
+        Assert.NotEmpty(browse.Entries);
+        Assert.Equal(1, fixture.ProcessHost.Starts.Count(start => start.Tag == "browse"));
+        Assert.Equal(2, fixture.ProcessHost.Starts.Count(start => start.Tag == "validation"));
+        Assert.Equal(1, fixture.ProcessHost.Starts.Count(start => start.Tag == "transfer-queue"));
+    }
+
+    [Fact]
+    public async Task SharedAndIsolatedQueuesSerializeTheReusableValidationSessionAcrossCancellation()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var first = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/validation-gate-one.bin",
+                Path.Combine(fixture.Directory.Path, "validation-gate-one.bin"),
+                RateLimitBytesPerSecond: 1024)), TestContext.Current.CancellationToken);
+        await fixture.ProcessHost.ValidationGateEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        var secondTask = fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/validation-gate-two.bin",
+                Path.Combine(fixture.Directory.Path, "validation-gate-two.bin"),
+                RateLimitBytesPerSecond: 2048)), TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "validation" && item.Command.Contains("validation-gate-two.bin", StringComparison.Ordinal));
+
+        Assert.True(fixture.Service.TryCancelOperation(first.Job.Id, "Cancel serialized validation"));
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == first.Job.Id).State == JobState.Cancelled,
+            TestContext.Current.CancellationToken);
+        var second = await secondTask;
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == second.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(2, fixture.ProcessHost.Starts.Count(start => start.Tag == "validation"));
+    }
+
+    [Fact]
+    public async Task GuardedDirectoryTransferRepeatsDryRunAfterWaitingForTransferGate()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var blockerDefinition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Gate blocker", MirrorDirection.Download,
+            fixture.Directory.Path, "/gate-blocker");
+        var blockerPreview = await fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, blockerDefinition), TestContext.Current.CancellationToken);
+        var blocker = await fixture.Service.ApproveMirrorAsync(
+            new(session.SessionId, blockerDefinition, blockerPreview.Id, blockerPreview.ApprovalToken),
+            TestContext.Current.CancellationToken);
+        await fixture.ProcessHost.TransferGateEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        var localSource = Path.Combine(fixture.Directory.Path, "guarded-drift-source");
+        Directory.CreateDirectory(localSource);
+        var directory = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, localSource, "/remote/guarded-drift-target",
+                TransferMode.Resume, SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken);
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "directory-transfer-preview" && item.Command.Contains("guarded-drift-target", StringComparison.Ordinal));
+
+        fixture.ProcessHost.ReleaseTransferGate.TrySetResult(true);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == blocker.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == directory.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("reviewed Mirror workflow", fixture.Jobs.GetJobs().Single(job => job.Id == directory.Job.Id).Error?.Message,
+            StringComparison.Ordinal);
+        Assert.Equal(2, fixture.ProcessHost.TaggedCommands.Count(item =>
+            item.Command.Contains("guarded-drift-target", StringComparison.Ordinal) &&
+            item.Command.Contains("--dry-run", StringComparison.Ordinal)));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" && item.Command.Contains("guarded-drift-target", StringComparison.Ordinal) &&
+            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task GuardedDirectoryTransferRevalidatesRemotePrefixesAfterFinalDryRun()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var transfer = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            new(Guid.NewGuid(), profile.Id, TransferDirection.Download,
+                "/remote/post-directory-link-ancestor/source",
+                Path.Combine(fixture.Directory.Path, "post-directory-destination"),
+                TransferMode.Resume, SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken);
+
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == transfer.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("ancestor", fixture.Jobs.GetJobs().Single(job => job.Id == transfer.Job.Id).Error?.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, fixture.ProcessHost.TaggedCommands.Count(item =>
+            item.Command.Contains("post-directory-link-ancestor/source", StringComparison.Ordinal) &&
+            item.Command.Contains("--dry-run", StringComparison.Ordinal)));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" &&
+            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            item.Command.Contains("post-directory-link-ancestor/source", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -650,9 +1522,41 @@ public sealed class WorkspaceTests
         var approved = await fixture.Service.ApproveMirrorAsync(
             new(session.SessionId, definition, preview.Id, preview.ApprovalToken, DeletionsApproved: true), TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Completed, TestContext.Current.CancellationToken);
-        Assert.Contains(fixture.ProcessHost.Commands, command => command.Contains("mirror --verbose=1 --delete", StringComparison.Ordinal));
+        Assert.Contains(fixture.ProcessHost.Commands, command =>
+            command.Contains("mirror --verbose=1", StringComparison.Ordinal) &&
+            command.Contains("--delete", StringComparison.Ordinal));
         Assert.DoesNotContain(fixture.ProcessHost.Commands, command => command.Contains("Removing old file", StringComparison.Ordinal));
         Assert.Equal(1, fixture.ProcessHost.DisposedRoles.Count(role => role == "mirror-preview"));
+    }
+
+    [Fact]
+    public async Task TypeCollisionDeletionInNonDeletingMirrorRequiresApprovalAndSecondPreview()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Collision mirror", MirrorDirection.Download,
+            fixture.Directory.Path, "/collision-review");
+        var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        Assert.True(preview.ContainsDeletions);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveMirrorAsync(
+            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken));
+        var approved = await fixture.Service.ApproveMirrorAsync(
+            new(session.SessionId, definition, preview.Id, preview.ApprovalToken, DeletionsApproved: true),
+            TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, fixture.ProcessHost.Commands.Count(command =>
+            command.Contains("mirror --verbose=1 --dry-run", StringComparison.Ordinal) &&
+            command.Contains("/collision-review", StringComparison.Ordinal)));
+        Assert.Single(fixture.ProcessHost.Commands, command =>
+            command.Contains("mirror --verbose=1", StringComparison.Ordinal) &&
+            command.Contains("/collision-review", StringComparison.Ordinal) &&
+            !command.Contains("--dry-run", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -673,7 +1577,136 @@ public sealed class WorkspaceTests
 
         Assert.Contains("changed", failed.Error?.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(fixture.ProcessHost.Commands, command =>
-            command.Contains("mirror --verbose=1 --delete", StringComparison.Ordinal) && !command.Contains("--dry-run", StringComparison.Ordinal));
+            command.Contains("mirror --verbose=1", StringComparison.Ordinal) &&
+            command.Contains("--delete", StringComparison.Ordinal) &&
+            !command.Contains("--dry-run", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task InitiallyCleanMirrorRejectsADeletionThatAppearsAtFinalReview()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Clean drift", MirrorDirection.Download,
+            fixture.Directory.Path, "/clean-collision-drift");
+        var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        Assert.False(preview.ContainsDeletions);
+
+        var approved = await fixture.Service.ApproveMirrorAsync(
+            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("changed", fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).Error?.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, fixture.ProcessHost.TaggedCommands.Count(item =>
+            item.Command.Contains("/clean-collision-drift", StringComparison.Ordinal) &&
+            item.Command.Contains("--dry-run", StringComparison.Ordinal)));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Command.Contains("/clean-collision-drift", StringComparison.Ordinal) &&
+            item.Command.Contains("mirror", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MirrorFinalRemotePrefixWalkRejectsAnAncestorThatChangedToLink()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Remote ancestor drift", MirrorDirection.Download,
+            fixture.Directory.Path, "/remote/mirror-link-ancestor/root");
+        var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        Assert.False(preview.ContainsDeletions);
+
+        var approved = await fixture.Service.ApproveMirrorAsync(
+            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("ancestor", fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).Error?.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Command.Contains("/remote/mirror-link-ancestor/root", StringComparison.Ordinal) &&
+            item.Command.Contains("--dry-run", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Command.Contains("/remote/mirror-link-ancestor/root", StringComparison.Ordinal) &&
+            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MirrorRevalidatesRemotePrefixesAfterMatchingFinalDryRun()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Post-preview remote drift",
+            MirrorDirection.Download, fixture.Directory.Path, "/remote/post-mirror-link-ancestor/root");
+        var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        Assert.False(preview.ContainsDeletions);
+        var approved = await fixture.Service.ApproveMirrorAsync(
+            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken);
+
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("ancestor", fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).Error?.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, fixture.ProcessHost.TaggedCommands.Count(item =>
+            item.Command.StartsWith("mirror --verbose=1 --dry-run", StringComparison.Ordinal) &&
+            item.Command.Contains("post-mirror-link-ancestor/root", StringComparison.Ordinal)));
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            item.Command.Contains("post-mirror-link-ancestor/root", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MirrorRevalidatesLocalAncestorsAfterMatchingFinalDryRun()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var parent = Path.Combine(fixture.Directory.Path, "post-dryrun-parent");
+        var localRoot = Path.Combine(parent, "child");
+        Directory.CreateDirectory(localRoot);
+        var external = Path.Combine(Path.GetTempPath(), "LFTPPilot.PostDryRun", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(external, "child"));
+        fixture.ProcessHost.FinalDryRunAction = () =>
+        {
+            Directory.Delete(parent, recursive: true);
+            CreateDirectoryJunction(parent, external);
+        };
+        var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Post-preview local drift",
+            MirrorDirection.Download, localRoot, "/local-post-dryrun");
+        var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        var approved = await fixture.Service.ApproveMirrorAsync(
+            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken);
+        try
+        {
+            await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Failed,
+                TestContext.Current.CancellationToken);
+
+            Assert.Contains("reparse", fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).Error?.Message,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+                item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+                item.Command.Contains("/local-post-dryrun", StringComparison.Ordinal) &&
+                !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+        }
+        finally
+        {
+            fixture.ProcessHost.FinalDryRunAction = null;
+            if (Directory.Exists(parent)) Directory.Delete(parent, recursive: false);
+            if (Directory.Exists(external)) Directory.Delete(external, recursive: true);
+        }
     }
 
     [Fact]
@@ -963,6 +1996,23 @@ public sealed class WorkspaceTests
         }
     }
 
+    private static void CreateDirectoryJunction(string linkPath, string targetPath)
+    {
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            Arguments = $"/d /c mklink /J \"{linkPath}\" \"{targetPath}\"",
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        }) ?? throw new InvalidOperationException("The directory-junction test helper did not start.");
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0,
+            $"The directory-junction test helper failed: {process.StandardError.ReadToEnd()}");
+        Assert.True((File.GetAttributes(linkPath) & FileAttributes.ReparsePoint) != 0);
+    }
+
     private sealed class WorkspaceFixture : IAsyncDisposable
     {
         public WorkspaceFixture(bool createService = true, TimeProvider? timeProvider = null)
@@ -1010,6 +2060,8 @@ public sealed class WorkspaceTests
 
         public async ValueTask DisposeAsync()
         {
+            ProcessHost.ReleaseReservedQueueSlots.TrySetResult(true);
+            ProcessHost.ReleaseTransferGate.TrySetResult(true);
             await Scheduler.DisposeAsync();
             if (Service is not null) await Service.DisposeAsync();
             Directory.Dispose();
@@ -1073,11 +2125,19 @@ public sealed class WorkspaceTests
     {
         private int _nextId = 100;
         private readonly ConcurrentDictionary<string, int> _queueAttempts = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, int> _statAttempts = new(StringComparer.Ordinal);
         public ConcurrentBag<LftpProcessStartOptions> Starts { get; } = [];
         public ConcurrentBag<string> Commands { get; } = [];
         public ConcurrentBag<(string Role, string Command)> TaggedCommands { get; } = [];
         public ConcurrentBag<string> StoppedRoles { get; } = [];
         public ConcurrentBag<string> DisposedRoles { get; } = [];
+        public TaskCompletionSource<bool> QueueSlotsFilled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseReservedQueueSlots { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> TransferGateEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseTransferGate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ValidationGateEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ScheduledValidationEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Action? FinalDryRunAction { get; set; }
         public string? FailRolePrefix { get; set; }
 
         public Task<ILftpSession> StartAsync(LftpProcessStartOptions options, CancellationToken cancellationToken = default)
@@ -1087,7 +2147,10 @@ public sealed class WorkspaceTests
                 throw new System.ComponentModel.Win32Exception("simulated process launch failure");
             Starts.Add(options);
             return Task.FromResult<ILftpSession>(new FakeSession(
-                Interlocked.Increment(ref _nextId), options.Tag, Commands, TaggedCommands, StoppedRoles, DisposedRoles, _queueAttempts));
+                Interlocked.Increment(ref _nextId), options.Tag, Commands, TaggedCommands, StoppedRoles, DisposedRoles,
+                _queueAttempts, _statAttempts, QueueSlotsFilled, ReleaseReservedQueueSlots,
+                TransferGateEntered, ReleaseTransferGate, ValidationGateEntered, ScheduledValidationEntered,
+                () => FinalDryRunAction));
         }
     }
 
@@ -1098,7 +2161,15 @@ public sealed class WorkspaceTests
         ConcurrentBag<(string Role, string Command)> taggedCommands,
         ConcurrentBag<string> stoppedRoles,
         ConcurrentBag<string> disposedRoles,
-        ConcurrentDictionary<string, int> queueAttempts) : ILftpSession
+        ConcurrentDictionary<string, int> queueAttempts,
+        ConcurrentDictionary<string, int> statAttempts,
+        TaskCompletionSource<bool> queueSlotsFilled,
+        TaskCompletionSource<bool> releaseReservedQueueSlots,
+        TaskCompletionSource<bool> transferGateEntered,
+        TaskCompletionSource<bool> releaseTransferGate,
+        TaskCompletionSource<bool> validationGateEntered,
+        TaskCompletionSource<bool> scheduledValidationEntered,
+        Func<Action?> finalDryRunAction) : ILftpSession
     {
         public int ProcessId { get; } = processId;
         public bool IsRunning { get; private set; } = true;
@@ -1117,7 +2188,13 @@ public sealed class WorkspaceTests
                 var scheduledRetryAttempt = command.Contains("scheduled-retry-cancel.bin", StringComparison.Ordinal)
                     ? queueAttempts.AddOrUpdate("scheduled-retry-cancel.bin", 1, static (_, count) => count + 1)
                     : 0;
-                if (!command.Contains("blocking.bin", StringComparison.Ordinal) && scheduledRetryAttempt != 2)
+                if (command.Contains("slot-block-", StringComparison.Ordinal))
+                {
+                    if (queueAttempts.AddOrUpdate("slot-blockers", 1, static (_, count) => count + 1) == 2)
+                        queueSlotsFilled.TrySetResult(true);
+                    _ = EmitQueueMarkerAfterReleaseAsync(command, releaseReservedQueueSlots.Task, cancellationToken);
+                }
+                else if (!command.Contains("blocking.bin", StringComparison.Ordinal) && scheduledRetryAttempt != 2)
                 {
                     var retryOnceFailed = command.Contains("retry-once.bin", StringComparison.Ordinal) &&
                         queueAttempts.AddOrUpdate("retry-once.bin", 1, static (_, count) => count + 1) == 1;
@@ -1137,15 +2214,156 @@ public sealed class WorkspaceTests
             }
             if (role == "remote-transfer" && command.Contains("blocking-r2r.bin", StringComparison.Ordinal))
                 return WaitForCancellationAsync(cancellationToken);
+            if (role == "transfer" && command.Contains("mirror", StringComparison.Ordinal) &&
+                !command.Contains("--dry-run", StringComparison.Ordinal) &&
+                command.Contains("/gate-blocker", StringComparison.Ordinal))
+            {
+                transferGateEntered.TrySetResult(true);
+                return WaitForReleaseAsync(releaseTransferGate.Task, cancellationToken);
+            }
             if (role == "remote-transfer" && command.Contains("failing-r2r.bin", StringComparison.Ordinal))
                 return Task.FromResult(new LftpCommandResult([new("stderr", "get: Access failed: Permission denied")]));
+            if (role == "transfer" && command.Contains("mirror", StringComparison.Ordinal) &&
+                !command.Contains("--dry-run", StringComparison.Ordinal) &&
+                command.Contains("retry-once.bin", StringComparison.Ordinal))
+            {
+                var failed = queueAttempts.AddOrUpdate("directory-retry-once.bin", 1, static (_, count) => count + 1) == 1;
+                return Task.FromResult(failed
+                    ? new LftpCommandResult([new("stderr", "mirror: Access failed: simulated directory transfer failure")])
+                    : new LftpCommandResult([]));
+            }
             if (role == "remote-edit-download" && command.StartsWith("get ", StringComparison.Ordinal))
             {
                 WriteRemoteEditDownload(command);
                 return Task.FromResult(new LftpCommandResult([]));
             }
+            if (IsStatCommand(command) && command.Contains("/stat-drift-directory", StringComparison.Ordinal))
+            {
+                var attempt = statAttempts.AddOrUpdate("stat-drift-directory", 1, static (_, count) => count + 1);
+                var listing = attempt == 1 ? RemoteDirectoryListing(command) : RemoteSymbolicLinkListing(command);
+                return Task.FromResult(new LftpCommandResult([new("stdout", listing)]));
+            }
+            if (role == "validation" && IsStatCommand(command) &&
+                command.Contains("\"/remote/cancel-validation.bin\"", StringComparison.Ordinal))
+            {
+                var attempt = statAttempts.AddOrUpdate("cancel-validation", 1, static (_, count) => count + 1);
+                if (attempt >= 2) return WaitForCancellationAsync(cancellationToken);
+            }
+            if (role == "validation" && IsStatCommand(command) &&
+                command.Contains("\"/remote/validation-gate-one.bin\"", StringComparison.Ordinal))
+            {
+                var attempt = statAttempts.AddOrUpdate("validation-gate-one", 1, static (_, count) => count + 1);
+                if (attempt >= 2)
+                {
+                    validationGateEntered.TrySetResult(true);
+                    return WaitForCancellationAsync(cancellationToken);
+                }
+            }
+            if (role == "validation" && IsStatCommand(command) &&
+                command.Contains("\"/remote/scheduled-validation-cancel.bin\"", StringComparison.Ordinal))
+            {
+                var attempt = statAttempts.AddOrUpdate("scheduled-validation-cancel", 1, static (_, count) => count + 1);
+                if (attempt >= 2)
+                {
+                    scheduledValidationEntered.TrySetResult(true);
+                    return WaitForCancellationAsync(cancellationToken);
+                }
+            }
+            if (IsStatCommand(command) && command.Contains("\"/remote/file-slot-drift.bin\"", StringComparison.Ordinal))
+            {
+                var attempt = statAttempts.AddOrUpdate("file-slot-drift", 1, static (_, count) => count + 1);
+                var listing = attempt == 1 ? RemoteEditListing(command) : RemoteSymbolicLinkListing(command);
+                return Task.FromResult(new LftpCommandResult([new("stdout", listing)]));
+            }
+            if (IsStatCommand(command) &&
+                (command.Contains("\"/remote/link-ancestor\"", StringComparison.Ordinal) ||
+                 command.Contains("\"/remote/directory-link-ancestor\"", StringComparison.Ordinal) ||
+                 command.Contains("\"/remote/mirror-link-ancestor\"", StringComparison.Ordinal)))
+            {
+                var key = command.Contains("directory-link-ancestor", StringComparison.Ordinal)
+                    ? "directory-link-ancestor"
+                    : command.Contains("mirror-link-ancestor", StringComparison.Ordinal)
+                        ? "mirror-link-ancestor"
+                        : "link-ancestor";
+                var attempt = statAttempts.AddOrUpdate(key, 1, static (_, count) => count + 1);
+                var listing = attempt == 1 ? RemoteDirectoryListing(command) : RemoteSymbolicLinkListing(command);
+                return Task.FromResult(new LftpCommandResult([new("stdout", listing)]));
+            }
+            if (IsStatCommand(command) &&
+                (command.Contains("\"/remote/post-directory-link-ancestor\"", StringComparison.Ordinal) ||
+                 command.Contains("\"/remote/post-mirror-link-ancestor\"", StringComparison.Ordinal)))
+            {
+                var key = command.Contains("post-directory", StringComparison.Ordinal)
+                    ? "post-directory-dry-run"
+                    : "post-mirror-dry-run";
+                var listing = statAttempts.GetOrAdd(key, 0) == 0
+                    ? RemoteDirectoryListing(command)
+                    : RemoteSymbolicLinkListing(command);
+                return Task.FromResult(new LftpCommandResult([new("stdout", listing)]));
+            }
+            if (IsAutomaticDirectoryPreview(role, command) &&
+                (command.Contains("/remote/retry-preview-target", StringComparison.Ordinal) ||
+                 command.Contains("/remote/scheduled-preview-target", StringComparison.Ordinal)))
+            {
+                var key = command.Contains("retry-preview-target", StringComparison.Ordinal)
+                    ? "retry-preview-target"
+                    : "scheduled-preview-target";
+                var attempt = statAttempts.AddOrUpdate(key, 1, static (_, count) => count + 1);
+                var destructiveAttempt = key == "retry-preview-target" ? 3 : 2;
+                return Task.FromResult(attempt >= destructiveAttempt
+                    ? new LftpCommandResult([new("stdout", "Removing old local file `collision'")])
+                    : new LftpCommandResult([]));
+            }
+            if (IsAutomaticDirectoryPreview(role, command) && command.Contains("/guarded-drift-target", StringComparison.Ordinal))
+            {
+                var attempt = statAttempts.AddOrUpdate("guarded-drift-target", 1, static (_, count) => count + 1);
+                return Task.FromResult(attempt >= 2
+                    ? new LftpCommandResult([new("stdout", "Removing old local file `collision'")])
+                    : new LftpCommandResult([]));
+            }
+            if (IsAutomaticDirectoryPreview(role, command) &&
+                command.Contains("/remote/post-directory-link-ancestor/source", StringComparison.Ordinal))
+            {
+                if (role == "transfer") statAttempts["post-directory-dry-run"] = 1;
+                return Task.FromResult(new LftpCommandResult([]));
+            }
+            if (role == "transfer" && command.StartsWith("mirror --verbose=1 --dry-run", StringComparison.Ordinal) &&
+                command.Contains("/remote/post-mirror-link-ancestor/root", StringComparison.Ordinal))
+            {
+                statAttempts["post-mirror-dry-run"] = 1;
+                return Task.FromResult(new LftpCommandResult([new("stdout", "Transferring file `new.txt'")]));
+            }
+            if (role == "transfer" && command.StartsWith("mirror --verbose=1 --dry-run", StringComparison.Ordinal) &&
+                command.Contains("/local-post-dryrun", StringComparison.Ordinal))
+            {
+                finalDryRunAction()?.Invoke();
+                return Task.FromResult(new LftpCommandResult([new("stdout", "Transferring file `new.txt'")]));
+            }
             ImmutableArray<LftpOutputLine> output = command switch
             {
+                var value when value.Contains("mirror", StringComparison.Ordinal) &&
+                    value.Contains("--dry-run", StringComparison.Ordinal) &&
+                    value.Contains("dir-over-file-directory", StringComparison.Ordinal) =>
+                    [new("stdout", "Removing old local file `collision'")],
+                var value when value.Contains("mirror", StringComparison.Ordinal) &&
+                    value.Contains("--dry-run", StringComparison.Ordinal) &&
+                    value.Contains("unrecognized-destructive-directory", StringComparison.Ordinal) =>
+                    [new("stdout", "Purging obsolete entry `collision'")],
+                var value when IsAutomaticDirectoryPreview(role, value) => [],
+                var value when value.Contains("mirror --verbose=1 --dry-run", StringComparison.Ordinal) &&
+                    value.Contains("/clean-collision-drift", StringComparison.Ordinal) &&
+                    commands.Count(item => item.Contains("mirror --verbose=1 --dry-run", StringComparison.Ordinal) && item.Contains("/clean-collision-drift", StringComparison.Ordinal)) > 1 =>
+                    [new("stdout", "Transferring file `new.txt'"), new("stdout", "Removing old local file `collision'")],
+                var value when value.Contains("mirror --verbose=1 --dry-run", StringComparison.Ordinal) &&
+                    value.Contains("/clean-collision-drift", StringComparison.Ordinal) =>
+                    [new("stdout", "Transferring file `new.txt'")],
+                var value when value.Contains("mirror --verbose=1 --dry-run", StringComparison.Ordinal) &&
+                    (value.Contains("/gate-blocker", StringComparison.Ordinal) ||
+                     value.Contains("/remote/mirror-link-ancestor/root", StringComparison.Ordinal) ||
+                     value.Contains("/remote/post-mirror-link-ancestor/root", StringComparison.Ordinal) ||
+                     value.Contains("/local-post-dryrun", StringComparison.Ordinal) ||
+                     value.Contains("/local-root-drift-", StringComparison.Ordinal)) =>
+                    [new("stdout", "Transferring file `new.txt'")],
                 var value when value.Contains("mirror --verbose=1 --dry-run", StringComparison.Ordinal) &&
                     value.Contains("/drift", StringComparison.Ordinal) &&
                     commands.Count(item => item.Contains("mirror --verbose=1 --dry-run", StringComparison.Ordinal) && item.Contains("/drift", StringComparison.Ordinal)) > 1 =>
@@ -1156,16 +2374,67 @@ public sealed class WorkspaceTests
                     [new("stdout", "drwxr-xr-x 2 alice staff 0 2026-07-15 12:30 folder"), new("stdout", "-rw-r--r-- 1 alice staff 12 2026-07-15 12:34 曲.txt")],
                 var value when value.StartsWith("cls -1 ", StringComparison.Ordinal) && value.Contains("missing.bin", StringComparison.Ordinal) =>
                     [new("stderr", "cls: Access failed: No such file")],
-                var value when value.StartsWith("cls -ldB --time-style=long-iso", StringComparison.Ordinal) &&
+                var value when IsStatCommand(value) &&
+                    (value.Contains("/missing-transfer-source", StringComparison.Ordinal) ||
+                     value.Contains("/new-directory-target", StringComparison.Ordinal) ||
+                     value.Contains("/scheduled-directory-target", StringComparison.Ordinal) ||
+                     value.Contains("/retry-directory-target", StringComparison.Ordinal) ||
+                     value.Contains("/scheduled-preview-target", StringComparison.Ordinal) ||
+                     value.Contains("/retry-preview-target", StringComparison.Ordinal) ||
+                     value.Contains("/guarded-drift-target", StringComparison.Ordinal)) =>
+                    [new("stderr", "cls: Access failed: No such file")],
+                var value when IsStatCommand(value) &&
+                    (value.Contains("/directory-transfer-source", StringComparison.Ordinal) ||
+                     value.Contains("/directory-destination", StringComparison.Ordinal) ||
+                     value.Contains("/dir-over-file-directory", StringComparison.Ordinal) ||
+                     value.Contains("/unrecognized-destructive-directory", StringComparison.Ordinal)) =>
+                    [new("stdout", RemoteDirectoryListing(value))],
+                var value when IsStatCommand(value) &&
+                    value.Contains("\"/remote/link-ancestor/file.bin\"", StringComparison.Ordinal) =>
+                    [new("stdout", RemoteEditListing(value))],
+                var value when IsStatCommand(value) &&
+                    (value.Contains("\"/remote\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/collision-review\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/drift\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/clean-collision-drift\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/gate-blocker\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/local-root-drift-download\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/local-root-drift-upload\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/local-post-dryrun\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/remote/directory-link-ancestor/source\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/remote/mirror-link-ancestor/root\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/remote/post-directory-link-ancestor/source\"", StringComparison.Ordinal) ||
+                     value.Contains("\"/remote/post-mirror-link-ancestor/root\"", StringComparison.Ordinal)) =>
+                    [new("stdout", RemoteDirectoryListing(value))],
+                var value when IsStatCommand(value) &&
+                    value.Contains("/transfer-link", StringComparison.Ordinal) =>
+                    [new("stdout", RemoteSymbolicLinkListing(value))],
+                var value when IsStatCommand(value) &&
+                    value.Contains("/transfer-special", StringComparison.Ordinal) =>
+                    [new("stdout", RemoteSpecialListing(value))],
+                var value when IsStatCommand(value) &&
+                    value.Contains("/mismatched-stat", StringComparison.Ordinal) =>
+                    [new("stdout", "-rw-r--r-- 1 alice staff 12 2026-07-15 12:34 different-name.bin")],
+                var value when IsStatCommand(value) &&
+                    value.Contains("/zero-line-missing-target", StringComparison.Ordinal) => [],
+                var value when IsStatCommand(value) &&
+                    value.Contains("\"/remote/pathless-missing-target\"", StringComparison.Ordinal) =>
+                    [new("stderr", "cls: Access failed: No such file")],
+                var value when IsStatCommand(value) &&
+                    value.Contains("\"/remote/bound-missing-target\"", StringComparison.Ordinal) =>
+                    [new("stderr", "recls: Access failed: 550 No such file or directory. (/remote/bound-missing-target)")],
+                var value when IsStatCommand(value) &&
+                    value.Contains("\"/remote/wrong-bound-missing-target\"", StringComparison.Ordinal) =>
+                    [new("stderr", "recls: Access failed: 550 No such file or directory. (/remote/different-target)")],
+                var value when IsStatCommand(value) &&
                     (value.Contains("/created", StringComparison.Ordinal) || value.Contains("/renamed.txt", StringComparison.Ordinal) ||
                      value.Contains("/new-target.bin", StringComparison.Ordinal)) =>
                     [new("stderr", "cls: Access failed: No such file")],
-                var value when value.StartsWith("cls -ldB --time-style=long-iso", StringComparison.Ordinal) &&
+                var value when IsStatCommand(value) &&
                     (value.Contains("/empty-dir", StringComparison.Ordinal) || value.Contains("/tree", StringComparison.Ordinal) ||
                      value.Contains("/source-folder", StringComparison.Ordinal)) =>
-                    [new("stdout", "drwxr-xr-x 2 alice staff 0 2026-07-15 12:30 directory")],
-                var value when value.StartsWith("cls -ldB --time-style=long-iso", StringComparison.Ordinal) ||
-                    value.StartsWith("recls -ldB --time-style=long-iso", StringComparison.Ordinal) =>
+                    [new("stdout", RemoteDirectoryListing(value))],
+                var value when IsStatCommand(value) =>
                     [new("stdout", RemoteEditListing(value))],
                 "pwd" => [new("stdout", "/remote/home")],
                 _ => [],
@@ -1189,14 +2458,35 @@ public sealed class WorkspaceTests
             File.WriteAllBytes(localPath, Encoding.UTF8.GetBytes("remote-bytes"));
         }
 
-        private static string RemoteEditListing(string command)
+        private static bool IsStatCommand(string command) =>
+            command.StartsWith("recls -ldB --time-style=long-iso", StringComparison.Ordinal) ||
+            command.StartsWith("cls -ldB --time-style=long-iso", StringComparison.Ordinal);
+
+        private static bool IsAutomaticDirectoryPreview(string role, string command) =>
+            (role == "directory-transfer-preview" || role == "transfer") &&
+            command.Contains("mirror", StringComparison.Ordinal) &&
+            command.Contains("--dry-run", StringComparison.Ordinal) &&
+            !command.Contains("--parallel=", StringComparison.Ordinal);
+
+        private static string RemoteEditListing(string command) =>
+            $"-rw-r--r-- 1 alice staff 12 2026-07-15 12:34 {RemoteEntryName(command)}";
+
+        private static string RemoteDirectoryListing(string command) =>
+            $"drwxr-xr-x 2 alice staff 0 2026-07-15 12:30 {RemoteEntryName(command)}";
+
+        private static string RemoteSymbolicLinkListing(string command) =>
+            $"lrwxrwxrwx 1 alice staff 7 2026-07-15 12:30 {RemoteEntryName(command)} -> target";
+
+        private static string RemoteSpecialListing(string command) =>
+            $"prw-r--r-- 1 alice staff 0 2026-07-15 12:30 {RemoteEntryName(command)}";
+
+        private static string RemoteEntryName(string command)
         {
             var end = command.LastIndexOf('"');
             var start = end > 0 ? command.LastIndexOf('"', end - 1) : -1;
             var remotePath = start >= 0 && end > start ? command[(start + 1)..end] : "/file.bin";
             var separator = remotePath.LastIndexOf('/');
-            var name = separator >= 0 ? remotePath[(separator + 1)..] : remotePath;
-            return $"-rw-r--r-- 1 alice staff 12 2026-07-15 12:34 {name}";
+            return separator >= 0 ? remotePath[(separator + 1)..] : remotePath;
         }
 
         private async Task<LftpCommandResult> WaitForCancellationAsync(CancellationToken cancellationToken)
@@ -1210,6 +2500,12 @@ public sealed class WorkspaceTests
             {
                 IsRunning = false;
             }
+        }
+
+        private static async Task<LftpCommandResult> WaitForReleaseAsync(Task release, CancellationToken cancellationToken)
+        {
+            await release.WaitAsync(cancellationToken);
+            return new([]);
         }
 
         public Task StopAsync(bool force = false, CancellationToken cancellationToken = default)
@@ -1237,6 +2533,16 @@ public sealed class WorkspaceTests
         {
             var marker = FindQueueMarker(command, suffix, submission);
             if (marker is not null) OutputReceived?.Invoke(this, new("stdout", marker));
+        }
+
+        private async Task EmitQueueMarkerAfterReleaseAsync(string command, Task release, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await release.WaitAsync(cancellationToken);
+                EmitQueueMarker(command, "_OK", submission: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         }
 
         private static string? FindQueueMarker(string command, string suffix, bool submission)

@@ -4,7 +4,7 @@ namespace LFTPPilot.Core;
 
 public static class AgentProtocol
 {
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
     public const int MaximumFrameBytes = 1024 * 1024;
     public const string ControlPipeName = "LFTPPilot.Agent.Control.v1";
     public const string EventPipeName = "LFTPPilot.Agent.Events.v1";
