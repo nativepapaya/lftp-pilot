@@ -153,11 +153,23 @@ public static class PlanValidator
         ValidateRemoteMirrorRoot(definition.RemoteRoot, issues);
         ValidateMirrorName(definition.Name, issues);
         if (!Enum.IsDefined(definition.Direction)) issues.Add(new("direction", "unsupported", "The mirror direction is not supported."));
-        if (definition.ParallelFiles is < 1 or > 16) issues.Add(new("parallelFiles", "range", "Parallel files must be between 1 and 16."));
-        if (definition.SegmentsPerFile is < 1 or > 64) issues.Add(new("segmentsPerFile", "range", "Segments per file must be between 1 and 64."));
-        if (definition.RateLimitBytesPerSecond is <= 0) issues.Add(new("rateLimitBytesPerSecond", "range", "A rate limit must be positive."));
-        foreach (var pattern in definition.EffectiveIncludes) ValidatePath(pattern, "includes", issues);
-        foreach (var pattern in definition.EffectiveExcludes) ValidatePath(pattern, "excludes", issues);
+        if (definition.ParallelFiles is < 1 or > MirrorDefinitionPolicy.MaximumParallelFiles)
+            issues.Add(new("parallelFiles", "range", $"Parallel files must be between 1 and {MirrorDefinitionPolicy.MaximumParallelFiles}."));
+        if (definition.SegmentsPerFile is < 1 or > MirrorDefinitionPolicy.MaximumSegmentsPerFile)
+            issues.Add(new("segmentsPerFile", "range", $"Segments per file must be between 1 and {MirrorDefinitionPolicy.MaximumSegmentsPerFile}."));
+        if (definition.RateLimitBytesPerSecond is <= 0 or > MirrorDefinitionPolicy.MaximumRateLimitBytesPerSecond)
+            issues.Add(new("rateLimitBytesPerSecond", "range", $"A rate limit must be between 1 and {MirrorDefinitionPolicy.MaximumRateLimitBytesPerSecond} bytes per second."));
+        ValidatePatterns(definition.EffectiveIncludes, "includes", issues);
+        ValidatePatterns(definition.EffectiveExcludes, "excludes", issues);
+        var totalPatternCharacters = definition.EffectiveIncludes.Sum(static pattern => (long)(pattern?.Length ?? 0)) +
+            definition.EffectiveExcludes.Sum(static pattern => (long)(pattern?.Length ?? 0));
+        if (totalPatternCharacters > MirrorDefinitionPolicy.MaximumPatternCharactersPerDefinition)
+        {
+            issues.Add(new(
+                "patterns",
+                "length",
+                $"Include and exclude patterns cannot exceed {MirrorDefinitionPolicy.MaximumPatternCharactersPerDefinition} total characters."));
+        }
         if (issues.Count != 0) throw new ModelValidationException(issues);
     }
 
@@ -242,6 +254,34 @@ public static class PlanValidator
         else if (ProfileValidator.ContainsProtocolControl(value)) issues.Add(new(field, "control-character", $"{field} contains a prohibited control character."));
     }
 
+    private static void ValidatePatterns(
+        IReadOnlyCollection<string> patterns,
+        string field,
+        ICollection<ValidationIssue> issues)
+    {
+        if (patterns.Count > MirrorDefinitionPolicy.MaximumPatternsPerList)
+        {
+            issues.Add(new(
+                field,
+                "count",
+                $"{field} cannot contain more than {MirrorDefinitionPolicy.MaximumPatternsPerList} patterns."));
+        }
+
+        foreach (var pattern in patterns)
+        {
+            ValidatePath(pattern, field, issues);
+            if (pattern is { Length: > MirrorDefinitionPolicy.MaximumPatternLength })
+            {
+                issues.Add(new(
+                    field,
+                    "length",
+                    $"Each {field} pattern cannot exceed {MirrorDefinitionPolicy.MaximumPatternLength} characters."));
+            }
+            if (pattern is not null && pattern.Any(char.IsControl) && !ProfileValidator.ContainsProtocolControl(pattern))
+                issues.Add(new(field, "control-character", $"{field} contains a prohibited control character."));
+        }
+    }
+
     private static void ValidateMirrorName(string? value, ICollection<ValidationIssue> issues)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -254,6 +294,19 @@ public static class PlanValidator
                 issues.Add(new("name", "control-character", "name contains a prohibited control character."));
         }
     }
+}
+
+public static class MirrorDefinitionPolicy
+{
+    public const int MaximumDefinitions = 512;
+    public const int MaximumPatternsPerList = 256;
+    public const int MaximumPatternLength = 4096;
+    public const int MaximumPatternCharactersPerDefinition = 65_536;
+    public const int MaximumAggregatePatternCharacters = 131_072;
+    public const int MaximumSerializedStoreBytes = 256 * 1024;
+    public const int MaximumParallelFiles = 16;
+    public const int MaximumSegmentsPerFile = 64;
+    public const long MaximumRateLimitBytesPerSecond = 1_000_000_000_000;
 }
 
 public sealed record ConsolePolicyDecision(bool Allowed, string? Reason = null);

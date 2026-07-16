@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using LFTPPilot.App.Models;
@@ -140,6 +141,134 @@ public sealed class LiveAgentWorkspaceClientTests
         finally
         {
             await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task MismatchedSavedMirrorReplyIsAnUnknownOutcome()
+    {
+        const int processId = 305;
+        var profileId = Guid.NewGuid();
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profileId, "Exact mirror", MirrorDirection.Download,
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "/archive",
+            Includes: ["*.zip"], RateLimitBytesPerSecond: 4 * 1024 * 1024);
+        var mismatched = definition with { Name = "Different mirror" };
+        var engine = new MutationReplyEngineClient(processId, WorkspaceMethods.MirrorDefinitionSave, mismatched);
+        var client = CreateClient(engine, processId);
+        var invalidations = 0;
+        client.StateInvalidated += (_, _) => invalidations++;
+        try
+        {
+            var exception = await Assert.ThrowsAsync<AgentRequestOutcomeUnknownException>(() =>
+                client.SaveMirrorDefinitionAsync(definition, TestContext.Current.CancellationToken));
+
+            Assert.Equal(WorkspaceMethods.MirrorDefinitionSave, exception.Method);
+            Assert.IsType<InvalidDataException>(exception.InnerException);
+            Assert.Equal(1, engine.Attempts);
+            Assert.Equal(1, invalidations);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task BootstrapAcceptsOnlyBoundedSavedMirrorsForExistingProfiles()
+    {
+        const int processId = 306;
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), "Mirror profile", ConnectionProtocol.Ftp, "example.test", 21,
+            "anonymous", AuthenticationKind.Anonymous);
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Nightly", MirrorDirection.Upload,
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "/incoming");
+        var validBootstrap = new WorkspaceBootstrap(
+            AgentProtocol.CurrentVersion, new RuntimeStatus(true, true, "test"), [profile], [], [], [])
+        {
+            MirrorDefinitions = [definition],
+        };
+        var validEngine = new MutationReplyEngineClient(processId, "unused", true, bootstrap: validBootstrap);
+        var validClient = CreateClient(validEngine, processId);
+        try
+        {
+            var workspace = await validClient.LoadAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(definition, Assert.Single(workspace.MirrorDefinitions));
+        }
+        finally
+        {
+            await validClient.DisposeAsync();
+        }
+
+        var invalidBootstrap = validBootstrap with { Profiles = [] };
+        var invalidEngine = new MutationReplyEngineClient(processId + 1, "unused", true, bootstrap: invalidBootstrap);
+        var invalidClient = CreateClient(invalidEngine, processId + 1);
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                invalidClient.LoadAsync(TestContext.Current.CancellationToken));
+            Assert.Contains("missing profile", error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await invalidClient.DisposeAsync();
+        }
+
+        var patterns = Enumerable.Repeat(new string('x', 4_000), 13).ToImmutableArray();
+        var aggregateBootstrap = validBootstrap with
+        {
+            MirrorDefinitions =
+            [
+                definition with { Id = Guid.NewGuid(), Name = "Aggregate one", Includes = patterns },
+                definition with { Id = Guid.NewGuid(), Name = "Aggregate two", Includes = patterns },
+                definition with { Id = Guid.NewGuid(), Name = "Aggregate three", Includes = patterns },
+            ],
+        };
+        var aggregateEngine = new MutationReplyEngineClient(processId + 2, "unused", true, bootstrap: aggregateBootstrap);
+        var aggregateClient = CreateClient(aggregateEngine, processId + 2);
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                aggregateClient.LoadAsync(TestContext.Current.CancellationToken));
+            Assert.Contains("aggregate pattern", error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await aggregateClient.DisposeAsync();
+        }
+
+        var maximumLocalRoot = "C:\\" + new string('a', 32_760);
+        var oversizedDefinitions = Enumerable.Range(0, 9)
+            .Select(index => definition with
+            {
+                Id = Guid.NewGuid(),
+                Name = $"Oversized {index:D2}",
+                LocalRoot = maximumLocalRoot,
+            })
+            .ToImmutableArray();
+        foreach (var oversizedDefinition in oversizedDefinitions)
+            PlanValidator.Validate(oversizedDefinition);
+        var wireBytes = JsonSerializer.SerializeToUtf8Bytes(
+            oversizedDefinitions,
+            FramedJsonStream.SerializerOptions);
+        Assert.InRange(
+            wireBytes.Length,
+            MirrorDefinitionPolicy.MaximumSerializedStoreBytes + 1,
+            AgentProtocol.MaximumFrameBytes - 1);
+
+        var oversizedBootstrap = validBootstrap with { MirrorDefinitions = oversizedDefinitions };
+        var oversizedEngine = new MutationReplyEngineClient(processId + 3, "unused", true, bootstrap: oversizedBootstrap);
+        var oversizedClient = CreateClient(oversizedEngine, processId + 3);
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                oversizedClient.LoadAsync(TestContext.Current.CancellationToken));
+            Assert.Contains("serialized size", error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await oversizedClient.DisposeAsync();
         }
     }
 

@@ -40,7 +40,9 @@ public static class Program
             runtimeProvider: runtimeProvider,
             mirrorPlanner: new MirrorPlanner(),
             workspaceOptions: AgentWorkspaceOptions.CreateDefault(paths.RuntimeHome, paths.LocalCache, paths.Temporary),
-            clientAuthorizer: AgentClientAuthorization.Create(paths)))
+            clientAuthorizer: AgentClientAuthorization.Create(paths),
+            mirrorDefinitionStore: new JsonMirrorDefinitionStore(
+                Path.Combine(paths.MirrorDefinitions, JsonMirrorDefinitionStore.FileName))))
         {
             try { await host.RunAsync(shutdown.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }

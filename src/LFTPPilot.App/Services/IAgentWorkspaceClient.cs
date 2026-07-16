@@ -30,6 +30,14 @@ public interface IAgentWorkspaceClient : IAsyncDisposable
     Task<JobSnapshot> EnqueueTransferAsync(Guid sessionId, TransferPlan plan, CancellationToken cancellationToken = default);
     Task<bool> CancelJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<JobSnapshot> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default);
+    Task<MirrorDefinition> SaveMirrorDefinitionAsync(
+        MirrorDefinition definition,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<MirrorDefinition>(new NotSupportedException("Saved mirror definitions are not available through this client."));
+    Task<bool> DeleteMirrorDefinitionAsync(
+        Guid definitionId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<bool>(new NotSupportedException("Saved mirror definitions are not available through this client."));
     Task<MirrorUiPreview> PreviewMirrorAsync(MirrorDefinition definition, CancellationToken cancellationToken = default);
     Task<JobSnapshot> ApproveMirrorAsync(MirrorUiPreview preview, bool deletionsApproved, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<string>> ExecuteConsoleAsync(Guid sessionId, string command, CancellationToken cancellationToken = default);

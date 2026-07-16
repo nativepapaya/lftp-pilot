@@ -8,6 +8,7 @@ using System.Text.Json;
 using LFTPPilot.Agent;
 using LFTPPilot.Core;
 using LFTPPilot.Engine;
+using LFTPPilot.Windows.Storage;
 
 namespace LFTPPilot.Tests;
 
@@ -2841,7 +2842,7 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
-    public async Task MirrorApprovalRejectsFormerDelimiterCollisionWithoutStartingExecutionProcess()
+    public async Task MirrorPreviewRejectsControlDelimiterCollisionWithoutStartingProcess()
     {
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
@@ -2859,19 +2860,15 @@ public sealed class WorkspaceTests
             Includes: ["a\u001eb"],
             Excludes: ["same"],
             DeleteExtraneous: true);
-        var altered = reviewed with { Includes = ["a", "b"] };
-        var preview = await fixture.Service.PreviewMirrorAsync(
-            new(session.SessionId, reviewed),
-            TestContext.Current.CancellationToken);
-        var startsAfterPreview = fixture.ProcessHost.Starts.Count;
+        var startsBeforePreview = fixture.ProcessHost.Starts.Count;
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            fixture.Service.ApproveMirrorAsync(
-                MirrorApproval(session.SessionId, altered, preview, deletionsApproved: true),
+        var exception = await Assert.ThrowsAsync<ModelValidationException>(() =>
+            fixture.Service.PreviewMirrorAsync(
+                new(session.SessionId, reviewed),
                 TestContext.Current.CancellationToken));
 
-        Assert.Contains("definition changed", exception.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(startsAfterPreview, fixture.ProcessHost.Starts.Count);
+        Assert.Contains("control character", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(startsBeforePreview, fixture.ProcessHost.Starts.Count);
         Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
             item.Role == "transfer" &&
             item.Command.Contains("mirror --verbose=1", StringComparison.Ordinal) &&
@@ -3773,6 +3770,291 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
+    public async Task SavedMirrorDefinitionsProvideValidatedDeterministicCrudWithoutStartingWork()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var firstProfile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var secondProfile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(firstProfile), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(secondProfile), TestContext.Current.CancellationToken);
+        var first = new MirrorDefinition(
+            Guid.NewGuid(), firstProfile.Id, "Zulu", MirrorDirection.Download,
+            fixture.Directory.Path, "/remote/zulu");
+        var second = new MirrorDefinition(
+            Guid.NewGuid(), firstProfile.Id, "alpha", MirrorDirection.Upload,
+            fixture.Directory.Path, "/remote/alpha");
+        var third = new MirrorDefinition(
+            Guid.NewGuid(), secondProfile.Id, "Beta", MirrorDirection.Download,
+            fixture.Directory.Path, "/remote/beta");
+
+        Assert.Equal(first, await fixture.Service.SaveMirrorDefinitionAsync(
+            new(first), TestContext.Current.CancellationToken));
+        Assert.Equal(second, await fixture.Service.SaveMirrorDefinitionAsync(
+            new(second), TestContext.Current.CancellationToken));
+        Assert.Equal(third, await fixture.Service.SaveMirrorDefinitionAsync(
+            new(third), TestContext.Current.CancellationToken));
+
+        var expected = new[] { first, second, third }
+            .OrderBy(static definition => definition.ProfileId)
+            .ThenBy(static definition => definition.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static definition => definition.Name, StringComparer.Ordinal)
+            .ThenBy(static definition => definition.Id)
+            .ToArray();
+        Assert.Equal(expected, await fixture.Service.ListMirrorDefinitionsAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(expected, (await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken)).MirrorDefinitions);
+
+        var rebound = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.SaveMirrorDefinitionAsync(
+                new(first with { ProfileId = secondProfile.Id, Name = "Rebound" }),
+                TestContext.Current.CancellationToken));
+        Assert.Contains("rebound", rebound.Message, StringComparison.OrdinalIgnoreCase);
+        var duplicate = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.SaveMirrorDefinitionAsync(
+                new(first with { Id = Guid.NewGuid(), Name = "ALPHA" }),
+                TestContext.Current.CancellationToken));
+        Assert.Contains("unique", duplicate.Message, StringComparison.OrdinalIgnoreCase);
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => fixture.Service.SaveMirrorDefinitionAsync(
+            new(first with { Id = Guid.NewGuid(), ProfileId = Guid.NewGuid(), Name = "Orphan" }),
+            TestContext.Current.CancellationToken));
+
+        var updated = first with { ParallelFiles = 4 };
+        Assert.Equal(updated, await fixture.Service.SaveMirrorDefinitionAsync(
+            new(updated), TestContext.Current.CancellationToken));
+        Assert.True(await fixture.Service.DeleteMirrorDefinitionAsync(
+            new(second.Id), TestContext.Current.CancellationToken));
+        Assert.False(await fixture.Service.DeleteMirrorDefinitionAsync(
+            new(second.Id), TestContext.Current.CancellationToken));
+        Assert.Equal(
+            new[] { updated, third }
+                .OrderBy(static definition => definition.ProfileId)
+                .ThenBy(static definition => definition.Name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(static definition => definition.Name, StringComparer.Ordinal)
+                .ThenBy(static definition => definition.Id),
+            await fixture.Service.ListMirrorDefinitionsAsync(TestContext.Current.CancellationToken));
+        Assert.Empty(fixture.ProcessHost.Starts);
+        Assert.Empty(fixture.Jobs.GetJobs());
+        Assert.Empty(fixture.Secrets.GetCalls);
+        Assert.Empty(fixture.HostKeyProbe.Calls);
+    }
+
+    [Fact]
+    public async Task SavedMirrorBootstrapFailsClosedForOrphansDuplicatesFailuresAndAggregateOverflow()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        MirrorDefinition Definition(Guid id, Guid profileId, string name, ImmutableArray<string> includes = default) =>
+            new(id, profileId, name, MirrorDirection.Download, fixture.Directory.Path, "/remote", Includes: includes);
+
+        var orphanProfileId = Guid.NewGuid();
+        fixture.MirrorDefinitions.Seed(Definition(Guid.NewGuid(), orphanProfileId, "Orphan"));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            fixture.Service.ListMirrorDefinitionsAsync(TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Service.SaveProfileAsync(
+            new(profile with { Id = orphanProfileId, Name = "Do not resurrect" }),
+            TestContext.Current.CancellationToken));
+        Assert.DoesNotContain(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken),
+            saved => saved.Id == orphanProfileId);
+
+        fixture.MirrorDefinitions.Clear();
+        fixture.MirrorDefinitions.Seed(
+            Definition(Guid.NewGuid(), profile.Id, "Duplicate"),
+            Definition(Guid.NewGuid(), profile.Id, "DUPLICATE"));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken));
+
+        fixture.MirrorDefinitions.Clear();
+        var maximumPatterns = Enumerable.Repeat(
+            new string('x', MirrorDefinitionPolicy.MaximumPatternLength),
+            MirrorDefinitionPolicy.MaximumPatternCharactersPerDefinition /
+                MirrorDefinitionPolicy.MaximumPatternLength).ToImmutableArray();
+        fixture.MirrorDefinitions.Seed(
+            Definition(Guid.NewGuid(), profile.Id, "Budget one", maximumPatterns),
+            Definition(Guid.NewGuid(), profile.Id, "Budget two", maximumPatterns),
+            Definition(Guid.NewGuid(), profile.Id, "Budget overflow", ["x"]));
+        var overflow = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken));
+        Assert.Contains("aggregate pattern", overflow.Message, StringComparison.OrdinalIgnoreCase);
+
+        fixture.MirrorDefinitions.GetFailure = new InvalidDataException("corrupt saved definitions");
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken));
+        Assert.Empty(fixture.ProcessHost.Starts);
+        Assert.Empty(fixture.Secrets.GetCalls);
+        Assert.Empty(fixture.HostKeyProbe.Calls);
+    }
+
+    [Fact]
+    public async Task ProfileDeleteCascadesSavedMirrorsBeforeMetadataAndFailureLeavesProfileDiscoverable()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.PasswordProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(
+            new(profile, "cascade-secret"), TestContext.Current.CancellationToken);
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Cascade", MirrorDirection.Download,
+            fixture.Directory.Path, "/remote");
+        await fixture.Service.SaveMirrorDefinitionAsync(new(definition), TestContext.Current.CancellationToken);
+        fixture.MirrorDefinitions.DeleteFailure = new IOException("definition cascade failed");
+
+        await Assert.ThrowsAsync<IOException>(() => fixture.Service.DeleteProfileAsync(
+            new(profile.Id), TestContext.Current.CancellationToken));
+        Assert.Contains(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken),
+            saved => saved.Id == profile.Id);
+        Assert.NotEmpty(fixture.Secrets.Values);
+        Assert.DoesNotContain(fixture.PersistenceOperations,
+            operation => operation.StartsWith("profile.delete:", StringComparison.Ordinal));
+
+        fixture.MirrorDefinitions.DeleteFailure = null;
+        while (fixture.PersistenceOperations.TryDequeue(out _)) { }
+        Assert.True(await fixture.Service.DeleteProfileAsync(
+            new(profile.Id), TestContext.Current.CancellationToken));
+        Assert.Equal(
+            [$"mirror.delete:{definition.Id:N}", $"profile.delete:{profile.Id:N}"],
+            fixture.PersistenceOperations.ToArray());
+        Assert.Empty(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken));
+        Assert.Empty(await fixture.MirrorDefinitions.GetAllAsync(TestContext.Current.CancellationToken));
+
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        Assert.Empty((await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken)).MirrorDefinitions);
+        Assert.Empty(fixture.Jobs.GetJobs());
+    }
+
+    [Fact]
+    public async Task SavedMirrorMutationsAndProfileIdentityChangesInvalidateHeldPreviews()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Saved preview", MirrorDirection.Download,
+            fixture.Directory.Path, "/remote");
+        await fixture.Service.SaveMirrorDefinitionAsync(new(definition), TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveMirrorAsync(
+            new(Guid.NewGuid(), definition, Guid.NewGuid(), "no-preview", new string('a', 64)),
+            TestContext.Current.CancellationToken));
+        Assert.Empty(fixture.ProcessHost.Starts);
+
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var previewBeforeSave = await fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        var startsAfterPreview = fixture.ProcessHost.Starts.Count;
+        var updated = definition with { ParallelFiles = 3 };
+        await fixture.Service.SaveMirrorDefinitionAsync(new(updated), TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveMirrorAsync(
+            MirrorApproval(session.SessionId, definition, previewBeforeSave), TestContext.Current.CancellationToken));
+        Assert.Equal(startsAfterPreview, fixture.ProcessHost.Starts.Count);
+
+        var previewBeforeDelete = await fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, updated), TestContext.Current.CancellationToken);
+        Assert.True(await fixture.Service.DeleteMirrorDefinitionAsync(
+            new(updated.Id), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveMirrorAsync(
+            MirrorApproval(session.SessionId, updated, previewBeforeDelete), TestContext.Current.CancellationToken));
+
+        await fixture.Service.SaveMirrorDefinitionAsync(new(updated), TestContext.Current.CancellationToken);
+        var previewBeforeIdentityChange = await fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, updated), TestContext.Current.CancellationToken);
+        await fixture.Service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(
+            new(profile with { Host = "new-files.example" }), TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveMirrorAsync(
+            MirrorApproval(session.SessionId, updated, previewBeforeIdentityChange), TestContext.Current.CancellationToken));
+
+        Assert.Empty(fixture.Jobs.GetJobs());
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" &&
+            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ConcurrentSavedMirrorDeleteAndApprovalsExecuteAtMostOnce()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Delete race", MirrorDirection.Download,
+            fixture.Directory.Path, "/gate-blocker");
+        await fixture.Service.SaveMirrorDefinitionAsync(new(definition), TestContext.Current.CancellationToken);
+        var preview = await fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        var request = MirrorApproval(session.SessionId, definition, preview);
+        fixture.MirrorDefinitions.DeleteEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.MirrorDefinitions.ReleaseDelete = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var delete = fixture.Service.DeleteMirrorDefinitionAsync(
+            new(definition.Id), TestContext.Current.CancellationToken);
+        await fixture.MirrorDefinitions.DeleteEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var firstApproval = Record.ExceptionAsync(() =>
+            fixture.Service.ApproveMirrorAsync(request, TestContext.Current.CancellationToken)).AsTask();
+        var secondApproval = Record.ExceptionAsync(() =>
+            fixture.Service.ApproveMirrorAsync(request, TestContext.Current.CancellationToken)).AsTask();
+        try
+        {
+            await Task.Yield();
+            Assert.False(firstApproval.IsCompleted);
+            Assert.False(secondApproval.IsCompleted);
+        }
+        finally
+        {
+            fixture.MirrorDefinitions.ReleaseDelete.TrySetResult(true);
+        }
+        var failures = await Task.WhenAll(firstApproval, secondApproval);
+        Assert.True(await delete);
+        Assert.All(failures, failure => Assert.IsType<InvalidOperationException>(failure));
+
+        Assert.Empty(fixture.Jobs.GetJobs());
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" &&
+            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task JsonSavedMirrorsSurviveServiceRestartButHeldPreviewApprovalDoesNot()
+    {
+        await using var fixture = new WorkspaceFixture(createService: false);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Profiles.SaveAsync(profile, TestContext.Current.CancellationToken);
+        var storePath = Path.Combine(
+            fixture.Directory.Path, "saved-mirrors", JsonMirrorDefinitionStore.FileName);
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Restarted saved mirror", MirrorDirection.Download,
+            fixture.Directory.Path, "/remote");
+        MirrorApproveRequest approval;
+        await using (var first = new AgentWorkspaceService(
+            fixture.Profiles, fixture.Secrets, fixture.HostKeyManager, fixture.ProcessHost,
+            fixture.Runtime, fixture.Jobs, new MirrorPlanner(), fixture.Options,
+            mirrorDefinitionStore: new JsonMirrorDefinitionStore(storePath)))
+        {
+            await first.SaveMirrorDefinitionAsync(new(definition), TestContext.Current.CancellationToken);
+            var session = await first.ConnectAsync(
+                new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+            var preview = await first.PreviewMirrorAsync(
+                new(session.SessionId, definition), TestContext.Current.CancellationToken);
+            approval = MirrorApproval(session.SessionId, definition, preview);
+        }
+
+        await using var restarted = new AgentWorkspaceService(
+            fixture.Profiles, fixture.Secrets, fixture.HostKeyManager, fixture.ProcessHost,
+            fixture.Runtime, fixture.Jobs, new MirrorPlanner(), fixture.Options,
+            mirrorDefinitionStore: new JsonMirrorDefinitionStore(storePath));
+        Assert.Equal(definition,
+            Assert.Single((await restarted.BootstrapAsync(TestContext.Current.CancellationToken)).MirrorDefinitions));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            restarted.ApproveMirrorAsync(approval, TestContext.Current.CancellationToken));
+        Assert.Empty(fixture.Jobs.GetJobs());
+    }
+
+    [Fact]
     public async Task DisposalWaitsForAnAdmittedConnectRequestAndRejectsNewRequests()
     {
         await using var fixture = new WorkspaceFixture();
@@ -3917,7 +4199,8 @@ public sealed class WorkspaceTests
             processHost: fixture.ProcessHost,
             runtimeProvider: fixture.Runtime,
             mirrorPlanner: new MirrorPlanner(),
-            workspaceOptions: fixture.Options);
+            workspaceOptions: fixture.Options,
+            mirrorDefinitionStore: fixture.MirrorDefinitions);
         var run = host.RunAsync(TestContext.Current.CancellationToken);
         await using var client = new NamedPipeEngineClient(Environment.ProcessId);
         var profile = fixture.PasswordProfile();
@@ -3986,7 +4269,8 @@ public sealed class WorkspaceTests
             processHost: fixture.ProcessHost,
             runtimeProvider: fixture.Runtime,
             mirrorPlanner: new MirrorPlanner(),
-            workspaceOptions: fixture.Options);
+            workspaceOptions: fixture.Options,
+            mirrorDefinitionStore: fixture.MirrorDefinitions);
         using var stop = new CancellationTokenSource();
         var run = host.RunAsync(stop.Token);
         await using var client = new NamedPipeEngineClient(Environment.ProcessId);
@@ -3994,10 +4278,24 @@ public sealed class WorkspaceTests
         var saved = (await client.RequestAsync(WorkspaceMethods.ProfileSave, new ProfileSaveRequest(profile), TestContext.Current.CancellationToken))
             .Deserialize<ConnectionProfile>(FramedJsonStream.SerializerOptions);
         Assert.Equal(profile.Id, saved?.Id);
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Pipe saved mirror", MirrorDirection.Download,
+            fixture.Directory.Path, "/remote");
+        var savedDefinition = (await client.RequestAsync(
+            WorkspaceMethods.MirrorDefinitionSave,
+            new MirrorDefinitionSaveRequest(definition),
+            TestContext.Current.CancellationToken)).Deserialize<MirrorDefinition>(FramedJsonStream.SerializerOptions);
+        Assert.Equal(definition, savedDefinition);
+        var definitions = (await client.RequestAsync(
+            WorkspaceMethods.MirrorDefinitionList,
+            cancellationToken: TestContext.Current.CancellationToken))
+            .Deserialize<ImmutableArray<MirrorDefinition>>(FramedJsonStream.SerializerOptions);
+        Assert.Equal(definition, Assert.Single(definitions));
         var bootstrap = (await client.RequestAsync(WorkspaceMethods.Bootstrap, cancellationToken: TestContext.Current.CancellationToken))
             .Deserialize<WorkspaceBootstrap>(FramedJsonStream.SerializerOptions);
         Assert.Equal(AgentProtocol.CurrentVersion, bootstrap?.ProtocolVersion);
         Assert.True(bootstrap?.Runtime.Available);
+        Assert.Equal(definition, Assert.Single(bootstrap?.MirrorDefinitions ?? []));
         var directJob = JobCoordinatorTests.Job(JobState.Queued);
         var enqueueError = await Assert.ThrowsAsync<EngineRequestRejectedException>(() =>
             client.RequestAsync("jobs.enqueue", directJob, TestContext.Current.CancellationToken));
@@ -4011,6 +4309,11 @@ public sealed class WorkspaceTests
         var retryError = await Assert.ThrowsAsync<EngineRequestRejectedException>(() =>
             client.RequestAsync(WorkspaceMethods.JobRetry, new JobRetryRequest(Guid.NewGuid()), TestContext.Current.CancellationToken));
         Assert.Contains("not found", retryError.Message, StringComparison.OrdinalIgnoreCase);
+        var deleted = (await client.RequestAsync(
+            WorkspaceMethods.MirrorDefinitionDelete,
+            new MirrorDefinitionDeleteRequest(definition.Id),
+            TestContext.Current.CancellationToken)).Deserialize<bool>(FramedJsonStream.SerializerOptions);
+        Assert.True(deleted);
         stop.Cancel();
         await run.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
     }
@@ -4147,7 +4450,9 @@ public sealed class WorkspaceTests
             bool persistSessionTabs = false)
         {
             Directory = new();
-            Profiles = new();
+            PersistenceOperations = new();
+            Profiles = new(PersistenceOperations);
+            MirrorDefinitions = new(PersistenceOperations);
             Secrets = new();
             HostKeys = new();
             HostKeyProbe = new();
@@ -4177,12 +4482,15 @@ public sealed class WorkspaceTests
                     new MirrorPlanner(),
                     Options,
                     scheduler: Scheduler,
-                    stateStore: persistSessionTabs ? Store : null)
+                    stateStore: persistSessionTabs ? Store : null,
+                    mirrorDefinitionStore: MirrorDefinitions)
                 : null!;
         }
 
         public TestDirectory Directory { get; }
+        public ConcurrentQueue<string> PersistenceOperations { get; }
         public MemoryProfileStore Profiles { get; }
+        public MemoryMirrorDefinitionStore MirrorDefinitions { get; }
         public MemorySecretStore Secrets { get; }
         public MemoryHostKeyStore HostKeys { get; }
         public FakeSshHostKeyProbe HostKeyProbe { get; }
@@ -4207,6 +4515,7 @@ public sealed class WorkspaceTests
 
         public async ValueTask DisposeAsync()
         {
+            MirrorDefinitions.ReleaseDelete?.TrySetResult(true);
             ProcessHost.ReleaseReservedQueueSlots.TrySetResult(true);
             ProcessHost.ReleaseTransferGate.TrySetResult(true);
             ProcessHost.ReleaseStart?.TrySetResult(true);
@@ -4220,6 +4529,8 @@ public sealed class WorkspaceTests
     private sealed class MemoryProfileStore : IProfileStore
     {
         private readonly ConcurrentDictionary<Guid, ConnectionProfile> _profiles = [];
+        private readonly ConcurrentQueue<string>? _operations;
+        public MemoryProfileStore(ConcurrentQueue<string>? operations = null) => _operations = operations;
         public Exception? SaveFailure { get; set; }
         public Exception? DeleteFailure { get; set; }
         public Task<IReadOnlyList<ConnectionProfile>> GetAllAsync(CancellationToken cancellationToken = default)
@@ -4237,10 +4548,58 @@ public sealed class WorkspaceTests
         public Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            _operations?.Enqueue($"profile.delete:{profileId:N}");
             if (DeleteFailure is not null) return Task.FromException(DeleteFailure);
             _profiles.TryRemove(profileId, out _);
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class MemoryMirrorDefinitionStore(ConcurrentQueue<string>? operations = null) : IMirrorDefinitionStore
+    {
+        private readonly ConcurrentDictionary<Guid, MirrorDefinition> _definitions = [];
+        public Exception? GetFailure { get; set; }
+        public Exception? SaveFailure { get; set; }
+        public Exception? DeleteFailure { get; set; }
+        public TaskCompletionSource<bool>? DeleteEntered { get; set; }
+        public TaskCompletionSource<bool>? ReleaseDelete { get; set; }
+        public int GetCalls => Volatile.Read(ref _getCalls);
+
+        public Task<IReadOnlyList<MirrorDefinition>> GetAllAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _getCalls);
+            if (GetFailure is not null) return Task.FromException<IReadOnlyList<MirrorDefinition>>(GetFailure);
+            return Task.FromResult<IReadOnlyList<MirrorDefinition>>(_definitions.Values.ToArray());
+        }
+
+        public Task SaveAsync(MirrorDefinition definition, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (SaveFailure is not null) return Task.FromException(SaveFailure);
+            _definitions[definition.Id] = definition;
+            return Task.CompletedTask;
+        }
+
+        public async Task DeleteAsync(Guid definitionId, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            operations?.Enqueue($"mirror.delete:{definitionId:N}");
+            DeleteEntered?.TrySetResult(true);
+            if (ReleaseDelete is { } releaseDelete)
+                await releaseDelete.Task.WaitAsync(cancellationToken);
+            if (DeleteFailure is not null) throw DeleteFailure;
+            _definitions.TryRemove(definitionId, out _);
+        }
+
+        public void Seed(params MirrorDefinition[] definitions)
+        {
+            foreach (var definition in definitions) _definitions[definition.Id] = definition;
+        }
+
+        public void Clear() => _definitions.Clear();
+
+        private int _getCalls;
     }
 
     private sealed class MemorySecretStore : ISecretStore

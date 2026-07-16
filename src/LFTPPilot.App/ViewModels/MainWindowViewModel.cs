@@ -92,6 +92,7 @@ public sealed class MainWindowViewModel : ObservableObject
             LoadRemoteEdits(bootstrap.RemoteEdits);
             Connections.Load(bootstrap.Profiles);
             Mirror.LoadProfiles(bootstrap.Profiles);
+            Mirror.LoadDefinitions(bootstrap.MirrorDefinitions);
             RemoteTransfer.LoadProfiles(bootstrap.Profiles);
             await Mirror.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);
             await RemoteTransfer.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);

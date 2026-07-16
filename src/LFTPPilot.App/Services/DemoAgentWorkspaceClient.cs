@@ -8,6 +8,7 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
 {
     private readonly IAppUpdateService _updates;
     private readonly Dictionary<Guid, JobSnapshot> _jobs = [];
+    private readonly Dictionary<Guid, MirrorDefinition> _mirrorDefinitions = [];
     private readonly ConnectionProfile _demoProfile = new(
         Guid.Parse("a4a9a7b7-f92c-455e-a4a0-6e0de2035c66"),
         "Demo server",
@@ -29,7 +30,19 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
         InitialRemotePath: "/incoming",
         InitialLocalPath: Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
 
-    public DemoAgentWorkspaceClient(IAppUpdateService updates) => _updates = updates;
+    public DemoAgentWorkspaceClient(IAppUpdateService updates)
+    {
+        _updates = updates;
+        var definition = new MirrorDefinition(
+            Guid.Parse("e717e9a7-08b4-4ca5-bd88-e4cc52794465"),
+            _demoProfile.Id,
+            "Release upload",
+            MirrorDirection.Upload,
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "/srv/releases",
+            Excludes: [".git/**", "*.tmp"]);
+        _mirrorDefinitions[definition.Id] = definition;
+    }
 
     public bool IsConnected => false;
     public event EventHandler<EngineEvent>? EventReceived { add { } remove { } }
@@ -61,7 +74,12 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
             new(now.AddSeconds(-1), "Info", "Session", "Demo SFTP session prepared."),
         ];
 
-        return Task.FromResult(new UiWorkspaceBootstrap([_demoProfile, _demoDestinationProfile], [session], jobs, [], history, log, true, "Demo mode · Agent not connected"));
+        return Task.FromResult(new UiWorkspaceBootstrap([_demoProfile, _demoDestinationProfile], [session], jobs, [], history, log, true, "Demo mode · Agent not connected")
+        {
+            MirrorDefinitions = _mirrorDefinitions.Values
+                .OrderBy(static definition => definition.Name, StringComparer.CurrentCultureIgnoreCase)
+                .ToArray(),
+        });
     }
 
     public Task<ConnectionProfile> SaveProfileAsync(ConnectionProfile profile, string? credential = null, CancellationToken cancellationToken = default)
@@ -167,6 +185,24 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
         };
         _jobs[jobId] = retried;
         return Task.FromResult(retried);
+    }
+
+    public Task<MirrorDefinition> SaveMirrorDefinitionAsync(
+        MirrorDefinition definition,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        PlanValidator.Validate(definition);
+        _mirrorDefinitions[definition.Id] = definition;
+        return Task.FromResult(definition);
+    }
+
+    public Task<bool> DeleteMirrorDefinitionAsync(
+        Guid definitionId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(_mirrorDefinitions.Remove(definitionId));
     }
 
     public Task<MirrorUiPreview> PreviewMirrorAsync(MirrorDefinition definition, CancellationToken cancellationToken = default)

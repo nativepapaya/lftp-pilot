@@ -61,6 +61,11 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   the App in an unresolved state.
 - Native LFTP transfer queues, segmented downloads, rate controls, safe mirror
   previews/execution, cancellation, and run-once transfer scheduling.
+- Reusable package-scoped mirror definitions with native save/select/edit/delete
+  controls, bounded validated persistence, profile-aware cleanup, and
+  lost-reply reconciliation. Durable definitions never contain preview output,
+  approval state, deletion consent, or executable commands; every run still
+  requires a fresh Agent-held dry run and deletion review when applicable.
 - Typed regular-file and directory transfers. Folder downloads use non-pruning
   LFTP mirrors and uploads use reverse mirrors with no source/extraneous-target
   deletion options; nested links are skipped and changed plain files use

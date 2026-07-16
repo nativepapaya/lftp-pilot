@@ -20,7 +20,8 @@ acceptance work.
 - SFTP, FTP, FTPES, implicit FTPS, and plain FTP
 - LFTP queues, parallel transfers, segmented downloads, mirror/reverse mirror,
   bandwidth controls, and remote-to-remote jobs
-- Dry-run mirror previews with mandatory review before destination deletions
+- Reusable mirror definitions plus fresh dry-run previews with mandatory review
+  before destination deletions
 - Managed remote editing with a package-scoped cache, strong local/remote
   identities, a fixed trusted Notepad launcher, and reviewed staged promotion
 - Isolated advanced LFTP console with local shell execution disabled by default

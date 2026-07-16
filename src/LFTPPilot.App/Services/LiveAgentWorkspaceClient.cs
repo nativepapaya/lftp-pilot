@@ -24,6 +24,8 @@ internal sealed class AgentRequestOutcomeUnknownException : IOException
             WorkspaceMethods.ProfileSave => "The profile and credential-storage state may have changed",
             WorkspaceMethods.SessionConnect => "A connection may have opened and any submitted credential may have been used",
             WorkspaceMethods.ProfileDelete => "The profile and its sessions may have been removed",
+            WorkspaceMethods.MirrorDefinitionSave => "The saved mirror definition may have been created or updated",
+            WorkspaceMethods.MirrorDefinitionDelete => "The saved mirror definition may have been removed",
             _ => "The operation may have completed",
         };
         return $"The {method} request may have reached the Agent, but a complete and valid result was not available. {outcome}; the outcome is unknown. Workspace state is being refreshed.";
@@ -114,6 +116,7 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
             cancellationToken: cancellationToken, retryOnDisconnect: true).ConfigureAwait(false);
         var sessions = new List<WorkspaceSessionSeed>();
         var profileIds = bootstrap.Profiles.Select(static profile => profile.Id).ToHashSet();
+        ValidateBootstrapMirrorDefinitions(bootstrap.MirrorDefinitions, profileIds);
         var sessionIds = new HashSet<Guid>();
         foreach (var snapshot in bootstrap.Sessions)
         {
@@ -138,7 +141,10 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         [
             new(DateTimeOffset.Now, bootstrap.Runtime.Available ? "Info" : "Error", "Agent", runtimeStatus),
         ];
-        return new(bootstrap.Profiles, sessions, bootstrap.Jobs, bootstrap.RemoteEdits, [], log, false, runtimeStatus);
+        return new(bootstrap.Profiles, sessions, bootstrap.Jobs, bootstrap.RemoteEdits, [], log, false, runtimeStatus)
+        {
+            MirrorDefinitions = bootstrap.MirrorDefinitions,
+        };
     }
 
     public async Task<ConnectionProfile> SaveProfileAsync(ConnectionProfile profile, string? credential = null, CancellationToken cancellationToken = default) =>
@@ -313,6 +319,28 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
             semantics: RequestSemantics.Mutation,
             responseValidator: response => ValidateMutationJob(response.Job, jobId, JobKind.Transfer)).ConfigureAwait(false);
         return result.Job;
+    }
+
+    public async Task<MirrorDefinition> SaveMirrorDefinitionAsync(
+        MirrorDefinition definition,
+        CancellationToken cancellationToken = default)
+    {
+        PlanValidator.Validate(definition);
+        return await RequestAsync<MirrorDefinition>(WorkspaceMethods.MirrorDefinitionSave,
+            new MirrorDefinitionSaveRequest(definition), cancellationToken, retryOnDisconnect: false,
+            semantics: RequestSemantics.Mutation,
+            responseValidator: response => ValidateSavedMirrorDefinition(definition, response)).ConfigureAwait(false);
+    }
+
+    public async Task<bool> DeleteMirrorDefinitionAsync(
+        Guid definitionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (definitionId == Guid.Empty)
+            throw new ArgumentException("A saved mirror definition identifier is required.", nameof(definitionId));
+        return await RequestAsync<bool>(WorkspaceMethods.MirrorDefinitionDelete,
+            new MirrorDefinitionDeleteRequest(definitionId), cancellationToken, retryOnDisconnect: false,
+            semantics: RequestSemantics.Mutation).ConfigureAwait(false);
     }
 
     public async Task<MirrorUiPreview> PreviewMirrorAsync(MirrorDefinition definition, CancellationToken cancellationToken = default)
@@ -767,6 +795,73 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         {
             throw new InvalidDataException("The Agent returned a profile that did not exactly match the submitted profile.");
         }
+    }
+
+    private static void ValidateBootstrapMirrorDefinitions(
+        ImmutableArray<MirrorDefinition> definitions,
+        IReadOnlySet<Guid> profileIds)
+    {
+        if (definitions.IsDefault || definitions.Length > MirrorDefinitionPolicy.MaximumDefinitions)
+            throw new InvalidDataException("The Agent returned an invalid number of saved mirror definitions.");
+        var ids = new HashSet<Guid>();
+        var names = new HashSet<(Guid ProfileId, string Name)>(new MirrorDefinitionNameComparer());
+        long aggregatePatternCharacters = 0;
+        foreach (var definition in definitions)
+        {
+            try { PlanValidator.Validate(definition); }
+            catch (ModelValidationException exception)
+            {
+                throw new InvalidDataException("The Agent returned an invalid saved mirror definition.", exception);
+            }
+            if (!profileIds.Contains(definition.ProfileId))
+                throw new InvalidDataException("The Agent returned a saved mirror definition for a missing profile.");
+            if (!ids.Add(definition.Id))
+                throw new InvalidDataException("The Agent returned duplicate saved mirror definition identifiers.");
+            if (!names.Add((definition.ProfileId, definition.Name)))
+                throw new InvalidDataException("The Agent returned duplicate saved mirror names for one profile.");
+            aggregatePatternCharacters += definition.EffectiveIncludes.Sum(static pattern => (long)pattern.Length);
+            aggregatePatternCharacters += definition.EffectiveExcludes.Sum(static pattern => (long)pattern.Length);
+            if (aggregatePatternCharacters > MirrorDefinitionPolicy.MaximumAggregatePatternCharacters)
+                throw new InvalidDataException("The Agent returned saved mirror definitions that exceed the aggregate pattern limit.");
+        }
+        if (JsonSerializer.SerializeToUtf8Bytes(definitions, JsonOptions).Length >
+            MirrorDefinitionPolicy.MaximumSerializedStoreBytes)
+        {
+            throw new InvalidDataException("The Agent returned saved mirror definitions that exceed the serialized size limit.");
+        }
+    }
+
+    private static void ValidateSavedMirrorDefinition(MirrorDefinition submitted, MirrorDefinition response)
+    {
+        try { PlanValidator.Validate(response); }
+        catch (ModelValidationException exception)
+        {
+            throw new InvalidDataException("The Agent returned an invalid saved mirror definition.", exception);
+        }
+        if (response.Id != submitted.Id || response.ProfileId != submitted.ProfileId ||
+            !string.Equals(response.Name, submitted.Name, StringComparison.Ordinal) ||
+            response.Direction != submitted.Direction ||
+            !string.Equals(response.LocalRoot, submitted.LocalRoot, StringComparison.Ordinal) ||
+            !string.Equals(response.RemoteRoot, submitted.RemoteRoot, StringComparison.Ordinal) ||
+            !response.EffectiveIncludes.SequenceEqual(submitted.EffectiveIncludes, StringComparer.Ordinal) ||
+            !response.EffectiveExcludes.SequenceEqual(submitted.EffectiveExcludes, StringComparer.Ordinal) ||
+            response.DeleteExtraneous != submitted.DeleteExtraneous ||
+            response.ParallelFiles != submitted.ParallelFiles ||
+            response.SegmentsPerFile != submitted.SegmentsPerFile ||
+            response.RateLimitBytesPerSecond != submitted.RateLimitBytesPerSecond)
+        {
+            throw new InvalidDataException("The Agent returned a saved mirror definition that did not exactly match the submitted definition.");
+        }
+    }
+
+    private sealed class MirrorDefinitionNameComparer : IEqualityComparer<(Guid ProfileId, string Name)>
+    {
+        public bool Equals((Guid ProfileId, string Name) left, (Guid ProfileId, string Name) right) =>
+            left.ProfileId == right.ProfileId &&
+            string.Equals(left.Name, right.Name, StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode((Guid ProfileId, string Name) value) =>
+            HashCode.Combine(value.ProfileId, StringComparer.OrdinalIgnoreCase.GetHashCode(value.Name));
     }
 
     private static void ValidateRemoteTransferPlan(

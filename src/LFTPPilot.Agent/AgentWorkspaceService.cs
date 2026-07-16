@@ -30,6 +30,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly SessionRegistry _sessions;
     private readonly ILftpRuntimeProvider _runtimeProvider;
     private readonly IMirrorPlanner _mirrorPlanner;
+    private readonly IMirrorDefinitionStore _mirrorDefinitionStore;
     private readonly AgentWorkspaceOptions _options;
     private readonly Action<EngineEventKind, string, object?, Guid?, Guid?>? _publish;
     private readonly RunOnceScheduler? _scheduler;
@@ -67,7 +68,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         AgentWorkspaceOptions options,
         Action<EngineEventKind, string, object?, Guid?, Guid?>? publish = null,
         RunOnceScheduler? scheduler = null,
-        DurableJobStore? stateStore = null)
+        DurableJobStore? stateStore = null,
+        IMirrorDefinitionStore? mirrorDefinitionStore = null)
     {
         _profileStore = profileStore;
         _secretStore = secretStore;
@@ -75,6 +77,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         _jobs = jobs;
         _runtimeProvider = runtimeProvider;
         _mirrorPlanner = mirrorPlanner;
+        _mirrorDefinitionStore = mirrorDefinitionStore ?? new InMemoryMirrorDefinitionStore();
         _options = options;
         _publish = publish;
         _scheduler = scheduler;
@@ -127,6 +130,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 WorkspaceMethods.FileDelete => ToJson(await DeleteEntriesAsync(Required<DeleteEntriesRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.TransferEnqueue => ToJson(await EnqueueTransferAsync(Required<TransferEnqueueRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.JobRetry => ToJson(await RetryJobAsync(Required<JobRetryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.MirrorDefinitionList => ToJson(await ListMirrorDefinitionsAsync(cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.MirrorDefinitionSave => ToJson(await SaveMirrorDefinitionAsync(Required<MirrorDefinitionSaveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.MirrorDefinitionDelete => ToJson(await DeleteMirrorDefinitionAsync(Required<MirrorDefinitionDeleteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.MirrorPreview => ToJson(await PreviewMirrorAsync(Required<MirrorPreviewRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.MirrorApprove => ToJson(await ApproveMirrorAsync(Required<MirrorApproveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.ConsoleExecute => ToJson(await ExecuteConsoleAsync(Required<ConsoleExecuteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
@@ -166,11 +172,16 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 await _sessionStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
+                    var profiles = (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).ToImmutableArray();
+                    var mirrorDefinitions = await LoadMirrorDefinitionsAsync(profiles, cancellationToken).ConfigureAwait(false);
                     return new(AgentProtocol.CurrentVersion, runtime,
-                        (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).ToImmutableArray(),
+                        profiles,
                         _sessions.GetSnapshots().ToImmutableArray(),
                         _jobs.GetJobs().ToImmutableArray(),
-                        _remoteEdits.GetSnapshots().ToImmutableArray());
+                        _remoteEdits.GetSnapshots().ToImmutableArray())
+                    {
+                        MirrorDefinitions = mirrorDefinitions,
+                    };
                 }
                 finally
                 {
@@ -191,6 +202,81 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     public Task<IReadOnlyList<ConnectionProfile>> ListProfilesAsync(CancellationToken cancellationToken = default) =>
         _profileStore.GetAllAsync(cancellationToken);
 
+    public async Task<IReadOnlyList<MirrorDefinition>> ListMirrorDefinitionsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var profiles = await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false);
+            return await LoadMirrorDefinitionsAsync(profiles, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    public async Task<MirrorDefinition> SaveMirrorDefinitionAsync(
+        MirrorDefinitionSaveRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        PlanValidator.Validate(request.Definition);
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var profiles = await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false);
+            var definitions = await LoadMirrorDefinitionsAsync(profiles, cancellationToken).ConfigureAwait(false);
+            if (!profiles.Any(profile => profile.Id == request.Definition.ProfileId))
+                throw new KeyNotFoundException($"Profile {request.Definition.ProfileId} was not found.");
+
+            var existing = definitions.FirstOrDefault(definition => definition.Id == request.Definition.Id);
+            if (existing is not null && existing.ProfileId != request.Definition.ProfileId)
+                throw new InvalidOperationException("An existing saved mirror definition cannot be rebound to a different profile.");
+            if (definitions.Any(definition =>
+                    definition.Id != request.Definition.Id &&
+                    definition.ProfileId == request.Definition.ProfileId &&
+                    string.Equals(definition.Name, request.Definition.Name, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException("Saved mirror definition names must be unique within a profile, ignoring case.");
+            }
+
+            ValidateMirrorDefinitionSet(definitions
+                .Where(definition => definition.Id != request.Definition.Id)
+                .Append(request.Definition));
+            InvalidateMirrorPreviewsForDefinition(request.Definition.Id);
+            await _mirrorDefinitionStore.SaveAsync(request.Definition, cancellationToken).ConfigureAwait(false);
+            return request.Definition;
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    public async Task<bool> DeleteMirrorDefinitionAsync(
+        MirrorDefinitionDeleteRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request.DefinitionId == Guid.Empty)
+            throw new ArgumentException("A mirror definition identifier is required.", nameof(request));
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var profiles = await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false);
+            var definitions = await LoadMirrorDefinitionsAsync(profiles, cancellationToken).ConfigureAwait(false);
+            InvalidateMirrorPreviewsForDefinition(request.DefinitionId);
+            if (!definitions.Any(definition => definition.Id == request.DefinitionId)) return false;
+            await _mirrorDefinitionStore.DeleteAsync(request.DefinitionId, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
     public async Task<ConnectionProfile> SaveProfileAsync(ProfileSaveRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -201,7 +287,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var previous = (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault(profile => profile.Id == request.Profile.Id);
+            var profiles = await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false);
+            _ = await LoadMirrorDefinitionsAsync(profiles, cancellationToken).ConfigureAwait(false);
+            var previous = profiles.FirstOrDefault(profile => profile.Id == request.Profile.Id);
             var hostKeyBindingChanged = previous is not null && HostKeyBindingChanged(previous, request.Profile);
             var connectionIdentityChanged = previous is not null &&
                 ConnectionIdentity.FromProfile(previous) != ConnectionIdentity.FromProfile(request.Profile);
@@ -227,7 +315,10 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             if (credentialSupplied && request.Profile.Protocol == ConnectionProtocol.Sftp)
                 _ = await _hostKeys.RequireTrustedAsync(request.Profile, cancellationToken).ConfigureAwait(false);
             if (connectionIdentityChanged)
+            {
+                InvalidateMirrorPreviewsForProfile(request.Profile.Id);
                 await RemoveProfileSessionTabsAsync(request.Profile.Id, cancellationToken).ConfigureAwait(false);
+            }
             var identityChanged = previous is not null && !SecretBindingFor(previous).Equals(SecretBindingFor(request.Profile));
             if (identityChanged) await _secretStore.DeleteAsync(request.Profile.Id, cancellationToken).ConfigureAwait(false);
             if (hostKeyBindingChanged)
@@ -257,6 +348,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             ThrowIfProfileHasActiveRemoteEdits(request.ProfileId);
             ThrowIfProfileHasDependentJobs(request.ProfileId);
+            InvalidateMirrorPreviewsForProfile(request.ProfileId);
+            await DeleteMirrorDefinitionsForProfileAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
             await RemoveProfileSessionTabsAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
             await _secretStore.DeleteAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
             await _hostKeys.DeleteAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
@@ -2334,6 +2427,100 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     {
         if (!ProfileValidator.IsCanonicalRemotePath(path))
             throw new ArgumentException("A bounded canonical remote path is required.", parameterName);
+    }
+
+    private async Task<ImmutableArray<MirrorDefinition>> LoadMirrorDefinitionsAsync(
+        IEnumerable<ConnectionProfile> profiles,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(profiles);
+        var profileIds = profiles.Select(static profile => profile.Id).ToHashSet();
+        var definitions = await _mirrorDefinitionStore.GetAllAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidDataException("The saved mirror-definition store returned no collection.");
+        return ValidateMirrorDefinitionSet(definitions, profileIds);
+    }
+
+    private static ImmutableArray<MirrorDefinition> ValidateMirrorDefinitionSet(
+        IEnumerable<MirrorDefinition> definitions,
+        IReadOnlySet<Guid>? profileIds = null)
+    {
+        ArgumentNullException.ThrowIfNull(definitions);
+        var materialized = definitions.ToArray();
+        if (materialized.Length > MirrorDefinitionPolicy.MaximumDefinitions)
+            throw new InvalidDataException("The saved mirror-definition store contains too many records.");
+
+        var identifiers = new HashSet<Guid>();
+        var namesByProfile = new Dictionary<Guid, HashSet<string>>();
+        long aggregatePatternCharacters = 0;
+        foreach (var definition in materialized)
+        {
+            if (definition is null)
+                throw new InvalidDataException("The saved mirror-definition store contains a null record.");
+            try
+            {
+                PlanValidator.Validate(definition);
+            }
+            catch (ModelValidationException exception)
+            {
+                throw new InvalidDataException("The saved mirror-definition store contains an invalid record.", exception);
+            }
+
+            if (!identifiers.Add(definition.Id))
+                throw new InvalidDataException("The saved mirror-definition store contains a duplicate identifier.");
+            if (profileIds is not null && !profileIds.Contains(definition.ProfileId))
+                throw new InvalidDataException($"Saved mirror definition {definition.Id} refers to a profile that does not exist.");
+            if (!namesByProfile.TryGetValue(definition.ProfileId, out var names))
+            {
+                names = new(StringComparer.OrdinalIgnoreCase);
+                namesByProfile.Add(definition.ProfileId, names);
+            }
+            if (!names.Add(definition.Name))
+                throw new InvalidDataException("Saved mirror definition names must be unique within a profile, ignoring case.");
+
+            aggregatePatternCharacters += definition.EffectiveIncludes.Sum(static pattern => (long)pattern.Length);
+            aggregatePatternCharacters += definition.EffectiveExcludes.Sum(static pattern => (long)pattern.Length);
+            if (aggregatePatternCharacters > MirrorDefinitionPolicy.MaximumAggregatePatternCharacters)
+                throw new InvalidDataException("The saved mirror-definition store exceeds its aggregate pattern budget.");
+        }
+
+        var ordered = materialized
+            .OrderBy(static definition => definition.ProfileId)
+            .ThenBy(static definition => definition.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static definition => definition.Name, StringComparer.Ordinal)
+            .ThenBy(static definition => definition.Id)
+            .ToImmutableArray();
+        if (JsonSerializer.SerializeToUtf8Bytes(ordered, FramedJsonStream.SerializerOptions).Length >
+            MirrorDefinitionPolicy.MaximumSerializedStoreBytes)
+        {
+            throw new InvalidDataException("The saved mirror-definition store exceeds its serialized size budget.");
+        }
+        return ordered;
+    }
+
+    private async Task DeleteMirrorDefinitionsForProfileAsync(Guid profileId, CancellationToken cancellationToken)
+    {
+        var profiles = await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false);
+        var definitions = await LoadMirrorDefinitionsAsync(profiles, cancellationToken).ConfigureAwait(false);
+        foreach (var definition in definitions.Where(definition => definition.ProfileId == profileId))
+            await _mirrorDefinitionStore.DeleteAsync(definition.Id, cancellationToken).ConfigureAwait(false);
+    }
+
+    private void InvalidateMirrorPreviewsForDefinition(Guid definitionId)
+    {
+        foreach (var pair in _previews)
+        {
+            if (pair.Value.Definition.Id == definitionId)
+                _previews.TryRemove(pair.Key, out _);
+        }
+    }
+
+    private void InvalidateMirrorPreviewsForProfile(Guid profileId)
+    {
+        foreach (var pair in _previews)
+        {
+            if (pair.Value.Definition.ProfileId == profileId)
+                _previews.TryRemove(pair.Key, out _);
+        }
     }
 
     private void PurgeExpiredMirrorRegistrations(DateTimeOffset now)
