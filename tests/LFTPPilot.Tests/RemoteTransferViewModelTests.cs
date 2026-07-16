@@ -289,7 +289,11 @@ public sealed class RemoteTransferViewModelTests
         public Task<bool> DeleteProfileAsync(Guid profileId, CancellationToken cancellationToken = default) => Unsupported<bool>();
         public Task<SftpHostKeyInspection> InspectSftpHostKeyAsync(ConnectionProfile profile, CancellationToken cancellationToken = default) => Unsupported<SftpHostKeyInspection>();
         public Task<SftpHostKeyApproveResult> ApproveSftpHostKeyAsync(SftpHostKeyReview review, bool replaceExisting, CancellationToken cancellationToken = default) => Unsupported<SftpHostKeyApproveResult>();
-        public Task<WorkspaceSessionSeed> ConnectAsync(ConnectionProfile profile, string? ephemeralCredential = null, CancellationToken cancellationToken = default) => Unsupported<WorkspaceSessionSeed>();
+        public Task<WorkspaceSessionSeed> ConnectAsync(
+            ConnectionProfile profile,
+            string? ephemeralCredential = null,
+            CancellationToken cancellationToken = default,
+            Guid? existingSessionId = null) => Unsupported<WorkspaceSessionSeed>();
         public Task<bool> DisconnectAsync(Guid sessionId, CancellationToken cancellationToken = default) => Unsupported<bool>();
         public Task<IReadOnlyList<FileEntry>> BrowseAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default) => Unsupported<IReadOnlyList<FileEntry>>();
         public Task<FileMutationResult> CreateDirectoryAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default) => Unsupported<FileMutationResult>();

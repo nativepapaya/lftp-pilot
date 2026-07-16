@@ -16,7 +16,10 @@ public sealed class ConsoleViewModel : ObservableObject
     public ConsoleViewModel(IAgentWorkspaceClient agent)
     {
         _agent = agent;
-        ExecuteCommand = new AsyncRelayCommand(_ => ExecuteAsync(), _ => SelectedSession is not null && !string.IsNullOrWhiteSpace(CommandText), ReportError);
+        ExecuteCommand = new AsyncRelayCommand(
+            _ => ExecuteAsync(),
+            _ => SelectedSession is { IsConnected: true } && !string.IsNullOrWhiteSpace(CommandText),
+            ReportError);
     }
 
     public ObservableCollection<SessionViewModel> Sessions { get; } = [];
@@ -28,14 +31,17 @@ public sealed class ConsoleViewModel : ObservableObject
 
     public void LoadSessions(IEnumerable<SessionViewModel> sessions)
     {
+        var selectedSessionId = SelectedSession?.SessionId;
         Sessions.Clear();
-        foreach (var session in sessions) Sessions.Add(session);
-        SelectedSession ??= Sessions.FirstOrDefault();
+        foreach (var session in sessions.Where(static session => session.IsConnected)) Sessions.Add(session);
+        SelectedSession = selectedSessionId is { } selectedId
+            ? Sessions.FirstOrDefault(session => session.SessionId == selectedId) ?? Sessions.FirstOrDefault()
+            : Sessions.FirstOrDefault();
     }
 
     private async Task ExecuteAsync()
     {
-        if (SelectedSession is null) return;
+        if (SelectedSession is not { IsConnected: true }) return;
         var command = CommandText.Trim();
         var decision = SafeConsolePolicy.Evaluate(command, localShellEnabled: false);
         if (!decision.Allowed)

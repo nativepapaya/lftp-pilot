@@ -1,8 +1,11 @@
 # Windows architecture
 
 LFTP Pilot separates the WinUI process from the long-lived Agent. The App owns
-presentation and activation routing; the Agent owns durable job state and all
-LFTP process trees. `LFTPPilot.Windows` is the Windows boundary used by both.
+presentation and activation routing; the Agent owns durable job and
+credential-free session-tab state plus all LFTP process trees.
+Job and tab updates share one atomic, revision-ordered writer so an older
+asynchronous job capture cannot replace newer jobs or adjacent tab state.
+`LFTPPilot.Windows` is the Windows boundary used by both.
 The MSIX keeps the Agent's self-contained payload under `agent/` and the
 authenticated LFTP runtime under `lftp/`, avoiding dependency collisions with
 the App while keeping both package trees read-only.

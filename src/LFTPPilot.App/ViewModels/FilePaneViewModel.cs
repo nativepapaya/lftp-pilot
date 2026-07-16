@@ -231,6 +231,15 @@ public sealed class FilePaneViewModel : ObservableObject
         LoadBookmarks();
     }
 
+    public void Restore(string path, IEnumerable<FileEntry> entries)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("A pane path is required.", nameof(path));
+        ArgumentNullException.ThrowIfNull(entries);
+        Path = path;
+        Replace(entries);
+    }
+
     public void Sort(string? column)
     {
         if (!Enum.TryParse<FilePaneSortColumn>(column, true, out var parsed))

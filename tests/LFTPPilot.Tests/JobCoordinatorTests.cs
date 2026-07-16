@@ -154,6 +154,70 @@ public sealed class JobCoordinatorTests
         Assert.Equal(JobState.Failed, coordinator.GetJobs().Single().State);
     }
 
+    [Fact]
+    public void MutationsKeepUpdatedTimestampAtOrAfterFutureCreatedTimestamp()
+    {
+        var coordinator = new JobCoordinator();
+        var future = DateTimeOffset.UtcNow.AddSeconds(30);
+        var job = coordinator.Enqueue(Job(JobState.Queued) with
+        {
+            CreatedAt = future,
+            UpdatedAt = future,
+        });
+
+        var running = coordinator.Transition(job.Id, JobState.Running, "Running");
+        Assert.True(running.UpdatedAt >= future);
+        Assert.True(coordinator.TryCancel(job.Id, "Cancelled"));
+        Assert.True(Assert.Single(coordinator.GetJobs()).UpdatedAt >= future);
+    }
+
+    [Fact]
+    public void EnqueueRejectsTimestampsBeyondFutureSkewBeforeCommit()
+    {
+        var coordinator = new JobCoordinator();
+        var future = DateTimeOffset.UtcNow + JobSnapshotPolicy.MaximumFutureTimestampSkew + TimeSpan.FromMinutes(1);
+
+        Assert.Throws<ArgumentException>(() => coordinator.Enqueue(Job(JobState.Queued) with
+        {
+            CreatedAt = future,
+            UpdatedAt = future,
+        }));
+        Assert.Empty(coordinator.GetJobs());
+    }
+
+    [Fact]
+    public void CoordinatorRejectsNonCanonicalTextBeforeCommittingMutation()
+    {
+        var coordinator = new JobCoordinator();
+        var malformed = Job(JobState.Queued) with { DisplayName = "unsafe\nname" };
+
+        Assert.Throws<ArgumentException>(() => coordinator.Enqueue(malformed));
+        Assert.Empty(coordinator.GetJobs());
+
+        var job = coordinator.Enqueue(Job(JobState.Queued));
+        Assert.Throws<ArgumentException>(() => coordinator.Transition(job.Id, JobState.Running, "unsafe\tstatus"));
+        Assert.Equal(JobState.Queued, Assert.Single(coordinator.GetJobs()).State);
+    }
+
+    [Fact]
+    public void DerivedJobTextIsControlFreeBoundedAndSurrogateSafe()
+    {
+        var display = JobSnapshotPolicy.CanonicalizeDerivedDisplayName(
+            new string('d', JobSnapshotPolicy.MaximumDisplayNameLength - 1) + "\ud83d\ude80\tignored",
+            "Transfer");
+        var error = JobSnapshotPolicy.CanonicalizeDerivedError(
+            "test-error",
+            new string('e', JobSnapshotPolicy.MaximumErrorMessageLength) + "\r\nmore");
+        var job = Job(JobState.Queued) with { DisplayName = display };
+
+        JobSnapshotPolicy.Validate(job);
+        Assert.True(display.Length <= JobSnapshotPolicy.MaximumDisplayNameLength);
+        Assert.DoesNotContain(display, static character => char.IsControl(character));
+        Assert.False(char.IsHighSurrogate(display[^1]));
+        Assert.True(error.Message.Length <= JobSnapshotPolicy.MaximumErrorMessageLength);
+        Assert.DoesNotContain(error.Message, static character => char.IsControl(character));
+    }
+
     internal static JobSnapshot Job(JobState state, DateTimeOffset? runAt = null) => new(
         Guid.NewGuid(), JobKind.Transfer, Guid.NewGuid(), "Transfer", state,
         DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, runAt);

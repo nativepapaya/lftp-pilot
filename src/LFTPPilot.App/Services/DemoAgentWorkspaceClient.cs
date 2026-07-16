@@ -94,10 +94,14 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
             new NotSupportedException("The diagnostic demo transport does not enroll SFTP host keys."));
     }
 
-    public Task<WorkspaceSessionSeed> ConnectAsync(ConnectionProfile profile, string? ephemeralCredential = null, CancellationToken cancellationToken = default)
+    public Task<WorkspaceSessionSeed> ConnectAsync(
+        ConnectionProfile profile,
+        string? ephemeralCredential = null,
+        CancellationToken cancellationToken = default,
+        Guid? existingSessionId = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(CreateSession(profile));
+        return Task.FromResult(CreateSession(profile, existingSessionId));
     }
 
     public Task<bool> DisconnectAsync(Guid sessionId, CancellationToken cancellationToken = default)
@@ -236,11 +240,11 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
     public Task OpenUpdateInstallerAsync(CancellationToken cancellationToken = default) =>
         _updates.OpenInstallerAsync(cancellationToken);
 
-    private static WorkspaceSessionSeed CreateSession(ConnectionProfile profile)
+    private static WorkspaceSessionSeed CreateSession(ConnectionProfile profile, Guid? sessionId = null)
     {
         var local = profile.InitialLocalPath ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var remote = profile.InitialRemotePath ?? "/";
-        var snapshot = new SessionSnapshot(Guid.NewGuid(), profile.Id, profile.Name, true, new PaneLocation(PaneKind.Local, local), new PaneLocation(PaneKind.Remote, remote), DateTimeOffset.Now);
+        var snapshot = new SessionSnapshot(sessionId ?? Guid.NewGuid(), profile.Id, profile.Name, true, new PaneLocation(PaneKind.Local, local), new PaneLocation(PaneKind.Remote, remote), DateTimeOffset.Now);
         return new WorkspaceSessionSeed(snapshot, CreateLocalEntries(local), CreateRemoteEntries(remote));
     }
 

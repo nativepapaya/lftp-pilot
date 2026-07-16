@@ -19,6 +19,16 @@ still needs real servers, signed packages, or additional product development.
 - A long-lived, single-instance Agent with bounded versioned JSON frames over
   separate current-user control/event pipes, kernel peer-PID checks, durable
   job snapshots, reconnect/resynchronization, and kill-on-close Job Objects.
+  Its atomic state writer validates job snapshots at the same boundary as the
+  in-memory coordinator, rejects stale asynchronous captures, and completes
+  workspace/process cleanup before reporting a shutdown persistence failure.
+- Credential-free session-tab intent persists in the same bounded, atomic
+  Agent state. After an Agent restart, tabs return disconnected with stable
+  identifiers, ordering, and last local/remote paths; reconnect is an explicit
+  user action and reuses the same tab. Missing or identity-changed profiles are
+  pruned before any host-trust check, credential lookup, or network process can
+  start. A committed close cannot be resurrected by later state writes even if
+  LFTP process cleanup initially fails.
 - Profile metadata stored separately from DPAPI credentials bound to the exact
   profile, transport endpoint, user name, and authentication purpose. A change
   to protocol, endpoint, user, authentication mode, or SSH key requires
@@ -101,8 +111,6 @@ still needs real servers, signed packages, or additional product development.
 - Exercise first-use, unchanged, and rotating SFTP host keys against the
   controlled SSH server matrix. Encrypted private-key passphrase support also
   remains required.
-- Persist and restore session tabs after an Agent restart, not only while the
-  background Agent remains alive.
 - Exercise managed-cache editing, concurrent target changes, staging promotion,
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.

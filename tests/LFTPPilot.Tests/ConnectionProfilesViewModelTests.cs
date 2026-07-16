@@ -485,7 +485,11 @@ public sealed class ConnectionProfilesViewModelTests
             return Task.FromResult(new SftpHostKeyApproveResult(review.ProfileId, review.Endpoint, review.PresentedFingerprintSha256));
         }
 
-        public async Task<WorkspaceSessionSeed> ConnectAsync(ConnectionProfile profile, string? ephemeralCredential = null, CancellationToken cancellationToken = default)
+        public async Task<WorkspaceSessionSeed> ConnectAsync(
+            ConnectionProfile profile,
+            string? ephemeralCredential = null,
+            CancellationToken cancellationToken = default,
+            Guid? existingSessionId = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             ConnectCredentials.Add(ephemeralCredential);

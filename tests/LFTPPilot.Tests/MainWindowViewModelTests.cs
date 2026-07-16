@@ -95,6 +95,100 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task RepeatedBootstrapPreservesSelectedTabInstancesAndAuthoritativeOrderAndPaths()
+    {
+        var profile = Profile();
+        var first = Seed(profile, localPath: @"C:\First", remotePath: "/first");
+        var second = Seed(profile, localPath: @"C:\Second", remotePath: "/second");
+        var agent = new RecordingSessionAgent(profile, [first, second]);
+        var viewModel = CreateViewModelWithoutUiContext(agent);
+        await viewModel.InitializeAsync();
+        var firstViewModel = viewModel.Sessions[0];
+        var secondViewModel = viewModel.Sessions[1];
+        viewModel.SelectedSession = firstViewModel;
+
+        agent.ReplaceSessions([
+            second with
+            {
+                Snapshot = second.Snapshot with
+                {
+                    LocalLocation = new(PaneKind.Local, @"C:\Second\Updated"),
+                    RemoteLocation = new(PaneKind.Remote, "/second/updated"),
+                },
+            },
+            first,
+        ]);
+        await viewModel.InitializeAsync();
+
+        Assert.Equal(
+            [second.Snapshot.SessionId, first.Snapshot.SessionId],
+            viewModel.Sessions.Select(static session => session.SessionId));
+        Assert.Same(secondViewModel, viewModel.Sessions[0]);
+        Assert.Same(firstViewModel, viewModel.Sessions[1]);
+        Assert.Same(firstViewModel, viewModel.SelectedSession);
+        Assert.Equal(@"C:\Second\Updated", secondViewModel.LocalPane.Path);
+        Assert.Equal("/second/updated", secondViewModel.RemotePane.Path);
+
+        await viewModel.InitializeAsync();
+
+        Assert.Equal(2, viewModel.Sessions.Count);
+        Assert.Same(secondViewModel, viewModel.Sessions[0]);
+        Assert.Same(firstViewModel, viewModel.Sessions[1]);
+    }
+
+    [Fact]
+    public async Task DisconnectedAskOnConnectTabIsInertUntilExplicitSameIdReconnect()
+    {
+        var profile = Profile() with { Authentication = AuthenticationKind.AskOnConnect };
+        var sessionId = Guid.NewGuid();
+        var disconnected = Seed(
+            profile,
+            includeRemoteFile: true,
+            sessionId: sessionId,
+            isConnected: false,
+            localPath: @"C:\Remembered\Local",
+            remotePath: "/remembered/remote",
+            error: new("agent-restarted", "The Agent restarted before this tab could reconnect."));
+        var connected = Seed(
+            profile,
+            includeRemoteFile: true,
+            sessionId: sessionId,
+            localPath: @"C:\Remembered\Local",
+            remotePath: "/remembered/remote");
+        var agent = new RecordingSessionAgent(profile, [disconnected]);
+        agent.ConnectResults.Enqueue(connected);
+        var viewModel = CreateViewModelWithoutUiContext(agent);
+
+        await viewModel.InitializeAsync();
+
+        var session = Assert.Single(viewModel.Sessions);
+        Assert.False(session.IsConnected);
+        Assert.True(session.RequiresCredentialForReconnect);
+        Assert.Equal(@"C:\Remembered\Local", session.LocalPane.Path);
+        Assert.Equal("/remembered/remote", session.RemotePane.Path);
+        Assert.False(session.UploadCommand.CanExecute(null));
+        Assert.False(session.DownloadCommand.CanExecute(null));
+        Assert.False(session.RefreshCommand.CanExecute(null));
+        Assert.Empty(viewModel.Console.Sessions);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.QueueSourcesAsync(
+            TransferDirection.Download,
+            [new("/remembered/remote/file.bin", TransferSourceKind.File)]));
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            session.ReconnectAsync(cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Empty(agent.ConnectRequests);
+
+        await session.ReconnectAsync("once-only-secret", TestContext.Current.CancellationToken);
+
+        var request = Assert.Single(agent.ConnectRequests);
+        Assert.Equal(sessionId, request.ExistingSessionId);
+        Assert.Equal("once-only-secret", request.EphemeralCredential);
+        Assert.True(session.IsConnected);
+        Assert.True(session.RefreshCommand.CanExecute(null));
+        Assert.Same(session, Assert.Single(viewModel.Console.Sessions));
+        Assert.Equal(sessionId, Assert.Single(viewModel.Sessions).SessionId);
+    }
+
+    [Fact]
     public async Task NewTabConnectMutationFailureDoesNotEscapeAndRequestsResync()
     {
         var profile = Profile();
@@ -226,6 +320,21 @@ public sealed class MainWindowViewModelTests
         await WaitUntilAsync(() => agent.LoadCount >= 2 && viewModel.Sessions.Count == 0);
 
         Assert.Empty(viewModel.Connections.Profiles);
+        Assert.Empty(viewModel.Sessions);
+    }
+
+    [Fact]
+    public async Task CommittedProfileSaveRefreshRemovesIdentityInvalidatedRestoredTab()
+    {
+        var profile = Profile();
+        var restored = Seed(profile, isConnected: false);
+        var agent = new RecordingSessionAgent(profile, [restored]);
+        var viewModel = CreateViewModelWithInlineUiContext(agent);
+        await viewModel.InitializeAsync();
+
+        agent.CommitProfileIdentityChangeAndPublish(profile with { Host = "changed.example.test" });
+        await WaitUntilAsync(() => agent.LoadCount >= 2 && viewModel.Sessions.Count == 0);
+
         Assert.Empty(viewModel.Sessions);
     }
 
@@ -468,12 +577,20 @@ public sealed class MainWindowViewModelTests
     private static ConnectionProfile Profile() => new(
         Guid.NewGuid(), "FTP test", ConnectionProtocol.Ftp, "example.test", 21, "alice", AuthenticationKind.Password);
 
-    private static WorkspaceSessionSeed Seed(ConnectionProfile profile, bool includeRemoteFile = false) => new(
+    private static WorkspaceSessionSeed Seed(
+        ConnectionProfile profile,
+        bool includeRemoteFile = false,
+        Guid? sessionId = null,
+        bool isConnected = true,
+        string localPath = @"C:\Users\Test",
+        string remotePath = "/",
+        EngineError? error = null) => new(
         new SessionSnapshot(
-            Guid.NewGuid(), profile.Id, profile.Name, true,
-            new(PaneKind.Local, @"C:\Users\Test"),
-            new(PaneKind.Remote, "/"),
-            DateTimeOffset.UtcNow),
+            sessionId ?? Guid.NewGuid(), profile.Id, profile.Name, isConnected,
+            new(PaneKind.Local, localPath),
+            new(PaneKind.Remote, remotePath),
+            DateTimeOffset.UtcNow,
+            error),
         [],
         includeRemoteFile
             ? [new FileEntry("file.bin", "/remote/file.bin", EntryKind.File, 12, DateTimeOffset.UtcNow)]
@@ -544,6 +661,7 @@ public sealed class MainWindowViewModelTests
         public List<TransferPlan> TransferPlans { get; } = [];
         public List<JobSnapshot> Jobs { get; } = [];
         public Queue<WorkspaceSessionSeed> ConnectResults { get; } = [];
+        public List<(Guid? ExistingSessionId, string? EphemeralCredential)> ConnectRequests { get; } = [];
         public List<Guid> DisconnectedSessionIds { get; } = [];
         public List<RemoteEditSession> RemoteEdits { get; } = [];
         public List<ConnectionProfile> AdditionalProfiles { get; } = [];
@@ -564,12 +682,25 @@ public sealed class MainWindowViewModelTests
                 profiles, _sessions.ToArray(), Jobs.ToArray(), RemoteEdits.ToArray(), [], [], false, "Agent ready"));
         }
 
+        public void ReplaceSessions(IEnumerable<WorkspaceSessionSeed> sessions)
+        {
+            _sessions.Clear();
+            _sessions.AddRange(sessions);
+        }
+
         public void CommitProfileDeleteAndPublish()
         {
             _profileDeleted = true;
             _sessions.RemoveAll(seed => seed.Snapshot.ProfileId == profile.Id);
             EventReceived?.Invoke(this, new EngineEvent(
                 1, EngineEventKind.Session, "profile.deleted", DateTimeOffset.UtcNow, profile.Id));
+        }
+
+        public void CommitProfileIdentityChangeAndPublish(ConnectionProfile updated)
+        {
+            _sessions.RemoveAll(seed => seed.Snapshot.ProfileId == updated.Id);
+            EventReceived?.Invoke(this, new EngineEvent(
+                3, EngineEventKind.Session, "profile.saved", DateTimeOffset.UtcNow, updated));
         }
 
         public void CommitPendingConnectAndPublish()
@@ -605,10 +736,15 @@ public sealed class MainWindowViewModelTests
         }
         public Task<SftpHostKeyInspection> InspectSftpHostKeyAsync(ConnectionProfile value, CancellationToken cancellationToken = default) => Unsupported<SftpHostKeyInspection>();
         public Task<SftpHostKeyApproveResult> ApproveSftpHostKeyAsync(SftpHostKeyReview review, bool replaceExisting, CancellationToken cancellationToken = default) => Unsupported<SftpHostKeyApproveResult>();
-        public Task<WorkspaceSessionSeed> ConnectAsync(ConnectionProfile value, string? ephemeralCredential = null, CancellationToken cancellationToken = default)
+        public Task<WorkspaceSessionSeed> ConnectAsync(
+            ConnectionProfile value,
+            string? ephemeralCredential = null,
+            CancellationToken cancellationToken = default,
+            Guid? existingSessionId = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Assert.Equal(profile.Id, value.Id);
+            ConnectRequests.Add((existingSessionId, ephemeralCredential));
             if (!ConnectResults.TryDequeue(out var seed)) return Unsupported<WorkspaceSessionSeed>();
             if (DeferConnectMutationUntilPublish)
             {
@@ -616,7 +752,16 @@ public sealed class MainWindowViewModelTests
                 return Task.FromException<WorkspaceSessionSeed>(
                     new IOException("connect outcome became unknown before the late commit"));
             }
-            _sessions.Add(seed);
+            if (existingSessionId is { } restoredSessionId)
+            {
+                var existingIndex = _sessions.FindIndex(candidate => candidate.Snapshot.SessionId == restoredSessionId);
+                Assert.True(existingIndex >= 0);
+                _sessions[existingIndex] = seed;
+            }
+            else
+            {
+                _sessions.Add(seed);
+            }
             if (ThrowAfterConnectMutation)
                 throw new InvalidOperationException("connect completed before reply serialization failed");
             return Task.FromResult(seed);

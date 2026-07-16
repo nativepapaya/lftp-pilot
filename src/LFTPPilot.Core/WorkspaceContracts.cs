@@ -52,7 +52,10 @@ public sealed record SftpHostKeyApproveResult(
     Guid ProfileId,
     string Endpoint,
     string FingerprintSha256);
-public sealed record SessionConnectRequest(ConnectionIdentity ExpectedIdentity, string? EphemeralCredential = null);
+public sealed record SessionConnectRequest(
+    ConnectionIdentity ExpectedIdentity,
+    string? EphemeralCredential = null,
+    Guid? ExistingSessionId = null);
 public sealed record SessionDisconnectRequest(Guid SessionId);
 public sealed record BrowseRequest(
     Guid? SessionId,

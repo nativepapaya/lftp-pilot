@@ -26,6 +26,17 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   before another request, Agent shutdown drains admitted client work before
   disposing workspace state, and job admission is serialized with session and
   profile removal through underlying process cleanup.
+- Session tabs now survive an Agent restart as credential-free disconnected
+  intent with stable IDs, ordering, and last local/remote paths. Reconnect is
+  explicit and preserves the tab identity; ask-on-connect secrets are never
+  persisted or replayed. Missing or changed profile identities are pruned
+  before trust, credential, or network work, and durable close tombstones
+  prevent failed process cleanup from resurrecting a closed tab.
+- The shared Agent state writer now rejects malformed or future-dated job
+  snapshots, orders asynchronous job captures before they can race, and
+  preserves session tabs while job state changes. Persistence failures are
+  reported without leaking state paths, and shutdown still cleans up the
+  workspace and LFTP processes before surfacing them.
 - SFTP and mixed-protocol remote-to-remote jobs now fail closed instead of
   sharing LFTP's process-global SFTP connect program across two independently
   pinned endpoints. FTP-family FXP remains available; secure SFTP relay will

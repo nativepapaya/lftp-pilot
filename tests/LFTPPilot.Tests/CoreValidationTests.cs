@@ -91,6 +91,22 @@ public sealed class CoreValidationTests
         Assert.Empty(ProfileValidator.Validate(Profile(ConnectionProtocol.Sftp, AuthenticationKind.AskOnConnect) with { Host = host }));
     }
 
+    [Theory]
+    [InlineData("/duplicate//separator")]
+    [InlineData("/parent/../escape")]
+    [InlineData("/trailing/")]
+    public void ProfileRejectsNonCanonicalInitialPathsAndBookmarks(string remotePath)
+    {
+        var issues = ProfileValidator.Validate(Profile(ConnectionProtocol.Ftp, AuthenticationKind.Anonymous) with
+        {
+            InitialRemotePath = remotePath,
+            Bookmarks = [remotePath],
+        });
+
+        Assert.Contains(issues, issue => issue.Field == "initialRemotePath");
+        Assert.Contains(issues, issue => issue.Field == "bookmarks");
+    }
+
     [Fact]
     public void TransferValidationRejectsInjectedPathAndUnboundedSegments()
     {
@@ -181,6 +197,25 @@ public sealed class CoreValidationTests
             PlanValidator.Validate(Mirror() with { RemoteRoot = "/" + new string('a', 4096) }));
 
         Assert.Contains(exception.Issues, issue => issue.Field == "remoteRoot");
+    }
+
+    [Theory]
+    [InlineData("control\tname", "control-character")]
+    public void MirrorValidationRejectsNamesThatCannotBePersistedAsJobText(string name, string expectedCode)
+    {
+        var exception = Assert.Throws<ModelValidationException>(() =>
+            PlanValidator.Validate(Mirror() with { Name = name }));
+
+        Assert.Contains(exception.Issues, issue => issue.Field == "name" && issue.Code == expectedCode);
+    }
+
+    [Fact]
+    public void MirrorValidationRejectsNameBeyondDurableJobDisplayLimit()
+    {
+        var exception = Assert.Throws<ModelValidationException>(() => PlanValidator.Validate(
+            Mirror() with { Name = new string('m', JobSnapshotPolicy.MaximumDisplayNameLength + 1) }));
+
+        Assert.Contains(exception.Issues, issue => issue.Field == "name" && issue.Code == "length");
     }
 
     [Theory]

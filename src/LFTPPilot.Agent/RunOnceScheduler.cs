@@ -25,7 +25,7 @@ public sealed class RunOnceScheduler : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(jobs);
         foreach (var job in jobs.Where(static job => job.State == JobState.Scheduled))
             _coordinator.Transition(job.Id, JobState.Missed, "The run-once schedule was missed because the agent restarted or was not running continuously.");
-        await _store.SaveAsync(_coordinator.GetJobs(), cancellationToken).ConfigureAwait(false);
+        await _store.SaveAsync(_coordinator.GetJobs, cancellationToken).ConfigureAwait(false);
     }
 
     public void Schedule(JobSnapshot job, Func<CancellationToken, Task> onDue)
@@ -50,15 +50,15 @@ public sealed class RunOnceScheduler : IAsyncDisposable
     {
         try
         {
-            await _store.SaveAsync(_coordinator.GetJobs(), cancellationToken).ConfigureAwait(false);
+            await _store.SaveAsync(_coordinator.GetJobs, cancellationToken).ConfigureAwait(false);
             Schedule(job, onDue);
         }
         catch (Exception exception) when (!IsFatalRuntimeException(exception))
         {
             if (TryMarkUnscheduledJobMissed(job.Id))
             {
-                try { await _store.SaveAsync(_coordinator.GetJobs(), CancellationToken.None).ConfigureAwait(false); }
-                catch (IOException) { }
+                try { await _store.SaveAsync(_coordinator.GetJobs, CancellationToken.None).ConfigureAwait(false); }
+                catch (Exception persistenceException) when (!IsFatalRuntimeException(persistenceException)) { }
             }
             throw;
         }
@@ -90,7 +90,7 @@ public sealed class RunOnceScheduler : IAsyncDisposable
                 _coordinator.Transition(job.Id, JobState.Missed, reason);
             }
         }
-        await _store.SaveAsync(_coordinator.GetJobs(), cancellationToken).ConfigureAwait(false);
+        await _store.SaveAsync(_coordinator.GetJobs, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()
@@ -121,7 +121,7 @@ public sealed class RunOnceScheduler : IAsyncDisposable
                 cancellationToken.ThrowIfCancellationRequested();
                 _coordinator.Transition(job.Id, JobState.Queued, "Scheduled time reached.");
             }
-            await _store.SaveAsync(_coordinator.GetJobs(), cancellationToken).ConfigureAwait(false);
+            await _store.SaveAsync(_coordinator.GetJobs, cancellationToken).ConfigureAwait(false);
             await onDue(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -133,11 +133,10 @@ public sealed class RunOnceScheduler : IAsyncDisposable
                 try
                 {
                     _coordinator.Transition(job.Id, JobState.Failed, "Scheduled execution failed.",
-                        new("scheduled-execution-failed", exception.Message));
-                    await _store.SaveAsync(_coordinator.GetJobs(), CancellationToken.None).ConfigureAwait(false);
+                        JobSnapshotPolicy.CanonicalizeDerivedError("scheduled-execution-failed", exception.Message));
+                    await _store.SaveAsync(_coordinator.GetJobs, CancellationToken.None).ConfigureAwait(false);
                 }
-                catch (InvalidOperationException) { }
-                catch (IOException) { }
+                catch (Exception persistenceException) when (!IsFatalRuntimeException(persistenceException)) { }
             }
         }
         finally
