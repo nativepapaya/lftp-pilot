@@ -382,9 +382,12 @@ public sealed partial class SessionWorkspaceView : UserControl
     private Task ShowTransferQueueErrorAsync(TransferDirection direction, Exception exception)
     {
         var itemName = direction == TransferDirection.Upload ? "uploads" : "downloads";
-        var title = exception is TransferQueueException { Result.IsPartialSuccess: true }
-            ? $"Only some {itemName} were queued"
-            : $"No {itemName} were queued";
+        var title = exception switch
+        {
+            TransferQueueException { HasUnknownOutcome: true } => "Transfer acceptance is being checked",
+            TransferQueueException { Result.IsPartialSuccess: true } => $"Only some {itemName} were queued",
+            _ => $"No {itemName} were queued",
+        };
         return ShowOperationErrorAsync(title, exception);
     }
 

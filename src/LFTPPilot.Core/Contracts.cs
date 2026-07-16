@@ -58,6 +58,21 @@ public interface ISecretStore
     Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default);
 }
 
+public interface IHostKeyStore
+{
+    Task<TrustedSftpHostKey?> GetAsync(HostKeyBinding binding, CancellationToken cancellationToken = default);
+    Task SaveAsync(TrustedSftpHostKey key, CancellationToken cancellationToken = default);
+    Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default);
+}
+
+public interface ISshHostKeyProbe
+{
+    Task<TrustedSftpHostKey> ProbeAsync(
+        ConnectionProfile profile,
+        string hostKeyAlias,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IHistoryStore
 {
     Task<IReadOnlyList<HistoryRecord>> GetRecentAsync(int maximumCount, CancellationToken cancellationToken = default);

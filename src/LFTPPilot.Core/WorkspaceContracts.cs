@@ -8,6 +8,8 @@ public static class WorkspaceMethods
     public const string ProfileList = "profiles.list";
     public const string ProfileSave = "profiles.save";
     public const string ProfileDelete = "profiles.delete";
+    public const string SftpHostKeyInspect = "sftp.hostKeys.inspect";
+    public const string SftpHostKeyApprove = "sftp.hostKeys.approve";
     public const string SessionConnect = "sessions.connect";
     public const string SessionDisconnect = "sessions.disconnect";
     public const string BrowseLocal = "browse.local";
@@ -40,7 +42,17 @@ public sealed record WorkspaceBootstrap(
 
 public sealed record ProfileSaveRequest(ConnectionProfile Profile, string? Credential = null);
 public sealed record ProfileDeleteRequest(Guid ProfileId);
-public sealed record SessionConnectRequest(Guid ProfileId, string? EphemeralCredential = null);
+public sealed record SftpHostKeyInspectRequest(ConnectionIdentity ExpectedIdentity);
+public sealed record SftpHostKeyApproveRequest(
+    Guid ProfileId,
+    Guid ReviewId,
+    string ApprovalToken,
+    bool ReplaceExisting = false);
+public sealed record SftpHostKeyApproveResult(
+    Guid ProfileId,
+    string Endpoint,
+    string FingerprintSha256);
+public sealed record SessionConnectRequest(ConnectionIdentity ExpectedIdentity, string? EphemeralCredential = null);
 public sealed record SessionDisconnectRequest(Guid SessionId);
 public sealed record BrowseRequest(
     Guid? SessionId,
@@ -80,6 +92,7 @@ public sealed record MirrorApproveRequest(
     MirrorDefinition Definition,
     Guid PreviewId,
     string ApprovalToken,
+    string ReviewFingerprint,
     bool DeletionsApproved = false);
 public sealed record MirrorApproveResult(JobSnapshot Job);
 public sealed record ConsoleExecuteRequest(Guid SessionId, string Command);

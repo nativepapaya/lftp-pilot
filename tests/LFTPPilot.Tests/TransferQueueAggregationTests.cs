@@ -52,7 +52,7 @@ public sealed class TransferQueueAggregationTests
                 $@"C:\staging\{new string((char)('a' + index), 100)}-{index}.bin",
                 TransferSourceKind.File))
             .ToImmutableArray();
-        var result = new TransferQueueResult([], failed);
+        var result = new TransferQueueResult([], failed, []);
 
         var message = TransferQueueAggregation.FormatFailureMessage(result);
 
@@ -68,7 +68,7 @@ public sealed class TransferQueueAggregationTests
     public void ReviewedMirrorCauseIsPreservedWithoutLeakingDetailsOrSuggestingRetry()
     {
         var source = new FilePaneTransferSource(@"C:\private\release-directory", TransferSourceKind.Directory);
-        var result = new TransferQueueResult([], [source]);
+        var result = new TransferQueueResult([], [source], []);
         TransferQueueFailure[] failures =
         [
             new(source, new InvalidOperationException(
@@ -97,7 +97,7 @@ public sealed class TransferQueueAggregationTests
             new(@"C:\staging\missing-local.bin", TransferSourceKind.File),
             new("/missing-remote.bin", TransferSourceKind.File),
         ];
-        var result = new TransferQueueResult([], sources.ToImmutableArray());
+        var result = new TransferQueueResult([], sources.ToImmutableArray(), []);
         TransferQueueFailure[] failures =
         [
             new(sources[0], new InvalidOperationException("The local upload source must exist before the transfer can run. password=hunter2")),
@@ -121,7 +121,7 @@ public sealed class TransferQueueAggregationTests
             new(@"C:\staging\directory", TransferSourceKind.Directory),
             new(@"C:\staging\file.bin", TransferSourceKind.File),
         ];
-        var result = new TransferQueueResult([], sources.ToImmutableArray());
+        var result = new TransferQueueResult([], sources.ToImmutableArray(), []);
         TransferQueueFailure[] failures =
         [
             new(sources[0], new InvalidOperationException(
@@ -140,7 +140,7 @@ public sealed class TransferQueueAggregationTests
     public void RootWideQuickTransferRedirectsToReviewedMirrorWithoutRetryGuidance()
     {
         var source = new FilePaneTransferSource(@"C:\", TransferSourceKind.Directory);
-        var result = new TransferQueueResult([], [source]);
+        var result = new TransferQueueResult([], [source], []);
         TransferQueueFailure[] failures =
         [
             new(source, new NotSupportedException(
@@ -153,5 +153,59 @@ public sealed class TransferQueueAggregationTests
         Assert.Equal("Root-wide folder transfers require the reviewed Mirror workflow.", exception.ActionableCause);
         Assert.DoesNotContain("Retry only", exception.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(@"C:\private", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LostReplyIsUnconfirmedAndNeverPresentedAsSafeToRetry()
+    {
+        var source = new FilePaneTransferSource(@"C:\staging\possibly-queued.bin", TransferSourceKind.File);
+        var execution = await TransferQueueAggregation.ExecuteAsync<string>([source], _ =>
+            Task.FromException<string>(new AgentRequestOutcomeUnknownException(
+                WorkspaceMethods.TransferEnqueue,
+                new IOException("control pipe closed after dispatch"))));
+
+        var result = execution.ToResult();
+        Assert.Empty(result.FailedSources);
+        Assert.Equal([source], result.UnconfirmedSources);
+        Assert.Equal(0, result.FailedCount);
+        Assert.Equal(1, result.UnconfirmedCount);
+        Assert.True(result.HasUnknownOutcome);
+        Assert.Equal(
+            "0 of 1 confirmed queued; 1 Agent acceptance unknown · Activity is refreshing",
+            TransferQueueAggregation.FormatStatus(result, scheduled: false));
+
+        var exception = new TransferQueueException(result, execution.Failures);
+        Assert.True(exception.HasUnknownOutcome);
+        Assert.Contains("Agent acceptance is unknown", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Activity is refreshing", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("do not retry", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Retry only the failed items", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("control pipe closed", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ConfirmedFailedJobIsShownInActivityAndNeverSuggestedAsFreshTransfer()
+    {
+        var source = new FilePaneTransferSource(@"C:\staging\failed-admission.bin", TransferSourceKind.File);
+        var now = DateTimeOffset.UtcNow;
+        var job = new JobSnapshot(
+            Guid.NewGuid(), JobKind.Transfer, Guid.NewGuid(), "failed-admission.bin", JobState.Failed,
+            now, now, Error: new("transfer-submission-failed", "The source changed."), RetryAvailable: true);
+        var execution = await TransferQueueAggregation.ExecuteAsync<string>([source], _ =>
+            Task.FromException<string>(new TransferSubmissionTerminalException(job)));
+
+        var result = execution.ToResult();
+        Assert.Equal(1, result.ConfirmedTerminalCount);
+        Assert.Equal(0, result.QueuedCount);
+        Assert.Equal(0, result.FailedCount);
+        Assert.Equal(
+            "Queued 0 of 1; 1 recorded terminal in Activity",
+            TransferQueueAggregation.FormatStatus(result, scheduled: false));
+
+        var exception = new TransferQueueException(result, execution.Failures);
+        Assert.Contains("recorded terminal jobs", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("only through Activity", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Retry only the failed items", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("The source changed", exception.Message, StringComparison.Ordinal);
     }
 }

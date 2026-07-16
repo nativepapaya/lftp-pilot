@@ -20,6 +20,7 @@ public enum AuthenticationKind
     Anonymous,
 }
 
+public enum SftpHostKeyState { Trusted, EnrollmentRequired, Changed }
 public enum PaneKind { Local, Remote }
 public enum EntryKind { File, Directory, SymbolicLink, Other }
 public enum TransferDirection { Download, Upload }
@@ -54,6 +55,79 @@ public sealed record ConnectionProfile(
     public ImmutableArray<string> Bookmarks { get; init; } = Bookmarks.IsDefault ? [] : Bookmarks;
     public ImmutableArray<string> EffectiveBookmarks => Bookmarks;
 }
+
+/// <summary>
+/// The security-significant identity the App captured before asking the Agent to
+/// inspect or connect a profile. Cosmetic profile fields are intentionally not
+/// included, while every field that can change the transport or credential target is.
+/// </summary>
+public sealed record ConnectionIdentity(
+    Guid ProfileId,
+    ConnectionProtocol Protocol,
+    string Host,
+    int Port,
+    string UserName,
+    AuthenticationKind Authentication,
+    string? SshKeyPath = null)
+{
+    [JsonIgnore]
+    public string CanonicalEndpoint =>
+        $"{Protocol.ToString().ToLowerInvariant()}://{FormatHost(Host)}:{Port}";
+
+    [JsonIgnore]
+    public string SftpHostKeyEndpoint => Protocol == ConnectionProtocol.Sftp
+        ? $"sftp://{FormatHost(Host)}:{Port}"
+        : throw new InvalidOperationException("Only an SFTP connection identity has a host-key endpoint.");
+
+    public static ConnectionIdentity FromProfile(ConnectionProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ProfileValidator.ThrowIfInvalid(profile);
+
+        var host = profile.Host.Trim();
+        if (host.Length >= 2 && host[0] == '[' && host[^1] == ']') host = host[1..^1];
+        host = host.ToLowerInvariant();
+
+        var sshKeyPath = profile.Authentication == AuthenticationKind.SshKey
+            ? Path.GetFullPath(profile.SshKeyPath!.Trim())
+                .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
+            : null;
+        return new(
+            profile.Id,
+            profile.Protocol,
+            host,
+            profile.Port,
+            profile.UserName,
+            profile.Authentication,
+            sshKeyPath);
+    }
+
+    private static string FormatHost(string host) => host.Contains(':', StringComparison.Ordinal) ? $"[{host}]" : host;
+}
+
+public sealed record HostKeyBinding(Guid ProfileId, string Endpoint);
+
+public sealed record TrustedSftpHostKey(
+    HostKeyBinding Binding,
+    string Algorithm,
+    string PublicKeyBase64,
+    string FingerprintSha256);
+
+public sealed record SftpHostKeyReview(
+    Guid ReviewId,
+    Guid ProfileId,
+    string Endpoint,
+    SftpHostKeyState State,
+    string PresentedAlgorithm,
+    string PresentedFingerprintSha256,
+    string? TrustedAlgorithm,
+    string? TrustedFingerprintSha256,
+    DateTimeOffset ExpiresAt,
+    string ApprovalToken);
+
+public sealed record SftpHostKeyInspection(
+    SftpHostKeyState State,
+    SftpHostKeyReview? Review = null);
 
 public sealed record SessionSnapshot(
     Guid SessionId,

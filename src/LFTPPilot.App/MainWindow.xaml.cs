@@ -69,10 +69,11 @@ public sealed partial class MainWindow : Window
             }
             catch (Exception exception)
             {
+                ViewModel.RequestWorkspaceRefresh();
                 var content = new StackPanel { Spacing = 8, MaxWidth = 560 };
                 content.Children.Add(new TextBlock
                 {
-                    Text = "The Agent did not disconnect this session, so its tab remains open.",
+                    Text = "The disconnect outcome could not be confirmed. The tab will remain visible until workspace state refreshes.",
                     TextWrapping = TextWrapping.Wrap,
                 });
                 content.Children.Add(new TextBlock
@@ -93,7 +94,7 @@ public sealed partial class MainWindow : Window
                 var blocked = new ContentDialog
                 {
                     XamlRoot = RootGrid.XamlRoot,
-                    Title = "Session remains connected",
+                    Title = "Disconnect outcome unconfirmed",
                     Content = content,
                     PrimaryButtonText = ViewModel.ActiveRemoteEditCount > 0 ? "Open active edits" : null,
                     CloseButtonText = "OK",
@@ -188,12 +189,17 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception exception)
         {
+            ViewModel.RequestWorkspaceRefresh();
             await new ContentDialog
             {
                 XamlRoot = RootGrid.XamlRoot,
-                Title = "Active edits could not be updated",
-                Content = new TextBlock { Text = exception.Message, TextWrapping = TextWrapping.Wrap },
-                CloseButtonText = "No upload occurred",
+                Title = "Active edit state could not be confirmed",
+                Content = new TextBlock
+                {
+                    Text = $"An edit action may have completed before the error was reported. Workspace state is refreshing.\n\n{exception.Message}",
+                    TextWrapping = TextWrapping.Wrap,
+                },
+                CloseButtonText = "Close",
             }.ShowAsync();
         }
         finally
@@ -279,12 +285,17 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception exception)
         {
+            ViewModel.RequestWorkspaceRefresh();
             await new ContentDialog
             {
                 XamlRoot = RootGrid.XamlRoot,
-                Title = "Remote edit could not be reviewed",
-                Content = new TextBlock { Text = exception.Message, TextWrapping = TextWrapping.Wrap },
-                CloseButtonText = "No upload occurred",
+                Title = "Remote edit outcome unconfirmed",
+                Content = new TextBlock
+                {
+                    Text = $"A review, upload, overwrite, refresh, or finish action may have completed before the error was reported. Workspace state is refreshing.\n\n{exception.Message}",
+                    TextWrapping = TextWrapping.Wrap,
+                },
+                CloseButtonText = "Close",
             }.ShowAsync();
         }
         finally

@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Runtime.ExceptionServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using LFTPPilot.Core;
 using LFTPPilot.Engine;
@@ -13,9 +16,16 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private const int MaximumBrowsePageEstimatedBytes = 512 * 1024;
     private const int MaximumBrowseSnapshots = 8;
     private const int MaximumRetryableTransfers = 10_000;
+    private const int MaximumTransferSubmissions = 10_000;
+    private const int MaximumMirrorPreviews = 1_024;
+    private const int MaximumMirrorApprovals = 1_024;
+    private const int MaximumRemoteTransferPlans = 1_024;
     private static readonly TimeSpan BrowseSnapshotLifetime = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan MirrorApprovalReplayLifetime = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan RemoteTransferPlanLifetime = TimeSpan.FromMinutes(15);
     private readonly IProfileStore _profileStore;
     private readonly ISecretStore _secretStore;
+    private readonly SftpHostKeyManager _hostKeys;
     private readonly JobCoordinator _jobs;
     private readonly SessionRegistry _sessions;
     private readonly ILftpRuntimeProvider _runtimeProvider;
@@ -25,18 +35,29 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly RunOnceScheduler? _scheduler;
     private readonly RemoteEditManager _remoteEdits;
     private readonly ConcurrentDictionary<Guid, StoredMirrorPreview> _previews = [];
+    private readonly Dictionary<Guid, StoredMirrorApproval> _mirrorApprovals = [];
     private readonly ConcurrentDictionary<Guid, StoredBrowseSnapshot> _browseSnapshots = [];
-    private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _jobCancellations = [];
+    private readonly ConcurrentDictionary<Guid, TrackedJobCancellation> _jobCancellations = [];
+    private readonly ConcurrentDictionary<Guid, ImmutableHashSet<Guid>> _activeJobProfileDependencies = [];
+    private readonly Dictionary<Guid, StoredRemoteTransferPlan> _remoteTransferPlans = [];
+    private readonly Dictionary<Guid, StoredTransferSubmission> _transferSubmissions = [];
     private readonly Lock _retryGate = new();
     private readonly Dictionary<Guid, TransferRetryContext> _transferRetries = [];
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly SemaphoreSlim _profileTrustGate = new(1, 1);
+    private readonly SemaphoreSlim _remoteTransferGate = new(1, 1);
     private readonly object _operationGate = new();
     private readonly HashSet<Task> _operations = [];
+    private readonly object _requestGate = new();
+    private int _activeRequests;
+    private TaskCompletionSource? _requestsDrained;
+    private Task? _disposeTask;
     private bool _disposed;
 
     public AgentWorkspaceService(
         IProfileStore profileStore,
         ISecretStore secretStore,
+        SftpHostKeyManager hostKeys,
         ILftpProcessHost processHost,
         ILftpRuntimeProvider runtimeProvider,
         JobCoordinator jobs,
@@ -47,13 +68,14 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     {
         _profileStore = profileStore;
         _secretStore = secretStore;
+        _hostKeys = hostKeys;
         _jobs = jobs;
         _runtimeProvider = runtimeProvider;
         _mirrorPlanner = mirrorPlanner;
         _options = options;
         _publish = publish;
         _scheduler = scheduler;
-        _sessions = new(processHost, runtimeProvider, options);
+        _sessions = new(processHost, runtimeProvider, hostKeys, options);
         _remoteEdits = new(
             Path.Combine(options.CacheRoot, "remote-edits"),
             new LftpRemoteEditTransport(_sessions, options),
@@ -62,33 +84,42 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
     public async Task<JsonElement> HandleAsync(string method, JsonElement arguments, CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        return method switch
+        AdmitRequest();
+        try
         {
-            WorkspaceMethods.Bootstrap => ToJson(await BootstrapAsync(cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.ProfileList => ToJson(await ListProfilesAsync(cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.ProfileSave => ToJson(await SaveProfileAsync(Required<ProfileSaveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.ProfileDelete => ToJson(await DeleteProfileAsync(Required<ProfileDeleteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.SessionConnect => ToJson(await ConnectAsync(Required<SessionConnectRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.SessionDisconnect => ToJson(await DisconnectAsync(Required<SessionDisconnectRequest>(arguments)).ConfigureAwait(false)),
-            WorkspaceMethods.BrowseLocal => ToJson(await BrowseLocalAsync(Required<BrowseRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.BrowseRemote => ToJson(await BrowseRemoteAsync(Required<BrowseRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.FileCreateDirectory => ToJson(await CreateDirectoryAsync(Required<CreateDirectoryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.FileMove => ToJson(await MoveEntryAsync(Required<MoveEntryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.FileDelete => ToJson(await DeleteEntriesAsync(Required<DeleteEntriesRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.TransferEnqueue => ToJson(await EnqueueTransferAsync(Required<TransferEnqueueRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.JobRetry => ToJson(await RetryJobAsync(Required<JobRetryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.MirrorPreview => ToJson(await PreviewMirrorAsync(Required<MirrorPreviewRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.MirrorApprove => ToJson(await ApproveMirrorAsync(Required<MirrorApproveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.ConsoleExecute => ToJson(await ExecuteConsoleAsync(Required<ConsoleExecuteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.RemoteTransferPlan => ToJson(await PlanRemoteTransferAsync(Required<RemoteTransferPlanRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.RemoteTransferEnqueue => ToJson(await EnqueueRemoteTransferAsync(Required<RemoteTransferEnqueueRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.RemoteEditStart => ToJson(await StartRemoteEditAsync(Required<RemoteEditStartRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.RemoteEditReview => ToJson(await ReviewRemoteEditAsync(Required<RemoteEditReviewRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.RemoteEditResolve => ToJson(await ResolveRemoteEditAsync(Required<RemoteEditResolveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            WorkspaceMethods.RemoteEditComplete => ToJson(await CompleteRemoteEditAsync(Required<RemoteEditCompleteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
-            _ => throw new ArgumentException($"Unknown workspace method '{method}'."),
-        };
+            return method switch
+            {
+                WorkspaceMethods.Bootstrap => ToJson(await BootstrapAsync(cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.ProfileList => ToJson(await ListProfilesAsync(cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.ProfileSave => ToJson(await SaveProfileAsync(Required<ProfileSaveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.ProfileDelete => ToJson(await DeleteProfileAsync(Required<ProfileDeleteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.SftpHostKeyInspect => ToJson(await InspectSftpHostKeyAsync(Required<SftpHostKeyInspectRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.SftpHostKeyApprove => ToJson(await ApproveSftpHostKeyAsync(Required<SftpHostKeyApproveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.SessionConnect => ToJson(await ConnectAsync(Required<SessionConnectRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.SessionDisconnect => ToJson(await DisconnectAsync(Required<SessionDisconnectRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.BrowseLocal => ToJson(await BrowseLocalAsync(Required<BrowseRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.BrowseRemote => ToJson(await BrowseRemoteAsync(Required<BrowseRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.FileCreateDirectory => ToJson(await CreateDirectoryAsync(Required<CreateDirectoryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.FileMove => ToJson(await MoveEntryAsync(Required<MoveEntryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.FileDelete => ToJson(await DeleteEntriesAsync(Required<DeleteEntriesRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.TransferEnqueue => ToJson(await EnqueueTransferAsync(Required<TransferEnqueueRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.JobRetry => ToJson(await RetryJobAsync(Required<JobRetryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.MirrorPreview => ToJson(await PreviewMirrorAsync(Required<MirrorPreviewRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.MirrorApprove => ToJson(await ApproveMirrorAsync(Required<MirrorApproveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.ConsoleExecute => ToJson(await ExecuteConsoleAsync(Required<ConsoleExecuteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.RemoteTransferPlan => ToJson(await PlanRemoteTransferAsync(Required<RemoteTransferPlanRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.RemoteTransferEnqueue => ToJson(await EnqueueRemoteTransferAsync(Required<RemoteTransferEnqueueRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.RemoteEditStart => ToJson(await StartRemoteEditAsync(Required<RemoteEditStartRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.RemoteEditReview => ToJson(await ReviewRemoteEditAsync(Required<RemoteEditReviewRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.RemoteEditResolve => ToJson(await ResolveRemoteEditAsync(Required<RemoteEditResolveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.RemoteEditComplete => ToJson(await CompleteRemoteEditAsync(Required<RemoteEditCompleteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                _ => throw new ArgumentException($"Unknown workspace method '{method}'."),
+            };
+        }
+        finally
+        {
+            ReleaseRequest();
+        }
     }
 
     public async Task<WorkspaceBootstrap> BootstrapAsync(CancellationToken cancellationToken = default)
@@ -103,11 +134,27 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             runtime = new(false, false, "unavailable", exception.Message);
         }
-        return new(AgentProtocol.CurrentVersion, runtime,
-            (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).ToImmutableArray(),
-            _sessions.GetSnapshots().ToImmutableArray(),
-            _jobs.GetJobs().ToImmutableArray(),
-            _remoteEdits.GetSnapshots().ToImmutableArray());
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _remoteTransferGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return new(AgentProtocol.CurrentVersion, runtime,
+                    (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).ToImmutableArray(),
+                    _sessions.GetSnapshots().ToImmutableArray(),
+                    _jobs.GetJobs().ToImmutableArray(),
+                    _remoteEdits.GetSnapshots().ToImmutableArray());
+            }
+            finally
+            {
+                _remoteTransferGate.Release();
+            }
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
     }
 
     public Task<IReadOnlyList<ConnectionProfile>> ListProfilesAsync(CancellationToken cancellationToken = default) =>
@@ -120,57 +167,181 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         ValidateCredential(request.Credential);
         if (!string.IsNullOrEmpty(request.Credential) && request.Profile.Authentication != AuthenticationKind.Password)
             throw new NotSupportedException("Only password credentials can currently be persisted. Ask-on-connect credentials remain ephemeral and SSH key passphrases are not yet supported.");
-        var previous = (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault(profile => profile.Id == request.Profile.Id);
-        var identityChanged = previous is not null && !SecretBindingFor(previous).Equals(SecretBindingFor(request.Profile));
-        await _profileStore.SaveAsync(request.Profile, cancellationToken).ConfigureAwait(false);
-        if (identityChanged) await _secretStore.DeleteAsync(request.Profile.Id, cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(request.Credential))
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            await _secretStore.SaveAsync(new(SecretBindingFor(request.Profile), request.Credential), cancellationToken).ConfigureAwait(false);
+            var previous = (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault(profile => profile.Id == request.Profile.Id);
+            var hostKeyBindingChanged = previous is not null && HostKeyBindingChanged(previous, request.Profile);
+            var connectionIdentityChanged = previous is not null &&
+                ConnectionIdentity.FromProfile(previous) != ConnectionIdentity.FromProfile(request.Profile);
+            var credentialSupplied = !string.IsNullOrEmpty(request.Credential);
+            if (credentialSupplied && request.Profile.Protocol == ConnectionProtocol.Sftp)
+            {
+                if (previous is null || hostKeyBindingChanged)
+                {
+                    throw new InvalidOperationException(
+                        "Save the SFTP profile metadata without a credential, inspect and approve its host key, then save the credential.");
+                }
+            }
+            if (credentialSupplied && !ProfileIsQuiescent(request.Profile.Id))
+            {
+                throw new InvalidOperationException(
+                    "Disconnect every session and finish or cancel all jobs, schedules, and remote edits for this profile before saving a credential.");
+            }
+            if (previous is not null && connectionIdentityChanged && !ProfileIsQuiescent(previous.Id))
+            {
+                throw new InvalidOperationException(
+                    "Disconnect every session and finish or cancel all jobs, schedules, and remote edits for this profile before changing its endpoint, protocol, username, authentication mode, or SSH key.");
+            }
+            if (credentialSupplied && request.Profile.Protocol == ConnectionProtocol.Sftp)
+                _ = await _hostKeys.RequireTrustedAsync(request.Profile, cancellationToken).ConfigureAwait(false);
+            var identityChanged = previous is not null && !SecretBindingFor(previous).Equals(SecretBindingFor(request.Profile));
+            if (identityChanged) await _secretStore.DeleteAsync(request.Profile.Id, cancellationToken).ConfigureAwait(false);
+            if (hostKeyBindingChanged)
+                await _hostKeys.DeleteAsync(request.Profile.Id, cancellationToken).ConfigureAwait(false);
+            // Invalidate the old identity before publishing replacement metadata.
+            // If persistence fails, losing old trust/credentials is safer than
+            // allowing a later identity cycle to resurrect them.
+            await _profileStore.SaveAsync(request.Profile, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(request.Credential))
+            {
+                await _secretStore.SaveAsync(new(SecretBindingFor(request.Profile), request.Credential), cancellationToken).ConfigureAwait(false);
+            }
+            _publish?.Invoke(EngineEventKind.Session, "profile.saved", request.Profile, null, null);
+            return request.Profile;
         }
-        _publish?.Invoke(EngineEventKind.Session, "profile.saved", request.Profile, null, null);
-        return request.Profile;
+        finally
+        {
+            _profileTrustGate.Release();
+        }
     }
 
     public async Task<bool> DeleteProfileAsync(ProfileDeleteRequest request, CancellationToken cancellationToken = default)
     {
         if (request.ProfileId == Guid.Empty) throw new ArgumentException("A profile identifier is required.", nameof(request));
-        ThrowIfProfileHasActiveRemoteEdits(request.ProfileId);
-        ThrowIfProfileHasDependentJobs(request.ProfileId);
-        await _sessions.DisconnectProfileAsync(request.ProfileId).ConfigureAwait(false);
-        await _profileStore.DeleteAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
-        await _secretStore.DeleteAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
-        _publish?.Invoke(EngineEventKind.Session, "profile.deleted", request.ProfileId, null, null);
-        return true;
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfProfileHasActiveRemoteEdits(request.ProfileId);
+            ThrowIfProfileHasDependentJobs(request.ProfileId);
+            await _sessions.DisconnectProfileAsync(request.ProfileId).ConfigureAwait(false);
+            await _secretStore.DeleteAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
+            await _hostKeys.DeleteAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
+            // Revoke security state before deleting discoverable profile metadata.
+            // A metadata failure may leave the profile visible, but it must not
+            // retain credentials or trust that could later be resurrected.
+            await _profileStore.DeleteAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
+            _publish?.Invoke(EngineEventKind.Session, "profile.deleted", request.ProfileId, null, null);
+            return true;
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
     }
 
     public async Task<SessionSnapshot> ConnectAsync(SessionConnectRequest request, CancellationToken cancellationToken = default)
     {
-        if (request.ProfileId == Guid.Empty) throw new ArgumentException("A profile identifier is required.", nameof(request));
+        ArgumentNullException.ThrowIfNull(request);
         ValidateCredential(request.EphemeralCredential);
-        var profile = await FindProfileAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
-        var credential = await ResolveCredentialAsync(profile, request.EphemeralCredential, cancellationToken).ConfigureAwait(false);
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var profile = await FindExpectedProfileAsync(request.ExpectedIdentity, cancellationToken).ConfigureAwait(false);
+            if (profile.Protocol == ConnectionProtocol.Sftp)
+            {
+                // Keep the no-active-work replacement decision atomic with
+                // creation of a newly registered SFTP session. This also
+                // preserves the stronger ordering that trust precedes
+                // credential lookup.
+                _ = await _hostKeys.RequireTrustedAsync(profile, cancellationToken).ConfigureAwait(false);
+            }
+            return await ConnectTrustedProfileAsync(profile, request.EphemeralCredential, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    public async Task<SftpHostKeyInspection> InspectSftpHostKeyAsync(
+        SftpHostKeyInspectRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var profile = await FindExpectedProfileAsync(request.ExpectedIdentity, cancellationToken).ConfigureAwait(false);
+            if (profile.Protocol != ConnectionProtocol.Sftp)
+                throw new NotSupportedException("Host-key review is available only for SFTP profiles.");
+            return await _hostKeys.InspectAsync(profile, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    public async Task<SftpHostKeyApproveResult> ApproveSftpHostKeyAsync(
+        SftpHostKeyApproveRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request.ProfileId == Guid.Empty) throw new ArgumentException("A profile identifier is required.", nameof(request));
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var profile = await FindProfileAsync(request.ProfileId, cancellationToken).ConfigureAwait(false);
+            if (profile.Protocol != ConnectionProtocol.Sftp)
+                throw new NotSupportedException("Host-key review is available only for SFTP profiles.");
+            return await _hostKeys.ApproveAsync(
+                profile,
+                request,
+                ProfileIsQuiescent(profile.Id),
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    private async Task<SessionSnapshot> ConnectTrustedProfileAsync(
+        ConnectionProfile profile,
+        string? ephemeralCredential,
+        CancellationToken cancellationToken)
+    {
+        var credential = await ResolveCredentialAsync(profile, ephemeralCredential, cancellationToken).ConfigureAwait(false);
         var snapshot = await _sessions.ConnectAsync(profile, credential, cancellationToken).ConfigureAwait(false);
         _publish?.Invoke(EngineEventKind.Session, "session.connected", snapshot, null, snapshot.SessionId);
         return snapshot;
     }
 
-    public async Task<bool> DisconnectAsync(SessionDisconnectRequest request)
+    public async Task<bool> DisconnectAsync(
+        SessionDisconnectRequest request,
+        CancellationToken cancellationToken = default)
     {
         if (request.SessionId == Guid.Empty) throw new ArgumentException("A session identifier is required.", nameof(request));
-        var session = _sessions.Get(request.SessionId);
-        if (_remoteEdits.HasActiveSession(request.SessionId))
-            throw new InvalidOperationException("Finish or cancel every active remote edit for this session before disconnecting it.");
-        ThrowIfProfileHasDependentJobs(session.Profile.Id);
-        var disconnected = await _sessions.DisconnectAsync(request.SessionId).ConfigureAwait(false);
-        if (disconnected) _publish?.Invoke(EngineEventKind.Session, "session.disconnected", request.SessionId, null, request.SessionId);
-        return disconnected;
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var session = _sessions.Get(request.SessionId);
+            if (_remoteEdits.HasActiveSession(request.SessionId))
+                throw new InvalidOperationException("Finish or cancel every active remote edit for this session before disconnecting it.");
+            ThrowIfProfileHasDependentJobs(session.Profile.Id);
+            var disconnected = await _sessions.DisconnectAsync(request.SessionId).ConfigureAwait(false);
+            if (disconnected) _publish?.Invoke(EngineEventKind.Session, "session.disconnected", request.SessionId, null, request.SessionId);
+            return disconnected;
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
     }
 
     private void ThrowIfProfileHasDependentJobs(Guid profileId)
     {
-        if (_jobs.GetJobs().Any(job => job.ProfileId == profileId &&
-            job.State is JobState.Scheduled or JobState.Queued or JobState.Running))
+        if (ProfileHasDependentWork(profileId))
         {
             throw new InvalidOperationException(
                 "Cancel scheduled or active jobs for this profile before disconnecting its session or deleting the profile.");
@@ -185,6 +356,24 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             throw new InvalidOperationException(
                 "Finish or cancel every active remote edit for this profile before deleting it.");
         }
+    }
+
+    private bool ProfileIsQuiescent(Guid profileId)
+    {
+        if (_sessions.GetSnapshots().Any(session => session.ProfileId == profileId && session.IsConnected)) return false;
+        if (ProfileHasDependentWork(profileId)) return false;
+        return !_sessions.GetSnapshots().Any(session =>
+            session.ProfileId == profileId && _remoteEdits.HasActiveSession(session.SessionId));
+    }
+
+    private bool ProfileHasDependentWork(Guid profileId)
+    {
+        if (_activeJobProfileDependencies.Values.Any(profileIds => profileIds.Contains(profileId))) return true;
+        return _jobs.GetJobs().Any(job =>
+            job.ProfileId == profileId &&
+            (job.State is JobState.Scheduled or JobState.Queued or JobState.Running or JobState.Paused ||
+             _jobCancellations.ContainsKey(job.Id) ||
+             _scheduler?.IsRegistered(job.Id) == true));
     }
 
     public Task<BrowseResult> BrowseLocalAsync(BrowseRequest request, CancellationToken cancellationToken = default)
@@ -223,21 +412,30 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         var session = _sessions.Get(sessionId);
         if (request.ContinuationToken is not null)
             return ContinueBrowse(request, PaneKind.Remote, request.Path);
-        var result = await session.Browse.ExecuteAsync(LftpCommandBuilder.BuildList(request.Path, request.Fresh), _options.BrowseTimeout, cancellationToken).ConfigureAwait(false);
-        SessionRegistry.ThrowIfFailed(result, "Remote listing");
-        var entries = LftpOutputParser.ParseLongListing(result.Lines.Select(static line => line.Line), request.Path);
-        if (entries.Length == 0 && result.Lines.Any(static line => !string.IsNullOrWhiteSpace(line.Line) && !line.Line.StartsWith("total ", StringComparison.OrdinalIgnoreCase)))
+        return await session.WithBrowseSessionAsync(async browse =>
         {
-            var fallback = await session.Browse.ExecuteAsync(LftpCommandBuilder.BuildNameList(request.Path, request.Fresh), _options.BrowseTimeout, cancellationToken).ConfigureAwait(false);
-            SessionRegistry.ThrowIfFailed(fallback, "Remote listing fallback");
-            entries = LftpOutputParser.ParseClassifiedNames(fallback.Lines.Select(static line => line.Line), request.Path);
-        }
-        if (entries.Length > MaximumDirectoryEntries)
-            throw new InvalidDataException($"The remote directory contains more than {MaximumDirectoryEntries} entries. Narrow the directory before browsing it.");
-        session.SetLocation(PaneKind.Remote, request.Path);
-        var ordered = entries.OrderBy(static entry => entry.Kind == EntryKind.Directory ? 0 : 1)
-            .ThenBy(static entry => entry.Name, StringComparer.CurrentCultureIgnoreCase).ToImmutableArray();
-        return CreateBrowsePage(new(PaneKind.Remote, request.Path), sessionId, ordered, request.PageSize);
+            var result = await browse.ExecuteAsync(
+                LftpCommandBuilder.BuildList(request.Path, request.Fresh),
+                _options.BrowseTimeout,
+                cancellationToken).ConfigureAwait(false);
+            SessionRegistry.ThrowIfFailed(result, "Remote listing");
+            var parsed = LftpOutputParser.ParseLongListing(result.Lines.Select(static line => line.Line), request.Path);
+            if (parsed.Length == 0 && result.Lines.Any(static line =>
+                !string.IsNullOrWhiteSpace(line.Line) && !line.Line.StartsWith("total ", StringComparison.OrdinalIgnoreCase)))
+            {
+                var fallback = await browse.ExecuteAsync(
+                    LftpCommandBuilder.BuildNameList(request.Path, request.Fresh),
+                    _options.BrowseTimeout,
+                    cancellationToken).ConfigureAwait(false);
+                SessionRegistry.ThrowIfFailed(fallback, "Remote listing fallback");
+                parsed = LftpOutputParser.ParseClassifiedNames(fallback.Lines.Select(static line => line.Line), request.Path);
+            }
+            if (parsed.Length > MaximumDirectoryEntries)
+                throw new InvalidDataException($"The remote directory contains more than {MaximumDirectoryEntries} entries. Narrow the directory before browsing it.");
+            var ordered = parsed.OrderBy(static entry => entry.Kind == EntryKind.Directory ? 0 : 1)
+                .ThenBy(static entry => entry.Name, StringComparer.CurrentCultureIgnoreCase).ToImmutableArray();
+            return CreateBrowsePage(new(PaneKind.Remote, request.Path), sessionId, ordered, request.PageSize);
+        }, new(PaneKind.Remote, request.Path)).ConfigureAwait(false);
     }
 
     public async Task<FileMutationResult> CreateDirectoryAsync(CreateDirectoryRequest request, CancellationToken cancellationToken = default)
@@ -255,10 +453,17 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
         var session = GetRemoteMutationSession(request.SessionId);
         var remotePath = ValidateRemoteMutationPath(request.Path, allowRoot: false);
-        if (await TryStatRemoteAsync(session, remotePath, cancellationToken).ConfigureAwait(false) is not null)
-            throw new IOException("A remote entry already exists at the requested directory path.");
-        var result = await session.Browse.ExecuteAsync(LftpCommandBuilder.BuildCreateDirectory(remotePath), _options.BrowseTimeout, cancellationToken).ConfigureAwait(false);
-        SessionRegistry.ThrowIfFailed(result, "Remote directory creation");
+        await session.WithBrowseSessionAsync(async browse =>
+        {
+            if (await TryStatRemoteAsync(browse, remotePath, cancellationToken).ConfigureAwait(false) is not null)
+                throw new IOException("A remote entry already exists at the requested directory path.");
+            var result = await browse.ExecuteAsync(
+                LftpCommandBuilder.BuildCreateDirectory(remotePath),
+                _options.BrowseTimeout,
+                cancellationToken).ConfigureAwait(false);
+            SessionRegistry.ThrowIfFailed(result, "Remote directory creation");
+            return true;
+        }).ConfigureAwait(false);
         InvalidateBrowseSnapshots(PaneKind.Remote, request.SessionId);
         PublishDirectoryChange(PaneKind.Remote, request.SessionId, [remotePath]);
         return new(PaneKind.Remote, [remotePath]);
@@ -285,12 +490,19 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         var remoteSource = ValidateRemoteMutationPath(request.SourcePath, allowRoot: false);
         var remoteDestination = ValidateRemoteMutationPath(request.DestinationPath, allowRoot: false);
         if (string.Equals(remoteSource, remoteDestination, StringComparison.Ordinal)) throw new ArgumentException("Source and destination paths must differ.", nameof(request));
-        _ = await TryStatRemoteAsync(session, remoteSource, cancellationToken).ConfigureAwait(false)
-            ?? throw new FileNotFoundException("The remote move source was not found.", remoteSource);
-        if (await TryStatRemoteAsync(session, remoteDestination, cancellationToken).ConfigureAwait(false) is not null)
-            throw new IOException("The remote move destination already exists.");
-        var result = await session.Browse.ExecuteAsync(LftpCommandBuilder.BuildMove(remoteSource, remoteDestination), _options.BrowseTimeout, cancellationToken).ConfigureAwait(false);
-        SessionRegistry.ThrowIfFailed(result, "Remote move");
+        await session.WithBrowseSessionAsync(async browse =>
+        {
+            _ = await TryStatRemoteAsync(browse, remoteSource, cancellationToken).ConfigureAwait(false)
+                ?? throw new FileNotFoundException("The remote move source was not found.", remoteSource);
+            if (await TryStatRemoteAsync(browse, remoteDestination, cancellationToken).ConfigureAwait(false) is not null)
+                throw new IOException("The remote move destination already exists.");
+            var result = await browse.ExecuteAsync(
+                LftpCommandBuilder.BuildMove(remoteSource, remoteDestination),
+                _options.BrowseTimeout,
+                cancellationToken).ConfigureAwait(false);
+            SessionRegistry.ThrowIfFailed(result, "Remote move");
+            return true;
+        }).ConfigureAwait(false);
         InvalidateBrowseSnapshots(PaneKind.Remote, request.SessionId);
         PublishDirectoryChange(PaneKind.Remote, request.SessionId, [remoteSource, remoteDestination]);
         return new(PaneKind.Remote, [remoteSource, remoteDestination]);
@@ -341,23 +553,27 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         var remotePaths = request.EffectivePaths.Select(path => ValidateRemoteMutationPath(path, allowRoot: false))
             .Distinct(StringComparer.Ordinal).ToArray();
         if (remotePaths.Length != request.EffectivePaths.Length) throw new ArgumentException("The delete request repeats a remote path.", nameof(request));
-        var remoteEntries = new List<(string Path, FileEntry Entry)>();
-        foreach (var path in remotePaths)
-        {
-            var entry = await TryStatRemoteAsync(remoteSession, path, cancellationToken).ConfigureAwait(false)
-                ?? throw new FileNotFoundException("A remote delete target was not found.", path);
-            remoteEntries.Add((path, entry));
-        }
         var affected = new List<string>();
         try
         {
-            foreach (var target in remoteEntries)
+            await remoteSession.WithBrowseSessionAsync(async browse =>
             {
-                var command = LftpCommandBuilder.BuildDelete(target.Path, target.Entry.IsDirectory, request.Recursive);
-                var result = await remoteSession.Browse.ExecuteAsync(command, _options.BrowseTimeout, cancellationToken).ConfigureAwait(false);
-                SessionRegistry.ThrowIfFailed(result, "Remote deletion");
-                affected.Add(target.Path);
-            }
+                var remoteEntries = new List<(string Path, FileEntry Entry)>();
+                foreach (var path in remotePaths)
+                {
+                    var entry = await TryStatRemoteAsync(browse, path, cancellationToken).ConfigureAwait(false)
+                        ?? throw new FileNotFoundException("A remote delete target was not found.", path);
+                    remoteEntries.Add((path, entry));
+                }
+                foreach (var target in remoteEntries)
+                {
+                    var command = LftpCommandBuilder.BuildDelete(target.Path, target.Entry.IsDirectory, request.Recursive);
+                    var result = await browse.ExecuteAsync(command, _options.BrowseTimeout, cancellationToken).ConfigureAwait(false);
+                    SessionRegistry.ThrowIfFailed(result, "Remote deletion");
+                    affected.Add(target.Path);
+                }
+                return true;
+            }).ConfigureAwait(false);
         }
         finally
         {
@@ -374,66 +590,176 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(request);
-        var plan = CanonicalizeTransferPlan(request.Plan);
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await EnqueueTransferUnderProfileGateAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    private async Task<TransferEnqueueResult> EnqueueTransferUnderProfileGateAsync(
+        TransferEnqueueRequest request,
+        CancellationToken cancellationToken)
+    {
+        var plan = CanonicalizeTransferPlan(request.Plan) with
+        {
+            RunAt = request.Plan.RunAt?.ToUniversalTime(),
+        };
         PlanValidator.Validate(plan);
         ValidateTransferPaths(plan);
-        var session = _sessions.Get(request.SessionId);
-        if (session.Profile.Id != plan.ProfileId) throw new ArgumentException("The transfer profile does not match the connected session.", nameof(request));
-        await RevalidateTransferAsync(session, plan, cancellationToken).ConfigureAwait(false);
-        var now = _scheduler?.UtcNow ?? DateTimeOffset.UtcNow;
-        if (plan.RunAt is { } runAt)
+        var canonicalRequest = new TransferEnqueueRequest(request.SessionId, plan);
+        if (_transferSubmissions.TryGetValue(plan.Id, out var priorSubmission))
         {
-            if (_scheduler is null) throw new InvalidOperationException("Run-once transfers require the Agent scheduler.");
-            if (runAt <= now) throw new ArgumentException("A run-once transfer requires a future run time.", nameof(request));
-            var scheduledJobId = Guid.NewGuid();
-            var scheduledRetryAvailable = TryRememberTransfer(scheduledJobId, session, plan);
-            var scheduled = _jobs.Enqueue(new(
-                scheduledJobId,
+            if (priorSubmission.Request != canonicalRequest)
+                throw new ArgumentException("The transfer identifier is already bound to different session or plan details. Create a new transfer plan.", nameof(request));
+            if (priorSubmission.Result is { } priorResult)
+                return priorResult with { Job = FindJob(plan.Id) ?? priorResult.Job };
+            if (priorSubmission.Failure is { } priorFailure)
+                priorFailure.Throw();
+            throw new InvalidOperationException("The transfer submission is still being resolved. Refresh job state before submitting it again.");
+        }
+        if (FindJob(plan.Id) is not null)
+            throw new InvalidOperationException("This transfer plan was already consumed by this or a previous Agent process. Refresh job state before creating a fresh plan.");
+
+        MakeRoomForTransferSubmission();
+        var registration = new StoredTransferSubmission(canonicalRequest, DateTimeOffset.UtcNow);
+        _transferSubmissions.Add(plan.Id, registration);
+        try
+        {
+            var result = await EnqueueFirstTransferSubmissionAsync(canonicalRequest, cancellationToken).ConfigureAwait(false);
+            _transferSubmissions[plan.Id] = registration with { Result = result };
+            return result;
+        }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            _transferSubmissions[plan.Id] = registration with { Failure = ExceptionDispatchInfo.Capture(exception) };
+            throw;
+        }
+    }
+
+    private async Task<TransferEnqueueResult> EnqueueFirstTransferSubmissionAsync(
+        TransferEnqueueRequest request,
+        CancellationToken cancellationToken)
+    {
+        var plan = request.Plan;
+        var now = _scheduler?.UtcNow ?? DateTimeOffset.UtcNow;
+        var initialState = plan.RunAt is null ? JobState.Queued : JobState.Scheduled;
+        WorkspaceSession session;
+        bool retryAvailable;
+        try
+        {
+            session = _sessions.Get(request.SessionId);
+            if (session.Profile.Id != plan.ProfileId)
+                throw new ArgumentException("The transfer profile does not match the connected session.", nameof(request));
+            if (plan.RunAt is { } runAt)
+            {
+                if (_scheduler is null) throw new InvalidOperationException("Run-once transfers require the Agent scheduler.");
+                if (runAt <= now) throw new ArgumentException("A run-once transfer requires a future run time.", nameof(request));
+            }
+            retryAvailable = TryRememberTransfer(plan.Id, session, plan);
+        }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            var rejected = _jobs.Enqueue(new(
+                plan.Id,
                 JobKind.Transfer,
-                session.Profile.Id,
+                plan.ProfileId,
                 $"{Path.GetFileName(plan.SourcePath)} -> {Path.GetFileName(plan.DestinationPath)}",
-                JobState.Scheduled,
+                initialState,
                 now,
                 now,
-                RunAt: runAt,
-                Status: "Waiting for the selected run-once time.",
-                RetryAvailable: scheduledRetryAvailable));
-            try
-            {
-                await _scheduler.ScheduleAsync(
-                    scheduled,
-                    token => RunScheduledTransferAsync(session, plan, scheduled.Id, token),
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch
-            {
-                ForgetTransferRetry(scheduled.Id);
-                throw;
-            }
-            return new(scheduled);
+                RunAt: plan.RunAt,
+                Status: "Transfer submission rejected before validation."));
+            rejected = _jobs.Transition(
+                rejected.Id,
+                JobState.Failed,
+                "Transfer submission rejected.",
+                new("transfer-submission-rejected", exception.Message));
+            return new(rejected);
         }
 
-        var shouldSkip = plan.Mode == TransferMode.Skip &&
-            await DestinationExistsAsync(session, plan, cancellationToken).ConfigureAwait(false);
-        var jobId = Guid.NewGuid();
-        var retryAvailable = !shouldSkip && TryRememberTransfer(jobId, session, plan);
-        var job = _jobs.Enqueue(new(jobId, JobKind.Transfer, session.Profile.Id,
+        var job = _jobs.Enqueue(new(
+            plan.Id,
+            JobKind.Transfer,
+            session.Profile.Id,
             $"{Path.GetFileName(plan.SourcePath)} -> {Path.GetFileName(plan.DestinationPath)}",
-            JobState.Queued, now, now, RetryAvailable: retryAvailable));
-        if (shouldSkip)
+            initialState,
+            now,
+            now,
+            RunAt: plan.RunAt,
+            Status: initialState == JobState.Scheduled
+                ? "Validating before the selected run-once time is registered."
+                : "Validating transfer submission.",
+            RetryAvailable: retryAvailable));
+        try
         {
-            _jobs.Transition(job.Id, JobState.Running, "Checking destination");
-            job = _jobs.Transition(job.Id, JobState.Completed, "Skipped because the destination already exists");
+            await RevalidateTransferAsync(session, plan, cancellationToken).ConfigureAwait(false);
+            if (plan.RunAt is { } runAt)
+            {
+                await _scheduler!.ScheduleAsync(
+                    job,
+                    token => RunScheduledTransferAsync(session, plan, job.Id, token),
+                    cancellationToken).ConfigureAwait(false);
+                return new(FindJob(job.Id) ?? job);
+            }
+
+            var shouldSkip = plan.Mode == TransferMode.Skip &&
+                await DestinationExistsAsync(session, plan, cancellationToken).ConfigureAwait(false);
+            if (shouldSkip)
+            {
+                _jobs.Transition(job.Id, JobState.Running, "Checking destination");
+                job = _jobs.Transition(job.Id, JobState.Completed, "Skipped because the destination already exists");
+                ForgetTransferRetry(job.Id);
+                return new(job);
+            }
+            TrackJob(job.Id, token => RunTransferAsync(session, plan, job.Id, token));
             return new(job);
         }
-        TrackJob(job.Id, token => RunTransferAsync(session, plan, job.Id, token));
-        return new(job);
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            var current = FindJob(job.Id) ?? job;
+            if (exception is OperationCanceledException && cancellationToken.IsCancellationRequested)
+            {
+                _jobs.TryCancel(job.Id, "Transfer submission cancelled.");
+                ForgetTransferRetry(job.Id);
+            }
+            else if (current.State is JobState.Queued or JobState.Scheduled)
+            {
+                _jobs.Transition(
+                    job.Id,
+                    JobState.Failed,
+                    "Transfer submission failed.",
+                    new("transfer-submission-failed", exception.Message));
+            }
+            if (FindJob(job.Id)?.State is JobState.Missed or JobState.Cancelled)
+                ForgetTransferRetry(job.Id);
+            return new(FindJob(job.Id) ?? current);
+        }
     }
 
     public async Task<JobRetryResult> RetryJobAsync(JobRetryRequest request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (request.JobId == Guid.Empty) throw new ArgumentException("A job identifier is required.", nameof(request));
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await RetryJobUnderProfileGateAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    private async Task<JobRetryResult> RetryJobUnderProfileGateAsync(
+        JobRetryRequest request,
+        CancellationToken cancellationToken)
+    {
         var current = _jobs.GetJobs().FirstOrDefault(job => job.Id == request.JobId)
             ?? throw new KeyNotFoundException($"Job {request.JobId} was not found.");
         if (current.Kind != JobKind.Transfer)
@@ -461,7 +787,15 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             return new(retried);
         }
 
-        TrackJob(request.JobId, token => RunTransferAsync(session, retryPlan, request.JobId, token));
+        try
+        {
+            TrackJob(request.JobId, token => RunTransferAsync(session, retryPlan, request.JobId, token));
+        }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            TryFailJob(request.JobId, exception);
+            retried = FindJob(request.JobId) ?? retried;
+        }
         return new(retried);
     }
 
@@ -469,23 +803,72 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     {
         PlanValidator.Validate(request.Definition);
         ValidateMirrorLocalRoot(request.Definition);
-        var session = _sessions.Get(request.SessionId);
-        if (session.Profile.Id != request.Definition.ProfileId) throw new ArgumentException("The mirror profile does not match the connected session.", nameof(request));
-        await using var previewSession = await session.CreateEphemeralAsync("mirror-preview", cancellationToken).ConfigureAwait(false);
-        await ValidateMirrorRemoteRootAsync(previewSession, request.Definition, cancellationToken).ConfigureAwait(false);
-        var result = await previewSession.ExecuteAsync(LftpCommandBuilder.BuildMirror(request.Definition, dryRun: true), _options.MirrorPreviewTimeout, cancellationToken).ConfigureAwait(false);
-        SessionRegistry.ThrowIfFailed(result, "Mirror preview");
-        var preview = _mirrorPlanner.CreatePreview(request.Definition, result.Lines.Select(static line => line.Line));
-        _previews[preview.Id] = new(request.SessionId, request.Definition, preview);
-        PurgeExpiredPreviews();
-        return preview;
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var session = _sessions.Get(request.SessionId);
+            if (session.Profile.Id != request.Definition.ProfileId) throw new ArgumentException("The mirror profile does not match the connected session.", nameof(request));
+            var preview = await session.WithEphemeralSessionAsync("mirror-preview", async previewSession =>
+            {
+                await ValidateMirrorRemoteRootAsync(previewSession, request.Definition, cancellationToken).ConfigureAwait(false);
+                var result = await previewSession.ExecuteAsync(
+                    LftpCommandBuilder.BuildMirror(request.Definition, dryRun: true),
+                    _options.MirrorPreviewTimeout,
+                    cancellationToken).ConfigureAwait(false);
+                SessionRegistry.ThrowIfFailed(result, "Mirror preview");
+                return _mirrorPlanner.CreatePreview(request.Definition, result.Lines.Select(static line => line.Line));
+            }, cancellationToken).ConfigureAwait(false);
+            var now = DateTimeOffset.UtcNow;
+            PurgeExpiredMirrorRegistrations(now);
+            MakeRoomForMirrorPreview();
+            if (_mirrorApprovals.ContainsKey(preview.Id) || FindJob(preview.Id) is not null ||
+                !_previews.TryAdd(preview.Id, new(request.SessionId, request.Definition, preview)))
+            {
+                throw new InvalidOperationException("The generated mirror preview identifier is already in use. Generate a fresh preview.");
+            }
+            return preview;
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
     }
 
-    public Task<MirrorApproveResult> ApproveMirrorAsync(MirrorApproveRequest request, CancellationToken cancellationToken = default)
+    public async Task<MirrorApproveResult> ApproveMirrorAsync(MirrorApproveRequest request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return ApproveMirrorUnderProfileGate(request);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    private MirrorApproveResult ApproveMirrorUnderProfileGate(MirrorApproveRequest request)
+    {
+        var now = DateTimeOffset.UtcNow;
+        PurgeExpiredMirrorRegistrations(now);
+        if (_mirrorApprovals.TryGetValue(request.PreviewId, out var priorApproval))
+            return ReplayMirrorApproval(request, priorApproval);
+        if (FindJob(request.PreviewId) is not null)
+        {
+            throw new InvalidOperationException(
+                "This mirror preview was already consumed by this or a previous Agent process. Refresh job state before creating a fresh preview.");
+        }
         if (!_previews.TryGetValue(request.PreviewId, out var stored) || stored.SessionId != request.SessionId)
             throw new InvalidOperationException("The mirror preview was not found. Generate a fresh preview.");
+        var reviewFingerprint = MirrorPlanner.ReviewFingerprint(stored.Preview);
+        if (!IsValidReviewFingerprint(request.ReviewFingerprint) ||
+            !string.Equals(request.ReviewFingerprint, reviewFingerprint, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "The reviewed mirror preview actions or metadata do not match the Agent-held preview. Generate and review a fresh preview.",
+                nameof(request));
+        }
         var requiresDeletionReview = stored.Definition.DeleteExtraneous || stored.Preview.ContainsDeletions;
         if (requiresDeletionReview && !request.DeletionsApproved)
             throw new InvalidOperationException("A mirror preview containing deletion actions requires separate explicit deletion approval.");
@@ -493,20 +876,87 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         var session = _sessions.Get(request.SessionId);
         if (session.Profile.Id != request.Definition.ProfileId) throw new ArgumentException("The mirror profile does not match the connected session.", nameof(request));
         if (!_previews.TryRemove(request.PreviewId, out _)) throw new InvalidOperationException("The mirror preview was already approved.");
-        var now = DateTimeOffset.UtcNow;
-        var job = _jobs.Enqueue(new(Guid.NewGuid(), JobKind.Mirror, session.Profile.Id, request.Definition.Name, JobState.Queued, now, now));
-        TrackJob(job.Id, token => RunApprovedMirrorAsync(
-            session, request.Definition, stored.Preview, command, job.Id, token));
-        return Task.FromResult(new MirrorApproveResult(job));
+
+        // Consumption is terminal before any durable or process-side work. A
+        // retry can only retrieve the result of this exact approval; it can
+        // never execute the reviewed preview a second time.
+        MakeRoomForMirrorApproval();
+        var registration = new StoredMirrorApproval(
+            request.SessionId,
+            MirrorPlanner.Fingerprint(request.Definition),
+            reviewFingerprint,
+            HashMirrorApprovalToken(request.ApprovalToken),
+            request.DeletionsApproved,
+            now,
+            now + MirrorApprovalReplayLifetime);
+        _mirrorApprovals.Add(request.PreviewId, registration);
+
+        var job = _jobs.Enqueue(new(
+            request.PreviewId,
+            JobKind.Mirror,
+            session.Profile.Id,
+            request.Definition.Name,
+            JobState.Queued,
+            now,
+            now));
+        var result = new MirrorApproveResult(job);
+        _mirrorApprovals[request.PreviewId] = registration with { Result = result };
+        try
+        {
+            TrackJob(job.Id, token => RunApprovedMirrorAsync(
+                session, request.Definition, stored.Preview, command, job.Id, token));
+        }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            TryFailJob(job.Id, exception);
+            result = new(FindJob(job.Id) ?? job);
+            _mirrorApprovals[request.PreviewId] = registration with { Result = result };
+        }
+        return result;
     }
+
+    private MirrorApproveResult ReplayMirrorApproval(
+        MirrorApproveRequest request,
+        StoredMirrorApproval registration)
+    {
+        if (registration.SessionId != request.SessionId ||
+            !string.Equals(registration.DefinitionFingerprint, MirrorPlanner.Fingerprint(request.Definition), StringComparison.Ordinal) ||
+            !IsValidReviewFingerprint(request.ReviewFingerprint) ||
+            !string.Equals(registration.ReviewFingerprint, request.ReviewFingerprint, StringComparison.Ordinal) ||
+            !CryptographicOperations.FixedTimeEquals(
+                registration.ApprovalTokenHash,
+                HashMirrorApprovalToken(request.ApprovalToken)) ||
+            registration.DeletionsApproved != request.DeletionsApproved)
+        {
+            throw new ArgumentException(
+                "The mirror approval differs from the already consumed review. Refresh job state and create a fresh preview.",
+                nameof(request));
+        }
+        if (registration.Result is null)
+        {
+            throw new InvalidOperationException(
+                "This mirror preview was consumed but did not produce a replayable job result. Refresh workspace state before creating a fresh preview.");
+        }
+        var currentJob = FindJob(request.PreviewId)
+            ?? throw new InvalidOperationException("The consumed mirror preview no longer has a corresponding job. Refresh workspace state.");
+        return registration.Result with { Job = currentJob };
+    }
+
+    private static byte[] HashMirrorApprovalToken(string approvalToken) =>
+        SHA256.HashData(Encoding.UTF8.GetBytes(approvalToken));
+
+    private static bool IsValidReviewFingerprint(string value) =>
+        value is { Length: 64 } && value.All(static character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     public async Task<ConsoleExecuteResult> ExecuteConsoleAsync(ConsoleExecuteRequest request, CancellationToken cancellationToken = default)
     {
         var decision = SafeConsolePolicy.Evaluate(request.Command, localShellEnabled: false);
         if (!decision.Allowed) throw new InvalidOperationException(decision.Reason);
         var session = _sessions.Get(request.SessionId);
-        var console = await session.GetConsoleAsync(cancellationToken).ConfigureAwait(false);
-        var result = await console.ExecuteAsync(request.Command, _options.ConsoleTimeout, cancellationToken).ConfigureAwait(false);
+        var result = await session.WithConsoleSessionAsync(
+            console => console.ExecuteAsync(request.Command, _options.ConsoleTimeout, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
         return new(result);
     }
 
@@ -516,12 +966,43 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             throw new ArgumentException("Distinct source and destination profiles are required.", nameof(request));
         ValidateRemotePath(request.SourcePath, nameof(request));
         ValidateRemotePath(request.DestinationPath, nameof(request));
-        var source = await FindProfileAsync(request.SourceProfileId, cancellationToken).ConfigureAwait(false);
-        var destination = await FindProfileAsync(request.DestinationProfileId, cancellationToken).ConfigureAwait(false);
-        var plan = new RemoteTransferPlan(Guid.NewGuid(), source.Id, destination.Id, request.SourcePath, request.DestinationPath,
-            ComputeRemoteTransferMode(source.Protocol, destination.Protocol), request.Overwrite);
-        PlanValidator.Validate(plan);
-        return plan;
+        ConnectionProfile source;
+        ConnectionProfile destination;
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            source = await FindProfileAsync(request.SourceProfileId, cancellationToken).ConfigureAwait(false);
+            destination = await FindProfileAsync(request.DestinationProfileId, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+        ThrowIfRemoteTransferNeedsIsolatedSftpRelay(source.Protocol, destination.Protocol);
+        await _remoteTransferGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            PurgeExpiredRemoteTransferPlans(now);
+            MakeRoomForRemoteTransferPlan();
+            Guid planId;
+            do { planId = Guid.NewGuid(); }
+            while (_remoteTransferPlans.ContainsKey(planId) || FindJob(planId) is not null);
+            var plan = new RemoteTransferPlan(planId, source.Id, destination.Id, request.SourcePath, request.DestinationPath,
+                ComputeRemoteTransferMode(source.Protocol, destination.Protocol), request.Overwrite);
+            PlanValidator.Validate(plan);
+            _remoteTransferPlans.Add(plan.Id, new(
+                plan,
+                ConnectionIdentity.FromProfile(source),
+                ConnectionIdentity.FromProfile(destination),
+                now,
+                now + RemoteTransferPlanLifetime));
+            return plan;
+        }
+        finally
+        {
+            _remoteTransferGate.Release();
+        }
     }
 
     public async Task<RemoteTransferEnqueueResult> EnqueueRemoteTransferAsync(
@@ -530,8 +1011,61 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
         PlanValidator.Validate(request.Plan);
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _remoteTransferGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return await EnqueueRemoteTransferUnderProfileGateAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                _remoteTransferGate.Release();
+            }
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    private async Task<RemoteTransferEnqueueResult> EnqueueRemoteTransferUnderProfileGateAsync(
+        RemoteTransferEnqueueRequest request,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        PurgeExpiredRemoteTransferPlans(now);
+        if (!_remoteTransferPlans.TryGetValue(request.Plan.Id, out var registration))
+        {
+            if (FindJob(request.Plan.Id) is not null)
+                throw new InvalidOperationException("This remote-transfer plan was already consumed by this or a previous Agent process. Refresh job state before creating a fresh plan.");
+            throw new InvalidOperationException("The remote-transfer plan was not issued by this Agent or has expired. Create and review a fresh route plan.");
+        }
+        if (registration.Plan != request.Plan)
+            throw new ArgumentException("The remote-transfer plan changed after review. Create and review a fresh route plan.", nameof(request));
+        if (registration.Result is { } priorResult)
+        {
+            var currentJob = FindJob(request.Plan.Id)
+                ?? throw new InvalidOperationException("The consumed remote-transfer plan no longer has a corresponding job. Refresh workspace state.");
+            return priorResult with { Job = currentJob };
+        }
+        if (registration.Consumed)
+            throw new InvalidOperationException("This remote-transfer plan was already submitted and did not create a job. Create and review a fresh route plan.");
+        if (FindJob(request.Plan.Id) is not null)
+            throw new InvalidOperationException("This remote-transfer plan was already consumed, but its replay result is unavailable. Refresh job state before creating a fresh plan.");
+        registration = registration with { Consumed = true };
+        _remoteTransferPlans[request.Plan.Id] = registration;
+
         var source = _sessions.GetActiveProfile(request.Plan.SourceProfileId);
         var destination = _sessions.GetActiveProfile(request.Plan.DestinationProfileId);
+        if (ConnectionIdentity.FromProfile(source.Profile) != registration.SourceIdentity ||
+            ConnectionIdentity.FromProfile(destination.Profile) != registration.DestinationIdentity)
+        {
+            throw new InvalidOperationException(
+                "A source or destination connection identity changed after route review. Create and review a fresh remote-transfer plan.");
+        }
+        ThrowIfRemoteTransferNeedsIsolatedSftpRelay(source.Profile.Protocol, destination.Profile.Protocol);
         var expectedMode = ComputeRemoteTransferMode(source.Profile.Protocol, destination.Profile.Protocol);
         if (request.Plan.Mode != expectedMode)
             throw new ArgumentException("The remote transfer routing mode does not match the active profile protocols.", nameof(request));
@@ -551,9 +1085,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         var routingNote = expectedMode == RemoteTransferMode.Fxp
             ? "FXP preferred between FTP-family servers; LFTP will relay through this client if FXP is unavailable."
             : "Client-relay routing through LFTP is required for this protocol combination.";
-        var now = DateTimeOffset.UtcNow;
         var job = _jobs.Enqueue(new(
-            Guid.NewGuid(),
+            request.Plan.Id,
             JobKind.RemoteTransfer,
             source.Profile.Id,
             $"{RemoteName(request.Plan.SourcePath)} -> {RemoteName(request.Plan.DestinationPath)}",
@@ -561,15 +1094,38 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             now,
             now,
             Status: routingNote));
-        TrackJob(job.Id, token => RunRemoteTransferAsync(source, destination, request.Plan, job.Id, routingNote, token));
-        return new(job, expectedMode, routingNote);
+        var result = new RemoteTransferEnqueueResult(job, expectedMode, routingNote);
+        try
+        {
+            TrackJob(
+                job.Id,
+                token => RunRemoteTransferAsync(source, destination, request.Plan, job.Id, routingNote, token),
+                destination.Profile.Id);
+        }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            TryFailJob(job.Id, exception);
+            var committedResult = result with { Job = FindJob(job.Id) ?? job };
+            _remoteTransferPlans[request.Plan.Id] = registration with { Result = committedResult };
+            return committedResult;
+        }
+        _remoteTransferPlans[request.Plan.Id] = registration with { Result = result };
+        return result;
     }
 
-    public Task<RemoteEditSession> StartRemoteEditAsync(RemoteEditStartRequest request, CancellationToken cancellationToken = default)
+    public async Task<RemoteEditSession> StartRemoteEditAsync(RemoteEditStartRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        _ = _sessions.Get(request.SessionId);
-        return _remoteEdits.StartAsync(request, cancellationToken);
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _ = _sessions.Get(request.SessionId);
+            return await _remoteEdits.StartAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
     }
 
     public Task<RemoteEditReview> ReviewRemoteEditAsync(RemoteEditReviewRequest request, CancellationToken cancellationToken = default) =>
@@ -581,27 +1137,84 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     public Task<bool> CompleteRemoteEditAsync(RemoteEditCompleteRequest request, CancellationToken cancellationToken = default) =>
         _remoteEdits.CompleteAsync(request, cancellationToken);
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _lifetime.Cancel();
+        Task disposal;
+        Task admittedRequests;
+        TaskCompletionSource? completion = null;
+        lock (_requestGate)
+        {
+            if (_disposeTask is not null) return new(_disposeTask);
+            _disposed = true;
+            admittedRequests = _activeRequests == 0
+                ? Task.CompletedTask
+                : (_requestsDrained = new(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+            completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            disposal = completion.Task;
+            _disposeTask = disposal;
+        }
+
+        _ = CompleteDisposalAsync(admittedRequests, completion);
+        return new(disposal);
+    }
+
+    private async Task CompleteDisposalAsync(Task admittedRequests, TaskCompletionSource completion)
+    {
+        try
+        {
+            _lifetime.Cancel();
+            await admittedRequests.ConfigureAwait(false);
+            await DisposeOwnedStateAsync().ConfigureAwait(false);
+            completion.TrySetResult();
+        }
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+        }
+    }
+
+    private async Task DisposeOwnedStateAsync()
+    {
         Task[] operations;
         lock (_operationGate) operations = _operations.ToArray();
         try { await Task.WhenAll(operations).ConfigureAwait(false); } catch (OperationCanceledException) { }
         await _remoteEdits.DisposeAsync().ConfigureAwait(false);
         await _sessions.DisposeAsync().ConfigureAwait(false);
         if (_mirrorPlanner is IDisposable disposable) disposable.Dispose();
+        _remoteTransferGate.Dispose();
+        _profileTrustGate.Dispose();
         _lifetime.Dispose();
+    }
+
+    private void AdmitRequest()
+    {
+        lock (_requestGate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            checked { _activeRequests++; }
+        }
+    }
+
+    private void ReleaseRequest()
+    {
+        TaskCompletionSource? drained = null;
+        lock (_requestGate)
+        {
+            _activeRequests--;
+            if (_disposed && _activeRequests == 0) drained = _requestsDrained;
+        }
+        drained?.TrySetResult();
     }
 
     public bool TryCancelOperation(Guid jobId, string? reason = null)
     {
         if (_jobCancellations.TryGetValue(jobId, out var cancellation))
         {
+            using var cancellationLease = cancellation.TryAcquire();
+            if (cancellationLease is null) return false;
             if (!_jobs.TryCancel(jobId, reason)) return false;
             ForgetTransferRetry(jobId);
-            cancellation.Cancel();
+            cancellationLease.Cancel();
             return true;
         }
         if (_scheduler?.TryCancel(jobId, reason) != true) return false;
@@ -707,9 +1320,15 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         try
         {
             _jobs.Transition(jobId, JobState.Running, routingNote);
-            await using var process = await _sessions.StartRemoteTransferAsync(source, destination, jobId, cancellationToken).ConfigureAwait(false);
-            var result = await process.ExecuteAsync(LftpCommandBuilder.BuildRemoteTransfer(plan), _options.TransferTimeout, cancellationToken).ConfigureAwait(false);
-            SessionRegistry.ThrowIfFailed(result, "Remote-to-remote transfer");
+            await _sessions.WithRemoteTransferAsync(source, destination, jobId, async process =>
+            {
+                var result = await process.ExecuteAsync(
+                    LftpCommandBuilder.BuildRemoteTransfer(plan),
+                    _options.TransferTimeout,
+                    cancellationToken).ConfigureAwait(false);
+                SessionRegistry.ThrowIfFailed(result, "Remote-to-remote transfer");
+                return true;
+            }, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             _jobs.Transition(jobId, JobState.Completed, $"Completed. {routingNote}");
         }
@@ -732,10 +1351,11 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             return File.Exists(plan.DestinationPath);
         }
 
-        var result = await session.Browse.ExecuteAsync(
-            $"cls -1 {LftpCommandBuilder.Quote(LftpCommandBuilder.DashSafe(plan.DestinationPath))}",
-            _options.BrowseTimeout,
-            cancellationToken).ConfigureAwait(false);
+        var result = await session.WithBrowseSessionAsync(browse => browse.ExecuteAsync(
+                $"cls -1 {LftpCommandBuilder.Quote(LftpCommandBuilder.DashSafe(plan.DestinationPath))}",
+                _options.BrowseTimeout,
+                cancellationToken))
+            .ConfigureAwait(false);
         if (result.TimedOut) throw new TimeoutException("The remote collision check timed out.");
         if (result.Failure is not null) throw new IOException($"The remote collision check failed: {result.Failure}");
         var error = LftpOutputParser.FirstError(result.Lines);
@@ -787,12 +1407,30 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         }
     }
 
-    private void TrackJob(Guid jobId, Func<CancellationToken, Task> operation)
+    private void TrackJob(
+        Guid jobId,
+        Func<CancellationToken, Task> operation,
+        params Guid[] additionalProfileIds)
     {
-        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        var job = _jobs.GetJobs().FirstOrDefault(candidate => candidate.Id == jobId)
+            ?? throw new KeyNotFoundException($"Job {jobId} was not found before tracking began.");
+        var dependencies = ImmutableHashSet.CreateBuilder<Guid>();
+        if (job.ProfileId is { } primaryProfileId && primaryProfileId != Guid.Empty)
+            dependencies.Add(primaryProfileId);
+        foreach (var profileId in additionalProfileIds)
+        {
+            if (profileId == Guid.Empty)
+                throw new ArgumentException("Tracked job profile dependencies cannot be empty.", nameof(additionalProfileIds));
+            dependencies.Add(profileId);
+        }
+        if (!_activeJobProfileDependencies.TryAdd(jobId, dependencies.ToImmutable()))
+            throw new InvalidOperationException($"Job {jobId} already has active profile dependencies.");
+
+        var cancellation = new TrackedJobCancellation(_lifetime.Token);
         if (!_jobCancellations.TryAdd(jobId, cancellation))
         {
-            cancellation.Dispose();
+            _activeJobProfileDependencies.TryRemove(jobId, out _);
+            cancellation.Complete();
             throw new InvalidOperationException($"Job {jobId} is already running.");
         }
         var task = RunTrackedOperationAsync(jobId, operation, cancellation.Token);
@@ -803,7 +1441,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             lock (_operationGate) _operations.Remove(completed);
             if (_jobs.GetJobs().FirstOrDefault(job => job.Id == jobId)?.State != JobState.Failed)
                 ForgetTransferRetry(jobId);
-            if (_jobCancellations.TryRemove(jobId, out var source)) source.Dispose();
+            if (_jobCancellations.TryRemove(jobId, out var source)) source.Complete();
+            _activeJobProfileDependencies.TryRemove(jobId, out _);
         }, CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
@@ -875,6 +1514,43 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault(profile => profile.Id == id)
         ?? throw new KeyNotFoundException($"Profile {id} was not found.");
 
+    private JobSnapshot? FindJob(Guid jobId) =>
+        _jobs.GetJobs().FirstOrDefault(job => job.Id == jobId);
+
+    private void MakeRoomForTransferSubmission()
+    {
+        while (_transferSubmissions.Count >= MaximumTransferSubmissions)
+        {
+            var oldestTerminal = _transferSubmissions.Values
+                .Where(static submission => submission.Result is not null || submission.Failure is not null)
+                .OrderBy(static submission => submission.SubmittedAt)
+                .FirstOrDefault();
+            if (oldestTerminal is null)
+                throw new InvalidOperationException("Too many transfer submissions are still being resolved. Refresh job state before queueing more work.");
+            _transferSubmissions.Remove(oldestTerminal.Request.Plan.Id);
+        }
+    }
+
+    private void PurgeExpiredRemoteTransferPlans(DateTimeOffset now)
+    {
+        foreach (var registration in _remoteTransferPlans.Values.Where(registration => registration.ExpiresAt <= now).ToArray())
+            _remoteTransferPlans.Remove(registration.Plan.Id);
+    }
+
+    private void MakeRoomForRemoteTransferPlan()
+    {
+        while (_remoteTransferPlans.Count >= MaximumRemoteTransferPlans)
+        {
+            var oldestConsumed = _remoteTransferPlans.Values
+                .Where(static registration => registration.Consumed)
+                .OrderBy(static registration => registration.IssuedAt)
+                .FirstOrDefault();
+            if (oldestConsumed is null)
+                throw new InvalidOperationException("Too many remote-transfer plans are awaiting review. Use an existing plan or wait for an older plan to expire.");
+            _remoteTransferPlans.Remove(oldestConsumed.Plan.Id);
+        }
+    }
+
     private WorkspaceSession GetRemoteMutationSession(Guid? sessionId)
     {
         if (sessionId is not { } value || value == Guid.Empty)
@@ -882,8 +1558,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         return _sessions.Get(value);
     }
 
-    private async Task<FileEntry?> TryStatRemoteAsync(WorkspaceSession session, string path, CancellationToken cancellationToken)
-        => await TryStatRemoteAsync(session.Browse, path, cancellationToken).ConfigureAwait(false);
+    private async Task<FileEntry?> TryStatRemoteAsync(WorkspaceSession session, string path, CancellationToken cancellationToken) =>
+        await session.WithBrowseSessionAsync(process => TryStatRemoteAsync(process, path, cancellationToken)).ConfigureAwait(false);
 
     private async Task<FileEntry?> TryStatRemoteAsync(ILftpSession process, string path, CancellationToken cancellationToken)
     {
@@ -937,6 +1613,15 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             ? RemoteTransferMode.Fxp
             : RemoteTransferMode.ClientRelay;
 
+    private static void ThrowIfRemoteTransferNeedsIsolatedSftpRelay(
+        ConnectionProtocol source,
+        ConnectionProtocol destination)
+    {
+        if (source != ConnectionProtocol.Sftp && destination != ConnectionProtocol.Sftp) return;
+        throw new NotSupportedException(
+            "SFTP and mixed-protocol remote-to-remote transfers are blocked until client relay uses distinct, separately pinned LFTP processes. FTP-family FXP remains available.");
+    }
+
     private static string NormalizeRemotePath(string path) => path == "/" ? path : path.TrimEnd('/');
 
     private static string RemoteName(string path)
@@ -965,8 +1650,32 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
     private static SecretBinding SecretBindingFor(ConnectionProfile profile)
     {
-        var scheme = profile.Protocol switch { ConnectionProtocol.Sftp => "sftp", ConnectionProtocol.FtpsImplicit => "ftps", _ => "ftp" };
-        return new(profile.Id, $"{scheme}://{profile.Host.ToLowerInvariant()}:{profile.Port}", profile.UserName, $"login-{profile.Authentication.ToString().ToLowerInvariant()}");
+        var identity = ConnectionIdentity.FromProfile(profile);
+        return new(profile.Id, identity.CanonicalEndpoint, profile.UserName, $"login-{profile.Authentication.ToString().ToLowerInvariant()}");
+    }
+
+    private async Task<ConnectionProfile> FindExpectedProfileAsync(
+        ConnectionIdentity? expectedIdentity,
+        CancellationToken cancellationToken)
+    {
+        if (expectedIdentity is null || expectedIdentity.ProfileId == Guid.Empty)
+            throw new ArgumentException("A complete expected connection identity is required.", nameof(expectedIdentity));
+
+        var profile = await FindProfileAsync(expectedIdentity.ProfileId, cancellationToken).ConfigureAwait(false);
+        if (ConnectionIdentity.FromProfile(profile) != expectedIdentity)
+        {
+            throw new InvalidOperationException(
+                "The connection profile changed after it was selected. Refresh the workspace and review the current connection before continuing.");
+        }
+        return profile;
+    }
+
+    private static bool HostKeyBindingChanged(ConnectionProfile previous, ConnectionProfile current)
+    {
+        if (previous.Protocol != current.Protocol)
+            return previous.Protocol == ConnectionProtocol.Sftp || current.Protocol == ConnectionProtocol.Sftp;
+        if (current.Protocol != ConnectionProtocol.Sftp) return false;
+        return SftpHostKeyManager.CreateBinding(previous) != SftpHostKeyManager.CreateBinding(current);
     }
 
     private static void ValidateCredential(string? credential)
@@ -1140,8 +1849,14 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         if (plan.SourceKind != TransferSourceKind.Directory) return;
-        await using var previewSession = await session.CreateEphemeralAsync("directory-transfer-preview", cancellationToken).ConfigureAwait(false);
-        await ValidateDirectoryTransferPreviewAsync(previewSession, plan, cancellationToken).ConfigureAwait(false);
+        await session.WithEphemeralSessionAsync(
+            "directory-transfer-preview",
+            async previewSession =>
+            {
+                await ValidateDirectoryTransferPreviewAsync(previewSession, plan, cancellationToken).ConfigureAwait(false);
+                return true;
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task ValidateDirectoryTransferPreviewAsync(
@@ -1414,10 +2129,35 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             throw new ArgumentException("A remote absolute path without protocol control characters is required.", parameterName);
     }
 
-    private void PurgeExpiredPreviews()
+    private void PurgeExpiredMirrorRegistrations(DateTimeOffset now)
     {
-        var now = DateTimeOffset.UtcNow;
-        foreach (var pair in _previews) if (pair.Value.Preview.ExpiresAt < now) _previews.TryRemove(pair.Key, out _);
+        foreach (var pair in _previews)
+        {
+            if (pair.Value.Preview.ExpiresAt <= now) _previews.TryRemove(pair.Key, out _);
+        }
+        foreach (var pair in _mirrorApprovals.Where(pair => pair.Value.ExpiresAt <= now).ToArray())
+            _mirrorApprovals.Remove(pair.Key);
+    }
+
+    private void MakeRoomForMirrorPreview()
+    {
+        while (_previews.Count >= MaximumMirrorPreviews)
+        {
+            var oldest = _previews.Values.MinBy(static registration => registration.Preview.GeneratedAt)
+                ?? throw new InvalidOperationException("The mirror preview registry could not be bounded safely.");
+            _previews.TryRemove(oldest.Preview.Id, out _);
+        }
+    }
+
+    private void MakeRoomForMirrorApproval()
+    {
+        while (_mirrorApprovals.Count >= MaximumMirrorApprovals)
+        {
+            var oldest = _mirrorApprovals.MinBy(static pair => pair.Value.RegisteredAt);
+            if (oldest.Key == Guid.Empty)
+                throw new InvalidOperationException("The mirror approval registry could not be bounded safely.");
+            _mirrorApprovals.Remove(oldest.Key);
+        }
     }
 
     private static T Required<T>(JsonElement element) where T : class =>
@@ -1426,12 +2166,91 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private static JsonElement ToJson<T>(T value) => JsonSerializer.SerializeToElement(value, FramedJsonStream.SerializerOptions);
 
     private sealed record StoredMirrorPreview(Guid SessionId, MirrorDefinition Definition, MirrorPreview Preview);
+    private sealed record StoredMirrorApproval(
+        Guid SessionId,
+        string DefinitionFingerprint,
+        string ReviewFingerprint,
+        byte[] ApprovalTokenHash,
+        bool DeletionsApproved,
+        DateTimeOffset RegisteredAt,
+        DateTimeOffset ExpiresAt,
+        MirrorApproveResult? Result = null);
     private sealed record TransferRetryContext(Guid SessionId, TransferPlan Plan);
+    private sealed record StoredTransferSubmission(
+        TransferEnqueueRequest Request,
+        DateTimeOffset SubmittedAt,
+        TransferEnqueueResult? Result = null,
+        ExceptionDispatchInfo? Failure = null);
     private sealed class TransferSkippedException : Exception { }
+    private sealed class TrackedJobCancellation
+    {
+        private readonly object _gate = new();
+        private readonly CancellationTokenSource _source;
+        private int _leases;
+        private bool _completed;
+
+        public TrackedJobCancellation(CancellationToken lifetime) =>
+            _source = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+
+        public CancellationToken Token => _source.Token;
+
+        public Lease? TryAcquire()
+        {
+            lock (_gate)
+            {
+                if (_completed) return null;
+                _leases++;
+                return new(this);
+            }
+        }
+
+        public void Complete()
+        {
+            var dispose = false;
+            lock (_gate)
+            {
+                if (_completed) return;
+                _completed = true;
+                dispose = _leases == 0;
+            }
+            if (dispose) _source.Dispose();
+        }
+
+        private void Release()
+        {
+            var dispose = false;
+            lock (_gate)
+            {
+                if (_leases <= 0) throw new InvalidOperationException("The tracked cancellation lease count is inconsistent.");
+                _leases--;
+                dispose = _completed && _leases == 0;
+            }
+            if (dispose) _source.Dispose();
+        }
+
+        internal sealed class Lease(TrackedJobCancellation owner) : IDisposable
+        {
+            private TrackedJobCancellation? _owner = owner;
+
+            public void Cancel() => (_owner ?? throw new ObjectDisposedException(nameof(Lease)))._source.Cancel();
+
+            public void Dispose() => Interlocked.Exchange(ref _owner, null)?.Release();
+        }
+    }
+
     private sealed record StoredBrowseSnapshot(
         Guid Id,
         PaneLocation Location,
         Guid? SessionId,
         DateTimeOffset CreatedAt,
         ImmutableArray<FileEntry> Entries);
+
+    private sealed record StoredRemoteTransferPlan(
+        RemoteTransferPlan Plan,
+        ConnectionIdentity SourceIdentity,
+        ConnectionIdentity DestinationIdentity,
+        DateTimeOffset IssuedAt,
+        DateTimeOffset ExpiresAt,
+        RemoteTransferEnqueueResult? Result = null,
+        bool Consumed = false);
 }

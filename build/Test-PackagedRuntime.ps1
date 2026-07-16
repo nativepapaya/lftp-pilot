@@ -2,6 +2,53 @@
 param([Parameter(Mandatory)][string]$MsixPath)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Get-OpenSshConfiguration {
+    param(
+        [Parameter(Mandatory)][string]$SshPath,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+    # Windows PowerShell promotes native stderr to an ErrorRecord when the
+    # script-wide preference is Stop. OpenSSH may emit a harmless TTY warning
+    # while still returning a valid `-G` configuration, so capture the stream
+    # and decide from the native exit code instead.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & $SshPath -G @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "Packaged ssh.exe could not resolve its effective configuration: $($output -join ' ')"
+    }
+    $configuration = @{}
+    foreach ($line in $output) {
+        $parts = $line.ToString().Split(' ', 2, [StringSplitOptions]::RemoveEmptyEntries)
+        if ($parts.Count -eq 2 -and -not $configuration.ContainsKey($parts[0])) {
+            $configuration[$parts[0]] = $parts[1]
+        }
+    }
+    return $configuration
+}
+
+function Assert-OpenSshConfiguration {
+    param(
+        [Parameter(Mandatory)][hashtable]$Configuration,
+        [Parameter(Mandatory)][hashtable]$Expected,
+        [Parameter(Mandatory)][string]$Mode
+    )
+    foreach ($entry in $Expected.GetEnumerator()) {
+        if (-not $Configuration.ContainsKey($entry.Key) -or
+            $Configuration[$entry.Key] -cne $entry.Value) {
+            $actual = if ($Configuration.ContainsKey($entry.Key)) { $Configuration[$entry.Key] } else { '<missing>' }
+            throw "Packaged ssh.exe resolved unsafe $Mode configuration '$($entry.Key)=$actual'; expected '$($entry.Value)'."
+        }
+    }
+}
+
 $package = (Resolve-Path -LiteralPath $MsixPath).Path
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "lftp-pilot-runtime-smoke-$([Guid]::NewGuid().ToString('N'))"
 $expanded = Join-Path $testRoot 'package'
@@ -48,10 +95,78 @@ try {
         $destinationPosix = (& (Join-Path $bin 'cygpath.exe') -u $mirrorDestination | Select-Object -First 1).Trim()
         $skipSourcePosix = (& (Join-Path $bin 'cygpath.exe') -u $skipSource | Select-Object -First 1).Trim()
         $skipTargetPosix = (& (Join-Path $bin 'cygpath.exe') -u $skipTarget | Select-Object -First 1).Trim()
+        $knownHostsPosix = (& (Join-Path $bin 'cygpath.exe') -u (Join-Path $writable 'known hosts') | Select-Object -First 1).Trim()
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourcePosix) -or
             [string]::IsNullOrWhiteSpace($destinationPosix) -or [string]::IsNullOrWhiteSpace($skipSourcePosix) -or
-            [string]::IsNullOrWhiteSpace($skipTargetPosix)) {
+            [string]::IsNullOrWhiteSpace($skipTargetPosix) -or [string]::IsNullOrWhiteSpace($knownHostsPosix)) {
             throw 'cygpath.exe could not map the writable directory-mirror paths.'
+        }
+        $sshPath = Join-Path $bin 'ssh.exe'
+        $strictSsh = Get-OpenSshConfiguration -SshPath $sshPath -Arguments @(
+            '-F', 'none', '-a', '-x',
+            '-o', 'StrictHostKeyChecking=yes',
+            '-o', "UserKnownHostsFile=`"$knownHostsPosix`"",
+            '-o', 'GlobalKnownHostsFile=none',
+            '-o', 'UpdateHostKeys=no',
+            '-o', 'VerifyHostKeyDNS=no',
+            '-o', 'CheckHostIP=no',
+            '-o', 'IdentityAgent=none',
+            '-o', 'HostKeyAlias=lftp-pilot-runtime-smoke',
+            '-p', '22', '-l', 'alice', 'example.test'
+        )
+        Assert-OpenSshConfiguration -Mode 'strict host-key' -Configuration $strictSsh -Expected @{
+            stricthostkeychecking = 'true'
+            userknownhostsfile = $knownHostsPosix
+            globalknownhostsfile = 'none'
+            updatehostkeys = 'false'
+            verifyhostkeydns = 'false'
+            checkhostip = 'no'
+            identityagent = 'none'
+            hostkeyalias = 'lftp-pilot-runtime-smoke'
+        }
+        $probeSsh = Get-OpenSshConfiguration -SshPath $sshPath -Arguments @(
+            '-F', 'none', '-a', '-x', '-n', '-N',
+            '-o', 'BatchMode=yes',
+            '-o', 'StrictHostKeyChecking=accept-new',
+            '-o', "UserKnownHostsFile=`"$knownHostsPosix`"",
+            '-o', 'GlobalKnownHostsFile=none',
+            '-o', 'HashKnownHosts=no',
+            '-o', 'UpdateHostKeys=no',
+            '-o', 'VerifyHostKeyDNS=no',
+            '-o', 'CheckHostIP=no',
+            '-o', 'PubkeyAuthentication=no',
+            '-o', 'PasswordAuthentication=no',
+            '-o', 'KbdInteractiveAuthentication=no',
+            '-o', 'GSSAPIAuthentication=no',
+            '-o', 'HostbasedAuthentication=no',
+            '-o', 'IdentityAgent=none',
+            '-o', 'IdentitiesOnly=yes',
+            '-o', 'NumberOfPasswordPrompts=0',
+            '-o', 'ConnectionAttempts=1',
+            '-o', 'ConnectTimeout=15',
+            '-o', 'HostKeyAlias=lftp-pilot-runtime-probe',
+            '-p', '22', '-l', 'lftp-pilot-host-key-probe', 'example.test'
+        )
+        Assert-OpenSshConfiguration -Mode 'host-key probe' -Configuration $probeSsh -Expected @{
+            batchmode = 'yes'
+            stricthostkeychecking = 'accept-new'
+            userknownhostsfile = $knownHostsPosix
+            globalknownhostsfile = 'none'
+            hashknownhosts = 'no'
+            updatehostkeys = 'false'
+            verifyhostkeydns = 'false'
+            checkhostip = 'no'
+            pubkeyauthentication = 'false'
+            passwordauthentication = 'no'
+            kbdinteractiveauthentication = 'no'
+            gssapiauthentication = 'no'
+            hostbasedauthentication = 'no'
+            identityagent = 'none'
+            identitiesonly = 'yes'
+            numberofpasswordprompts = '0'
+            connectionattempts = '1'
+            connecttimeout = '15'
+            hostkeyalias = 'lftp-pilot-runtime-probe'
         }
         $commands = @(
             @{ Exe = 'lftp.exe'; Arguments = '--norc -c "open file:///; cls -1 /"'; Expected = 'bin' },
@@ -113,4 +228,4 @@ finally {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }
-'Packaged LFTP file/directory, OpenSSH, and shell smoke tests passed with a read-only package and writable app data.'
+'Packaged LFTP file/directory, strict SFTP host-key, credential-free OpenSSH probe, and shell smoke tests passed with a read-only package and writable app data.'

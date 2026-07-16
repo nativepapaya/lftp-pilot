@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using LFTPPilot.Agent;
@@ -16,8 +18,9 @@ public sealed class WorkspaceTests
     {
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
         await fixture.Service.SaveProfileAsync(new(profile, "hunter2"), TestContext.Current.CancellationToken);
-        var snapshot = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var snapshot = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
 
         Assert.True(snapshot.IsConnected);
         var start = Assert.Single(fixture.ProcessHost.Starts);
@@ -36,13 +39,646 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
+    public async Task SftpConnectWithoutApprovedHostKeyStopsBeforeSecretResolutionOrProcessLaunch()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(profile, "stored-password"), TestContext.Current.CancellationToken);
+        fixture.HostKeys.AutoTrust = false;
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken));
+
+        Assert.Contains("approved host key", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fixture.Secrets.GetCalls);
+        Assert.Empty(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task SftpPasswordCannotBePersistedBeforeItsEndpointHostKeyIsApproved()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.SaveProfileAsync(
+            new(profile, "must-not-be-stored"), TestContext.Current.CancellationToken));
+        Assert.Contains("metadata without a credential", blocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken));
+        Assert.Empty(fixture.Secrets.Values);
+
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var untrusted = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.SaveProfileAsync(
+            new(profile, "still-must-not-be-stored"), TestContext.Current.CancellationToken));
+        Assert.Contains("approved host key", untrusted.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fixture.Secrets.Values);
+        var review = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, review.ReviewId, review.ApprovalToken), TestContext.Current.CancellationToken);
+        _ = await fixture.Service.SaveProfileAsync(
+            new(profile, "stored-after-trust"), TestContext.Current.CancellationToken);
+        Assert.Single(fixture.Secrets.Values);
+    }
+
+    [Fact]
+    public async Task SftpApprovalConnectsWithStrictSingleEntryKnownHostsAndDisablesAutoConfirm()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+
+        var inspection = await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var review = Assert.IsType<SftpHostKeyReview>(inspection.Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, review.ReviewId, review.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(profile, "stored-password"), TestContext.Current.CancellationToken);
+        var connected = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+
+        var binding = SftpHostKeyManager.CreateBinding(profile);
+        var trusted = Assert.IsType<TrustedSftpHostKey>(await fixture.HostKeys.GetAsync(
+            binding, TestContext.Current.CancellationToken));
+        var alias = SftpHostKeyIdentity.CreateHostKeyAlias(binding);
+        var knownHostsPath = Path.Combine(
+            fixture.Options.TemporaryRoot,
+            "sessions",
+            connected.SessionId.ToString("N"),
+            "browse",
+            "known_hosts");
+        Assert.True(File.Exists(knownHostsPath));
+        var lines = await File.ReadAllLinesAsync(knownHostsPath, TestContext.Current.CancellationToken);
+        Assert.Equal([SshKnownHostsParser.Format(alias, trusted).TrimEnd('\r', '\n')], lines);
+
+        var initialization = Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "browse" && item.Command.Contains("open --user", StringComparison.Ordinal));
+        Assert.Contains("set sftp:auto-confirm false", initialization.Command, StringComparison.Ordinal);
+        Assert.Contains("StrictHostKeyChecking=yes", initialization.Command, StringComparison.Ordinal);
+        Assert.Contains("GlobalKnownHostsFile=none", initialization.Command, StringComparison.Ordinal);
+        Assert.Contains($"HostKeyAlias={alias}", initialization.Command, StringComparison.Ordinal);
+        Assert.Contains(
+            LftpCommandBuilder.BuildOpen(profile, "stored-password", knownHostsPath, alias),
+            initialization.Command,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ChangedSftpHostKeyReplacementWaitsUntilTheActiveSessionDisconnects()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(profile, "stored-password"), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+
+        fixture.HostKeyProbe.KeyMarker = 0x43;
+        var change = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        Assert.Equal(SftpHostKeyState.Changed, change.State);
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken));
+        Assert.Contains("must not be in use", blocked.Message, StringComparison.OrdinalIgnoreCase);
+
+        Assert.True(await fixture.Service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken));
+        var approved = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(change.PresentedFingerprintSha256, approved.FingerprintSha256);
+        var trusted = Assert.IsType<TrustedSftpHostKey>(await fixture.HostKeys.GetAsync(
+            SftpHostKeyManager.CreateBinding(profile), TestContext.Current.CancellationToken));
+        Assert.Equal(change.PresentedFingerprintSha256, trusted.FingerprintSha256);
+    }
+
+    [Fact]
+    public async Task ChangedSftpHostKeyReplacementWaitsForDisconnectedProcessCleanup()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(
+            new(profile, "stored-password"), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+
+        fixture.HostKeyProbe.KeyMarker = 0x43;
+        var change = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        fixture.ProcessHost.BlockDisposeRole = "browse";
+
+        var disconnect = fixture.Service.DisconnectAsync(
+            new(session.SessionId), TestContext.Current.CancellationToken);
+        await fixture.ProcessHost.DisposeEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var replacement = fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken);
+        Assert.False(replacement.IsCompleted);
+
+        fixture.ProcessHost.ReleaseDispose.TrySetResult(true);
+        Assert.True(await disconnect);
+        var approved = await replacement;
+        Assert.Equal(change.PresentedFingerprintSha256, approved.FingerprintSha256);
+    }
+
+    [Fact]
+    public async Task FailedDisconnectCleanupRemainsRegisteredAndBlocksChangedHostKeyReplacement()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(
+            new(profile, "stored-password"), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+
+        fixture.HostKeyProbe.KeyMarker = 0x43;
+        var change = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        fixture.ProcessHost.FailDisposeRole = "browse";
+        fixture.ProcessHost.RemainingDisposeFailures = 1;
+
+        var cleanupFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.DisconnectAsync(
+            new(session.SessionId), TestContext.Current.CancellationToken));
+        Assert.Contains("simulated disposal failure", cleanupFailure.Message, StringComparison.OrdinalIgnoreCase);
+        var bootstrap = await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken);
+        Assert.Contains(bootstrap.Sessions, candidate => candidate.SessionId == session.SessionId);
+        var replacement = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken));
+        Assert.Contains("must not be in use", replacement.Message, StringComparison.OrdinalIgnoreCase);
+
+        fixture.ProcessHost.FailDisposeRole = null;
+        Assert.True(await fixture.Service.DisconnectAsync(
+            new(session.SessionId), TestContext.Current.CancellationToken));
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task SftpConnectAndChangedKeyReplacementCannotCrossTheQuiescenceDecision()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(profile, "stored-password"), TestContext.Current.CancellationToken);
+
+        fixture.HostKeyProbe.KeyMarker = 0x43;
+        var change = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var connect = fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var replacement = fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken);
+        Assert.False(replacement.IsCompleted);
+
+        releaseStart.TrySetResult(true);
+        var session = await connect;
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => replacement);
+        Assert.Contains("must not be in use", blocked.Message, StringComparison.OrdinalIgnoreCase);
+
+        Assert.True(await fixture.Service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken));
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task FtpConnectAndProfileDeleteCannotCreateAnOrphanSession()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var connect = fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var delete = fixture.Service.DeleteProfileAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        Assert.False(delete.IsCompleted);
+
+        releaseStart.TrySetResult(true);
+        _ = await connect;
+        Assert.True(await delete);
+        var bootstrap = await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(bootstrap.Profiles, candidate => candidate.Id == profile.Id);
+        Assert.DoesNotContain(bootstrap.Sessions, candidate => candidate.ProfileId == profile.Id);
+        Assert.Contains("browse", fixture.ProcessHost.DisposedRoles);
+    }
+
+    [Fact]
+    public async Task SftpProfileEndpointChangeAndDeleteInvalidateStoredHostTrust()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        var originalBinding = SftpHostKeyManager.CreateBinding(profile);
+        Assert.NotNull(await fixture.HostKeys.GetAsync(originalBinding, TestContext.Current.CancellationToken));
+
+        var changed = profile with { Host = "replacement.example" };
+        await fixture.Service.SaveProfileAsync(new(changed), TestContext.Current.CancellationToken);
+        Assert.Null(await fixture.HostKeys.GetAsync(originalBinding, TestContext.Current.CancellationToken));
+        var changedBinding = SftpHostKeyManager.CreateBinding(changed);
+        Assert.Null(await fixture.HostKeys.GetAsync(changedBinding, TestContext.Current.CancellationToken));
+
+        var replacementEnrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(changed)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(changed.Id, replacementEnrollment.ReviewId, replacementEnrollment.ApprovalToken),
+            TestContext.Current.CancellationToken);
+        Assert.NotNull(await fixture.HostKeys.GetAsync(changedBinding, TestContext.Current.CancellationToken));
+
+        Assert.True(await fixture.Service.DeleteProfileAsync(
+            new(changed.Id), TestContext.Current.CancellationToken));
+        Assert.Null(await fixture.HostKeys.GetAsync(changedBinding, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task FailedIdentitySaveCannotResurrectOldSecretOrHostTrust()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var original = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(original), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(original)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(original.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(original, "old-identity-secret"), TestContext.Current.CancellationToken);
+
+        fixture.Profiles.SaveFailure = new IOException("simulated metadata persistence failure");
+        var changed = original with { Host = "replacement.example" };
+        var failure = await Assert.ThrowsAsync<IOException>(() => fixture.Service.SaveProfileAsync(
+            new(changed), TestContext.Current.CancellationToken));
+        Assert.Contains("persistence failure", failure.Message, StringComparison.OrdinalIgnoreCase);
+        fixture.Profiles.SaveFailure = null;
+
+        Assert.Empty(fixture.Secrets.Values);
+        Assert.Null(await fixture.HostKeys.GetAsync(
+            SftpHostKeyManager.CreateBinding(original), TestContext.Current.CancellationToken));
+        var persisted = Assert.Single(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(original, persisted);
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(original)), TestContext.Current.CancellationToken));
+        Assert.Contains("approved host key", blocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fixture.Secrets.GetCalls);
+        Assert.Empty(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task CombinedSftpEndpointAndCredentialSaveCannotBypassFreshReview()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var original = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(original), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(original)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(original.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(original, "original-secret"), TestContext.Current.CancellationToken);
+
+        var changed = original with { Host = "replacement.example" };
+        var changedBinding = SftpHostKeyManager.CreateBinding(changed);
+        await fixture.HostKeys.SaveAsync(
+            CreateTestHostKey(changedBinding, 0x44), TestContext.Current.CancellationToken);
+
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.SaveProfileAsync(
+            new(changed, "must-not-be-persisted"), TestContext.Current.CancellationToken));
+
+        Assert.Contains("metadata without a credential", blocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(original, Assert.Single(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken)));
+        Assert.Single(fixture.Secrets.Values);
+        Assert.NotNull(await fixture.HostKeys.GetAsync(
+            SftpHostKeyManager.CreateBinding(original), TestContext.Current.CancellationToken));
+        Assert.NotNull(await fixture.HostKeys.GetAsync(changedBinding, TestContext.Current.CancellationToken));
+        Assert.Empty(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task FailedProfileMetadataDeleteStillRevokesSecretAndHostTrust()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(profile, "delete-failure-secret"), TestContext.Current.CancellationToken);
+
+        fixture.Profiles.DeleteFailure = new IOException("simulated metadata deletion failure");
+        var failure = await Assert.ThrowsAsync<IOException>(() => fixture.Service.DeleteProfileAsync(
+            new(profile.Id), TestContext.Current.CancellationToken));
+
+        Assert.Contains("deletion failure", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(profile, Assert.Single(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken)));
+        Assert.Empty(fixture.Secrets.Values);
+        Assert.Null(await fixture.HostKeys.GetAsync(
+            SftpHostKeyManager.CreateBinding(profile), TestContext.Current.CancellationToken));
+        Assert.Empty(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task StaleCapturedIdentityCannotSendCredentialAfterSameIdProtocolDowngrade()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var captured = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(captured), TestContext.Current.CancellationToken);
+        var downgraded = captured with
+        {
+            Protocol = ConnectionProtocol.Ftp,
+            Port = 21,
+        };
+        await fixture.Service.SaveProfileAsync(
+            new(downgraded, "credential-for-current-profile"), TestContext.Current.CancellationToken);
+
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(captured), "credential-for-captured-sftp-profile"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Contains("profile changed", blocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fixture.Secrets.GetCalls);
+        Assert.Empty(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task ForgedExpectedIdentityIsRejectedBeforeStoredSecretReadOrProcessLaunch()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.PasswordProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(
+            new(profile, "stored-for-real-identity"), TestContext.Current.CancellationToken);
+        var forged = ConnectionIdentity.FromProfile(profile) with { UserName = "mallory" };
+
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(
+            new(forged), TestContext.Current.CancellationToken));
+
+        Assert.Contains("profile changed", blocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fixture.Secrets.GetCalls);
+        Assert.Empty(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task ExplicitFtpsPasswordIsInvalidatedBeforeSameIdPlainFtpDowngrade()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var explicitTls = fixture.PasswordProfile(ConnectionProtocol.FtpsExplicit);
+        await fixture.Service.SaveProfileAsync(
+            new(explicitTls, "credential-bound-to-explicit-tls"), TestContext.Current.CancellationToken);
+        var plainFtp = explicitTls with { Protocol = ConnectionProtocol.Ftp };
+
+        await fixture.Service.SaveProfileAsync(new(plainFtp), TestContext.Current.CancellationToken);
+
+        Assert.Empty(fixture.Secrets.Values);
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(plainFtp)), TestContext.Current.CancellationToken));
+        Assert.Contains("No password", blocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.Secrets.GetCalls);
+        Assert.Empty(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task StaleHostKeyInspectionIdentityStopsBeforeServerProbe()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var captured = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(captured), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(
+            new(captured with { Host = "different.example" }), TestContext.Current.CancellationToken);
+
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(captured)), TestContext.Current.CancellationToken));
+
+        Assert.Contains("profile changed", blocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fixture.HostKeyProbe.Calls);
+        Assert.Empty(fixture.Secrets.GetCalls);
+        Assert.Empty(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task ActiveSftpProfileCannotDiscardTrustByChangingItsEndpointOrProtocol()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(
+            new(profile, "stored-password"), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var binding = SftpHostKeyManager.CreateBinding(profile);
+        var trusted = Assert.IsType<TrustedSftpHostKey>(await fixture.HostKeys.GetAsync(
+            binding, TestContext.Current.CancellationToken));
+
+        var endpointChange = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.SaveProfileAsync(
+                new(profile with { Host = "replacement.example" }),
+                TestContext.Current.CancellationToken));
+        Assert.Contains("Disconnect every session", endpointChange.Message, StringComparison.Ordinal);
+        var protocolChange = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.SaveProfileAsync(
+                new(profile with { Protocol = ConnectionProtocol.Ftp, Port = 21 }),
+                TestContext.Current.CancellationToken));
+        Assert.Contains("changing its endpoint, protocol", protocolChange.Message, StringComparison.Ordinal);
+
+        Assert.Equal([profile], await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(trusted, await fixture.HostKeys.GetAsync(binding, TestContext.Current.CancellationToken));
+
+        Assert.True(await fixture.Service.DisconnectAsync(
+            new(session.SessionId), TestContext.Current.CancellationToken));
+        var changed = profile with { Host = "replacement.example" };
+        await fixture.Service.SaveProfileAsync(new(changed), TestContext.Current.CancellationToken);
+        Assert.Null(await fixture.HostKeys.GetAsync(binding, TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ActiveFtpProfileRejectsEndpointOrSecurityModeChange(bool changeSecurityMode)
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        _ = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var changed = changeSecurityMode
+            ? profile with { Protocol = ConnectionProtocol.FtpsExplicit }
+            : profile with { Host = "replacement.example" };
+
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.SaveProfileAsync(
+            new(changed), TestContext.Current.CancellationToken));
+
+        Assert.Contains("changing its endpoint, protocol", blocked.Message, StringComparison.Ordinal);
+        Assert.Equal(profile, Assert.Single(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken)));
+        Assert.Empty(fixture.Secrets.Values);
+        Assert.Single(fixture.ProcessHost.Starts);
+
+        var cosmetic = profile with
+        {
+            Name = "Renamed while connected",
+            InitialRemotePath = "/incoming",
+            Bookmarks = ["/incoming", "/archive"],
+        };
+        Assert.Equal(cosmetic, await fixture.Service.SaveProfileAsync(
+            new(cosmetic), TestContext.Current.CancellationToken));
+        Assert.Equal(cosmetic, Assert.Single(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken)));
+        Assert.Single(fixture.ProcessHost.Starts);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ActiveSftpKeyProfileRejectsUsernameOrKeyPathChange(bool changeKeyPath)
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), "Key profile", ConnectionProtocol.Sftp, "sftp.example", 22,
+            "alice", AuthenticationKind.SshKey, SshKeyPath: @"C:\Keys\id_ed25519");
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        _ = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var binding = SftpHostKeyManager.CreateBinding(profile);
+        var trusted = Assert.IsType<TrustedSftpHostKey>(await fixture.HostKeys.GetAsync(
+            binding, TestContext.Current.CancellationToken));
+        var changed = changeKeyPath
+            ? profile with { SshKeyPath = @"C:\Keys\replacement_ed25519" }
+            : profile with { UserName = "bob" };
+
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.SaveProfileAsync(
+            new(changed), TestContext.Current.CancellationToken));
+
+        Assert.Contains("username, authentication mode, or SSH key", blocked.Message, StringComparison.Ordinal);
+        Assert.Equal(profile, Assert.Single(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken)));
+        Assert.Equal(trusted, await fixture.HostKeys.GetAsync(binding, TestContext.Current.CancellationToken));
+        Assert.Empty(fixture.Secrets.Values);
+        Assert.Single(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task ActiveProfileRejectsCredentialReplacementWithoutMutatingStoredSecret()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.PasswordProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(
+            new(profile, "credential-in-active-processes"), TestContext.Current.CancellationToken);
+        _ = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.SaveProfileAsync(
+            new(profile, "replacement-must-not-be-stored"), TestContext.Current.CancellationToken));
+
+        Assert.Contains("before saving a credential", blocked.Message, StringComparison.Ordinal);
+        Assert.Equal(profile, Assert.Single(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken)));
+        Assert.Equal(["credential-in-active-processes"], fixture.Secrets.Values.Values);
+        Assert.DoesNotContain("replacement-must-not-be-stored", fixture.Secrets.Values.Values);
+        Assert.Single(fixture.ProcessHost.Starts);
+    }
+
+    [Fact]
+    public async Task MirrorPreviewHoldsHostKeyLifecycleGateUntilItsEphemeralProcessIsDisposed()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(
+            new(profile, "stored-password"), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        fixture.HostKeyProbe.KeyMarker = 0x43;
+        var change = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Lifecycle preview", MirrorDirection.Download,
+            fixture.Directory.Path, "/remote");
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var preview = fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var replacement = fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken);
+        Assert.False(replacement.IsCompleted);
+
+        releaseStart.TrySetResult(true);
+        _ = await preview;
+        Assert.Contains("mirror-preview", fixture.ProcessHost.DisposedRoles);
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => replacement);
+        Assert.Contains("must not be in use", blocked.Message, StringComparison.OrdinalIgnoreCase);
+
+        Assert.True(await fixture.Service.DisconnectAsync(
+            new(session.SessionId), TestContext.Current.CancellationToken));
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task ProfileIdentityChangeInvalidatesBoundCredential()
     {
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
         await fixture.Service.SaveProfileAsync(new(profile, "hunter2"), TestContext.Current.CancellationToken);
-        await fixture.Service.SaveProfileAsync(new(profile with { Host = "changed.example" }), TestContext.Current.CancellationToken);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken));
+        var changed = profile with { Host = "changed.example" };
+        await fixture.Service.SaveProfileAsync(new(changed), TestContext.Current.CancellationToken);
+        Assert.Empty(fixture.Secrets.Values);
+        var blocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(changed)), TestContext.Current.CancellationToken));
+        Assert.Contains("No password", blocked.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -51,8 +687,8 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.PasswordProfile() with { Authentication = AuthenticationKind.AskOnConnect };
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken));
-        await fixture.Service.ConnectAsync(new(profile.Id, "once"), TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken));
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile), "once"), TestContext.Current.CancellationToken);
         Assert.Empty(fixture.Secrets.Values);
     }
 
@@ -62,7 +698,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
 
         var localRoot = Path.Combine(fixture.Directory.Path, "local");
         Directory.CreateDirectory(Path.Combine(localRoot, "folder"));
@@ -118,7 +754,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
 
         await fixture.Service.CreateDirectoryAsync(
             new(PaneKind.Remote, "/created", session.SessionId), TestContext.Current.CancellationToken);
@@ -151,10 +787,11 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var destination = Path.Combine(fixture.Directory.Path, "downloads", "file.bin");
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file.bin", destination, TransferMode.Resume, 4);
         var queued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        Assert.Equal(plan.Id, queued.Job.Id);
         await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == queued.Job.Id).State == JobState.Completed, TestContext.Current.CancellationToken);
 
         Assert.Equal(1, fixture.ProcessHost.Starts.Count(start => start.Tag == "transfer-queue"));
@@ -164,12 +801,236 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
+    public async Task ConcurrentExactTransferReplayConvergesOnOnePlanJobAndOneValidation()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/exact-replay.bin",
+            Path.Combine(fixture.Directory.Path, "exact-replay.bin"), TransferMode.Resume, 4);
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var firstTask = fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var replayTask = fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        Assert.False(replayTask.IsCompleted);
+        releaseStart.TrySetResult(true);
+
+        var results = await Task.WhenAll(firstTask, replayTask);
+        Assert.All(results, result => Assert.Equal(plan.Id, result.Job.Id));
+        Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+        Assert.Single(fixture.ProcessHost.Starts, start => start.Tag == "validation");
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task TransferValidationFailureConsumesExactPlanBeforeAsyncValidationCanReplay()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/missing-transfer-source",
+            Path.Combine(fixture.Directory.Path, "missing-replay.bin"));
+
+        var first = await fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        var replay = await fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken);
+
+        Assert.Equal(plan.Id, first.Job.Id);
+        Assert.Equal(JobState.Failed, first.Job.State);
+        Assert.Equal(first.Job, replay.Job);
+        Assert.Contains("not found", first.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.Jobs.GetJobs());
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "validation" && item.Command.Contains("missing-transfer-source", StringComparison.Ordinal));
+
+        var submissionField = typeof(AgentWorkspaceService).GetField(
+            "_transferSubmissions",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The transfer submission registry was not found.");
+        var submissions = Assert.IsAssignableFrom<System.Collections.IDictionary>(submissionField.GetValue(fixture.Service));
+        submissions.Remove(plan.Id);
+        var evictedReplay = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken));
+        Assert.Contains("already consumed", evictedReplay.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "validation" && item.Command.Contains("missing-transfer-source", StringComparison.Ordinal));
+
+        await fixture.Service.DisposeAsync();
+        await using var restarted = new AgentWorkspaceService(
+            fixture.Profiles,
+            fixture.Secrets,
+            fixture.HostKeyManager,
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.Jobs,
+            new MirrorPlanner(),
+            fixture.Options,
+            scheduler: fixture.Scheduler);
+        var restartedReplay = await Assert.ThrowsAsync<InvalidOperationException>(() => restarted.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken));
+        Assert.Contains("already consumed", restartedReplay.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "validation" && item.Command.Contains("missing-transfer-source", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ChangedOrEvictedTransferReplayCannotCreateAnotherJobForPlanId()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/replay-guard.bin",
+            Path.Combine(fixture.Directory.Path, "replay-guard.bin"));
+        _ = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan with { DestinationPath = Path.Combine(fixture.Directory.Path, "changed.bin") }),
+            TestContext.Current.CancellationToken));
+        var submissionField = typeof(AgentWorkspaceService).GetField(
+            "_transferSubmissions",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The transfer submission registry was not found.");
+        var submissions = Assert.IsAssignableFrom<System.Collections.IDictionary>(submissionField.GetValue(fixture.Service));
+        submissions.Remove(plan.Id);
+
+        var evicted = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken));
+        Assert.Contains("already consumed", evicted.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+        Assert.Single(fixture.ProcessHost.Starts, start => start.Tag == "transfer-queue");
+    }
+
+    [Fact]
+    public async Task TransferTrackingFailureReturnsAndReplaysOneCommittedFailedPlanJob()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/tracking-failure.bin",
+            Path.Combine(fixture.Directory.Path, "tracking-failure.bin"));
+        var dependencyField = typeof(AgentWorkspaceService).GetField(
+            "_activeJobProfileDependencies",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The active job dependency registry was not found.");
+        var dependencies = Assert.IsType<ConcurrentDictionary<Guid, ImmutableHashSet<Guid>>>(
+            dependencyField.GetValue(fixture.Service));
+        Assert.True(dependencies.TryAdd(plan.Id, ImmutableHashSet.Create(profile.Id)));
+
+        try
+        {
+            var first = await fixture.Service.EnqueueTransferAsync(
+                new(session.SessionId, plan), TestContext.Current.CancellationToken);
+            var replay = await fixture.Service.EnqueueTransferAsync(
+                new(session.SessionId, plan), TestContext.Current.CancellationToken);
+
+            Assert.Equal(plan.Id, first.Job.Id);
+            Assert.Equal(JobState.Failed, first.Job.State);
+            Assert.Equal(first.Job, replay.Job);
+            Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+            Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag == "transfer-queue");
+        }
+        finally
+        {
+            dependencies.TryRemove(plan.Id, out _);
+        }
+    }
+
+    [Fact]
+    public async Task RetryTrackingFailureReturnsTruthfulFailedResultAfterQueuedCommit()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/failing-queue.bin",
+            Path.Combine(fixture.Directory.Path, "retry-tracking-failure.bin"));
+        _ = await fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        var dependencyField = typeof(AgentWorkspaceService).GetField(
+            "_activeJobProfileDependencies",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The active job dependency registry was not found.");
+        var dependencies = Assert.IsType<ConcurrentDictionary<Guid, ImmutableHashSet<Guid>>>(
+            dependencyField.GetValue(fixture.Service));
+        Assert.True(dependencies.TryAdd(plan.Id, ImmutableHashSet.Create(profile.Id)));
+
+        try
+        {
+            var retried = await fixture.Service.RetryJobAsync(new(plan.Id), TestContext.Current.CancellationToken);
+
+            Assert.Equal(plan.Id, retried.Job.Id);
+            Assert.Equal(JobState.Failed, retried.Job.State);
+            Assert.Contains("active profile dependencies", retried.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+            Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+                item.Role == "transfer-queue" && item.Command.Contains("failing-queue.bin", StringComparison.Ordinal));
+        }
+        finally
+        {
+            dependencies.TryRemove(plan.Id, out _);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledPersistenceFailureReturnsMissedPlanJobInsteadOfRejectionOrGhost()
+    {
+        using var blockingDirectory = new TestDirectory();
+        var blockingFile = Path.Combine(blockingDirectory.Path, "not-a-directory");
+        await File.WriteAllTextAsync(blockingFile, "block", TestContext.Current.CancellationToken);
+        var time = new ManualTimeProvider(new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero));
+        await using var fixture = new WorkspaceFixture(
+            timeProvider: time,
+            durableStorePath: Path.Combine(blockingFile, "jobs.json"));
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/schedule-persist-failure.bin",
+            Path.Combine(fixture.Directory.Path, "schedule-persist-failure.bin"),
+            RunAt: time.GetUtcNow().AddHours(1));
+
+        var result = await fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        var replay = await fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken);
+
+        Assert.Equal(plan.Id, result.Job.Id);
+        Assert.Equal(JobState.Missed, result.Job.State);
+        Assert.Equal(result.Job, replay.Job);
+        Assert.False(fixture.Scheduler.IsRegistered(plan.Id));
+        Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+    }
+
+    [Fact]
     public async Task TypedDirectoryTransfersRemainTransferJobsAndCompleteThroughTheGuardedForegroundSession()
     {
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var localSource = Path.Combine(fixture.Directory.Path, "upload-directory");
         Directory.CreateDirectory(localSource);
         await File.WriteAllTextAsync(Path.Combine(localSource, "nested.txt"), "data", TestContext.Current.CancellationToken);
@@ -204,36 +1065,49 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var destination = Path.Combine(fixture.Directory.Path, "download.bin");
 
-        await Assert.ThrowsAsync<FileNotFoundException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+        var missingRemote = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/missing-transfer-source", destination)),
-            TestContext.Current.CancellationToken));
-        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            TestContext.Current.CancellationToken);
+        var wrongRemoteKind = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file.bin", destination,
-                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken));
-        await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken);
+        var remoteLink = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/transfer-link", destination)),
-            TestContext.Current.CancellationToken));
-        await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+            TestContext.Current.CancellationToken);
+        var remoteSpecial = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/transfer-special", destination)),
-            TestContext.Current.CancellationToken));
+            TestContext.Current.CancellationToken);
 
         var missingLocal = Path.Combine(fixture.Directory.Path, "missing-upload.bin");
-        await Assert.ThrowsAsync<ArgumentException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+        var missingUpload = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, missingLocal, "/remote/target.bin")),
-            TestContext.Current.CancellationToken));
+            TestContext.Current.CancellationToken);
         var localFile = Path.Combine(fixture.Directory.Path, "upload.bin");
         await File.WriteAllTextAsync(localFile, "data", TestContext.Current.CancellationToken);
-        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+        var wrongLocalKind = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, localFile, "/remote/target.bin",
-                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken));
-        await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken);
+        var uploadLink = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, localFile, "/remote/transfer-link")),
-            TestContext.Current.CancellationToken));
+            TestContext.Current.CancellationToken);
 
-        Assert.Empty(fixture.Jobs.GetJobs());
+        var rejected = new[] { missingRemote, wrongRemoteKind, remoteLink, remoteSpecial, missingUpload, wrongLocalKind, uploadLink };
+        Assert.All(rejected, result =>
+        {
+            Assert.Equal(JobState.Failed, result.Job.State);
+            Assert.NotNull(result.Job.Error);
+        });
+        Assert.Contains("not found", missingRemote.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("requires a directory", wrongRemoteKind.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("symbolic link", remoteLink.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("special entry", remoteSpecial.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("must exist", missingUpload.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("declares a directory", wrongLocalKind.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("symbolic link", uploadLink.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(rejected.Length, fixture.Jobs.GetJobs().Count);
     }
 
     [Fact]
@@ -262,32 +1136,38 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var localDirectory = Path.Combine(fixture.Directory.Path, "existing-directory");
         Directory.CreateDirectory(localDirectory);
-        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+        var fileOverDirectory = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file.bin", localDirectory)),
-            TestContext.Current.CancellationToken));
+            TestContext.Current.CancellationToken);
 
         var localFile = Path.Combine(fixture.Directory.Path, "existing-file.bin");
         await File.WriteAllTextAsync(localFile, "data", TestContext.Current.CancellationToken);
-        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+        var directoryOverFile = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/directory-transfer-source", localFile,
-                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken));
-        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+                SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken);
+        var nonDirectoryAncestor = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file.bin",
-                Path.Combine(localFile, "child.bin"))), TestContext.Current.CancellationToken));
-        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+                Path.Combine(localFile, "child.bin"))), TestContext.Current.CancellationToken);
+        var uploadToDirectory = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, localFile, "/remote/directory-destination")),
-            TestContext.Current.CancellationToken));
+            TestContext.Current.CancellationToken);
 
         var uploadDirectory = Path.Combine(fixture.Directory.Path, "upload-directory");
         Directory.CreateDirectory(uploadDirectory);
-        await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+        var directoryToFile = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, uploadDirectory, "/remote/existing-file.bin",
-                TransferMode.Resume, SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken));
+                TransferMode.Resume, SourceKind: TransferSourceKind.Directory)), TestContext.Current.CancellationToken);
 
-        Assert.Empty(fixture.Jobs.GetJobs());
+        var rejected = new[] { fileOverDirectory, directoryOverFile, nonDirectoryAncestor, uploadToDirectory, directoryToFile };
+        Assert.All(rejected, result =>
+        {
+            Assert.Equal(JobState.Failed, result.Job.State);
+            Assert.NotNull(result.Job.Error);
+        });
+        Assert.Equal(rejected.Length, fixture.Jobs.GetJobs().Count);
     }
 
     [Fact]
@@ -296,7 +1176,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var commandsBefore = fixture.ProcessHost.TaggedCommands.Count;
         var startsBefore = fixture.ProcessHost.Starts.Count;
         var destination = Path.Combine(fixture.Directory.Path, "invalid.bin");
@@ -334,7 +1214,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var source = Path.Combine(fixture.Directory.Path, "canonical-source.bin");
         await File.WriteAllTextAsync(source, "data", TestContext.Current.CancellationToken);
         var backslashPlan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload,
@@ -362,7 +1242,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var commandsBefore = fixture.ProcessHost.TaggedCommands.Count;
         var startsBefore = fixture.ProcessHost.Starts.Count;
         var localDirectory = Path.Combine(fixture.Directory.Path, "non-root-source");
@@ -401,7 +1281,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var file = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/link-ancestor/file.bin",
                 Path.Combine(fixture.Directory.Path, "ancestor-file.bin"))), TestContext.Current.CancellationToken);
@@ -435,7 +1315,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var external = Path.Combine(Path.GetTempPath(), "LFTPPilot.MirrorJunction", Guid.NewGuid().ToString("N"));
         var junction = Path.Combine(fixture.Directory.Path, "junction");
         Directory.CreateDirectory(external);
@@ -464,13 +1344,13 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var blockerDefinition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Gate blocker", MirrorDirection.Download,
             fixture.Directory.Path, "/gate-blocker");
         var blockerPreview = await fixture.Service.PreviewMirrorAsync(
             new(session.SessionId, blockerDefinition), TestContext.Current.CancellationToken);
         var blocker = await fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, blockerDefinition, blockerPreview.Id, blockerPreview.ApprovalToken),
+            MirrorApproval(session.SessionId, blockerDefinition, blockerPreview),
             TestContext.Current.CancellationToken);
         await fixture.ProcessHost.TransferGateEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
 
@@ -487,7 +1367,7 @@ public sealed class WorkspaceTests
                 new(session.SessionId, definition), TestContext.Current.CancellationToken);
             Assert.False(preview.ContainsDeletions);
             approved.Add(await fixture.Service.ApproveMirrorAsync(
-                new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken));
+                MirrorApproval(session.SessionId, definition, preview), TestContext.Current.CancellationToken));
         }
 
         Directory.Delete(parent, recursive: true);
@@ -523,7 +1403,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var destinationRoot = Path.GetPathRoot(fixture.Directory.Path)!;
         var plan = new TransferPlan(
             Guid.NewGuid(),
@@ -548,13 +1428,15 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+        var failed = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/mismatched-stat",
-                Path.Combine(fixture.Directory.Path, "mismatched-stat.bin"))), TestContext.Current.CancellationToken));
+                Path.Combine(fixture.Directory.Path, "mismatched-stat.bin"))), TestContext.Current.CancellationToken);
 
-        Assert.Empty(fixture.Jobs.GetJobs());
+        Assert.Equal(JobState.Failed, failed.Job.State);
+        Assert.Contains("different path", failed.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.Jobs.GetJobs());
         Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
             item.Role == "validation" && item.Command.StartsWith("recls -ldB ", StringComparison.Ordinal) &&
             item.Command.Contains("mismatched-stat", StringComparison.Ordinal));
@@ -566,7 +1448,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var source = Path.Combine(fixture.Directory.Path, "empty-stat-upload.bin");
         await File.WriteAllTextAsync(source, "data", TestContext.Current.CancellationToken);
 
@@ -588,7 +1470,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var source = Path.Combine(fixture.Directory.Path, "missing-diagnostic-upload.bin");
         await File.WriteAllTextAsync(source, "data", TestContext.Current.CancellationToken);
 
@@ -601,9 +1483,11 @@ public sealed class WorkspaceTests
                 TestContext.Current.CancellationToken);
         }
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+        var wrongPath = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source, "/remote/wrong-bound-missing-target")),
-            TestContext.Current.CancellationToken));
+            TestContext.Current.CancellationToken);
+        Assert.Equal(JobState.Failed, wrongPath.Job.State);
+        Assert.Contains("ambiguous output", wrongPath.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -612,7 +1496,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download,
             "/remote/stat-drift-directory", Path.Combine(fixture.Directory.Path, "stat-drift-directory"),
             TransferMode.Resume, SourceKind: TransferSourceKind.Directory);
@@ -643,16 +1527,17 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, remoteSource,
             Path.Combine(fixture.Directory.Path, "dry-run-destination"), TransferMode.Resume,
             SourceKind: TransferSourceKind.Directory);
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.EnqueueTransferAsync(
-            new(session.SessionId, plan), TestContext.Current.CancellationToken));
+        var failed = await fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken);
 
-        Assert.Contains("reviewed Mirror workflow", error.Message, StringComparison.Ordinal);
-        Assert.Empty(fixture.Jobs.GetJobs());
+        Assert.Equal(JobState.Failed, failed.Job.State);
+        Assert.Contains("reviewed Mirror workflow", failed.Job.Error?.Message, StringComparison.Ordinal);
+        Assert.Single(fixture.Jobs.GetJobs());
         var preview = Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
             item.Role == "directory-transfer-preview" && item.Command.Contains(remoteSource, StringComparison.Ordinal));
         Assert.StartsWith("mirror --verbose=1 --dry-run", preview.Command, StringComparison.Ordinal);
@@ -667,7 +1552,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(
             Guid.NewGuid(),
             profile.Id,
@@ -720,7 +1605,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var source = Path.Combine(fixture.Directory.Path, "retry-once.bin");
         await File.WriteAllTextAsync(source, "upload", TestContext.Current.CancellationToken);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source, "/retry-target.bin", TransferMode.Resume);
@@ -742,7 +1627,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var source = Path.Combine(fixture.Directory.Path, "retry-once.bin");
         Directory.CreateDirectory(source);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source,
@@ -771,7 +1656,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var source = Path.Combine(fixture.Directory.Path, "retry-once.bin");
         Directory.CreateDirectory(source);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source,
@@ -803,7 +1688,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var originalSession = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var originalSession = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/retry-once.bin",
             Path.Combine(fixture.Directory.Path, "exact-session.bin"), TransferMode.Resume);
         var enqueued = await fixture.Service.EnqueueTransferAsync(new(originalSession.SessionId, plan), TestContext.Current.CancellationToken);
@@ -812,8 +1697,8 @@ public sealed class WorkspaceTests
             TestContext.Current.CancellationToken);
         var originalFailure = fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id);
 
-        Assert.True(await fixture.Service.DisconnectAsync(new(originalSession.SessionId)));
-        var replacement = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        Assert.True(await fixture.Service.DisconnectAsync(new(originalSession.SessionId), TestContext.Current.CancellationToken));
+        var replacement = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         Assert.NotEqual(originalSession.SessionId, replacement.SessionId);
         await Assert.ThrowsAsync<KeyNotFoundException>(() => fixture.Service.RetryJobAsync(
             new(enqueued.Job.Id), TestContext.Current.CancellationToken));
@@ -846,7 +1731,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture(timeProvider: time);
         var profile = fixture.PasswordProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile, "scheduled-secret"), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(
             Guid.NewGuid(),
             profile.Id,
@@ -857,6 +1742,7 @@ public sealed class WorkspaceTests
 
         var enqueued = await fixture.Service.EnqueueTransferAsync(
             new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        Assert.Equal(plan.Id, enqueued.Job.Id);
         Assert.Equal(JobState.Scheduled, enqueued.Job.State);
         Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag == "transfer-queue");
         var durable = Assert.Single((await fixture.Store.LoadAsync(TestContext.Current.CancellationToken)).Jobs);
@@ -881,7 +1767,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture(timeProvider: time);
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var source = Path.Combine(fixture.Directory.Path, "scheduled-directory-source");
         Directory.CreateDirectory(source);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source,
@@ -912,7 +1798,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture(timeProvider: time);
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var source = Path.Combine(fixture.Directory.Path, "scheduled-preview-source");
         Directory.CreateDirectory(source);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source,
@@ -946,7 +1832,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture(timeProvider: time);
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(
             Guid.NewGuid(),
             profile.Id,
@@ -975,7 +1861,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture(timeProvider: time);
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var scheduled = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/scheduled-validation-cancel.bin",
                 Path.Combine(fixture.Directory.Path, "scheduled-validation-cancel.bin"),
@@ -1012,7 +1898,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture(timeProvider: time);
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var destination = Path.Combine(fixture.Directory.Path, "scheduled-skip.bin");
         var scheduled = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/scheduled-skip.bin", destination,
@@ -1038,7 +1924,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture(timeProvider: time);
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download,
             "/remote/scheduled-retry-cancel.bin", Path.Combine(fixture.Directory.Path, "scheduled-retry-cancel.bin"),
             TransferMode.Resume, RunAt: time.GetUtcNow().AddMinutes(10));
@@ -1074,7 +1960,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture(timeProvider: time);
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(
             Guid.NewGuid(),
             profile.Id,
@@ -1086,14 +1972,17 @@ public sealed class WorkspaceTests
             new(session.SessionId, plan), TestContext.Current.CancellationToken);
 
         var disconnect = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            fixture.Service.DisconnectAsync(new(session.SessionId)));
+            fixture.Service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken));
         Assert.Contains("Cancel scheduled or active jobs", disconnect.Message, StringComparison.Ordinal);
         var delete = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             fixture.Service.DeleteProfileAsync(new(profile.Id), TestContext.Current.CancellationToken));
         Assert.Contains("Cancel scheduled or active jobs", delete.Message, StringComparison.Ordinal);
 
         Assert.True(fixture.Service.TryCancelOperation(enqueued.Job.Id, "Cancel before disconnect"));
-        Assert.True(await fixture.Service.DisconnectAsync(new(session.SessionId)));
+        await WaitUntilAsync(
+            () => !fixture.Scheduler.IsRegistered(enqueued.Job.Id),
+            TestContext.Current.CancellationToken);
+        Assert.True(await fixture.Service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -1102,7 +1991,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var edit = await fixture.Service.StartRemoteEditAsync(
             new(session.SessionId, "/active.txt"), TestContext.Current.CancellationToken);
 
@@ -1114,7 +2003,7 @@ public sealed class WorkspaceTests
         Assert.Null(restored.LastLocalChangeAt);
 
         var disconnect = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            fixture.Service.DisconnectAsync(new(session.SessionId)));
+            fixture.Service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken));
         Assert.Contains("active remote edit", disconnect.Message, StringComparison.OrdinalIgnoreCase);
         var delete = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             fixture.Service.DeleteProfileAsync(new(profile.Id), TestContext.Current.CancellationToken));
@@ -1127,8 +2016,58 @@ public sealed class WorkspaceTests
 
         Assert.True(await fixture.Service.CompleteRemoteEditAsync(
             new(edit.EditId), TestContext.Current.CancellationToken));
-        Assert.True(await fixture.Service.DisconnectAsync(new(session.SessionId)));
+        Assert.True(await fixture.Service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken));
         Assert.True(await fixture.Service.DeleteProfileAsync(new(profile.Id), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task RemoteEditStartupBlocksDisconnectAndHostKeyReplacementUntilRegistration()
+    {
+        await using var fixture = new WorkspaceFixture();
+        fixture.HostKeys.AutoTrust = false;
+        var profile = fixture.PasswordProfile();
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var enrollment = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(
+            new(profile, "stored-password"), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        fixture.HostKeyProbe.KeyMarker = 0x43;
+        var change = Assert.IsType<SftpHostKeyReview>((await fixture.Service.InspectSftpHostKeyAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken)).Review);
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var start = fixture.Service.StartRemoteEditAsync(
+            new(session.SessionId, "/active.txt"), TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var disconnect = fixture.Service.DisconnectAsync(
+            new(session.SessionId), TestContext.Current.CancellationToken);
+        var replacement = fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken);
+        Assert.False(disconnect.IsCompleted);
+        Assert.False(replacement.IsCompleted);
+
+        releaseStart.TrySetResult(true);
+        var edit = await start;
+        var disconnectBlocked = await Assert.ThrowsAsync<InvalidOperationException>(() => disconnect);
+        var replacementBlocked = await Assert.ThrowsAsync<InvalidOperationException>(() => replacement);
+        Assert.Contains("active remote edit", disconnectBlocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("must not be in use", replacementBlocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("remote-edit-download", fixture.ProcessHost.DisposedRoles);
+
+        Assert.True(await fixture.Service.CompleteRemoteEditAsync(
+            new(edit.EditId), TestContext.Current.CancellationToken));
+        Assert.True(await fixture.Service.DisconnectAsync(
+            new(session.SessionId), TestContext.Current.CancellationToken));
+        _ = await fixture.Service.ApproveSftpHostKeyAsync(
+            new(profile.Id, change.ReviewId, change.ApprovalToken, ReplaceExisting: true),
+            TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -1137,7 +2076,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(
             Guid.NewGuid(),
             profile.Id,
@@ -1166,7 +2105,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         fixture.ProcessHost.FailRolePrefix = "transfer-queue";
         var plan = new TransferPlan(
             Guid.NewGuid(),
@@ -1190,14 +2129,16 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var destination = Path.Combine(fixture.Directory.Path, "existing.bin");
         await File.WriteAllTextAsync(destination, "keep", TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file.bin", destination, TransferMode.Skip);
 
-        var skipped = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
-            new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/file.bin", destination, TransferMode.Skip)),
+        var skipped = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan),
             TestContext.Current.CancellationToken);
 
+        Assert.Equal(plan.Id, skipped.Job.Id);
         Assert.Equal(JobState.Completed, skipped.Job.State);
         Assert.Contains("Skipped", skipped.Job.Status, StringComparison.Ordinal);
         Assert.Contains(" -> ", skipped.Job.DisplayName, StringComparison.Ordinal);
@@ -1211,7 +2152,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
 
         var newDestination = Path.Combine(fixture.Directory.Path, "new.bin");
         var download = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
@@ -1244,7 +2185,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/blocking.bin",
             Path.Combine(fixture.Directory.Path, "blocking.bin"));
         var queued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
@@ -1261,7 +2202,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var first = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/blocking.bin", Path.Combine(fixture.Directory.Path, "blocking.bin"))),
             TestContext.Current.CancellationToken);
@@ -1289,7 +2230,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var first = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/slot-block-one.bin",
                 Path.Combine(fixture.Directory.Path, "slot-block-one.bin"))), TestContext.Current.CancellationToken);
@@ -1334,7 +2275,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var cancelled = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/cancel-validation.bin",
                 Path.Combine(fixture.Directory.Path, "cancel-validation.bin"))), TestContext.Current.CancellationToken);
@@ -1367,7 +2308,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var first = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/validation-gate-one.bin",
                 Path.Combine(fixture.Directory.Path, "validation-gate-one.bin"),
@@ -1397,13 +2338,13 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var blockerDefinition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Gate blocker", MirrorDirection.Download,
             fixture.Directory.Path, "/gate-blocker");
         var blockerPreview = await fixture.Service.PreviewMirrorAsync(
             new(session.SessionId, blockerDefinition), TestContext.Current.CancellationToken);
         var blocker = await fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, blockerDefinition, blockerPreview.Id, blockerPreview.ApprovalToken),
+            MirrorApproval(session.SessionId, blockerDefinition, blockerPreview),
             TestContext.Current.CancellationToken);
         await fixture.ProcessHost.TransferGateEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
 
@@ -1438,7 +2379,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var transfer = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download,
                 "/remote/post-directory-link-ancestor/source",
@@ -1466,7 +2407,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var queued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/interleaved.bin",
                 Path.Combine(fixture.Directory.Path, "interleaved.bin"))), TestContext.Current.CancellationToken);
@@ -1482,7 +2423,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var first = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/blocking.bin", Path.Combine(fixture.Directory.Path, "blocking.bin"))),
             TestContext.Current.CancellationToken);
@@ -1509,18 +2450,32 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Clean mirror", MirrorDirection.Download,
             fixture.Directory.Path, "/remote", DeleteExtraneous: true);
         var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
         Assert.True(preview.ContainsDeletions);
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken));
+            MirrorApproval(session.SessionId, definition, preview), TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, "tampered", DeletionsApproved: true), TestContext.Current.CancellationToken));
+            MirrorApproval(session.SessionId, definition, preview, deletionsApproved: true, approvalToken: "tampered"),
+            TestContext.Current.CancellationToken));
+        var tamperedActions = preview with
+        {
+            Actions = preview.Actions.Add(new(MirrorActionKind.Download, "not-in-the-reviewed-dry-run.txt")),
+        };
+        var tamperedReview = await Assert.ThrowsAsync<ArgumentException>(() => fixture.Service.ApproveMirrorAsync(
+            MirrorApproval(
+                session.SessionId,
+                definition,
+                preview,
+                deletionsApproved: true,
+                reviewedPreview: tamperedActions),
+            TestContext.Current.CancellationToken));
+        Assert.Contains("actions", tamperedReview.Message, StringComparison.OrdinalIgnoreCase);
 
         var approved = await fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, preview.ApprovalToken, DeletionsApproved: true), TestContext.Current.CancellationToken);
+            MirrorApproval(session.SessionId, definition, preview, deletionsApproved: true), TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Completed, TestContext.Current.CancellationToken);
         Assert.Contains(fixture.ProcessHost.Commands, command =>
             command.Contains("mirror --verbose=1", StringComparison.Ordinal) &&
@@ -1530,21 +2485,142 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
+    public async Task MirrorApprovalRejectsFormerDelimiterCollisionWithoutStartingExecutionProcess()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)),
+            TestContext.Current.CancellationToken);
+        var reviewed = new MirrorDefinition(
+            Guid.NewGuid(),
+            profile.Id,
+            "Delimiter-safe mirror",
+            MirrorDirection.Download,
+            fixture.Directory.Path,
+            "/remote",
+            Includes: ["a\u001eb"],
+            Excludes: ["same"],
+            DeleteExtraneous: true);
+        var altered = reviewed with { Includes = ["a", "b"] };
+        var preview = await fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, reviewed),
+            TestContext.Current.CancellationToken);
+        var startsAfterPreview = fixture.ProcessHost.Starts.Count;
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.ApproveMirrorAsync(
+                MirrorApproval(session.SessionId, altered, preview, deletionsApproved: true),
+                TestContext.Current.CancellationToken));
+
+        Assert.Contains("definition changed", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(startsAfterPreview, fixture.ProcessHost.Starts.Count);
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" &&
+            item.Command.Contains("mirror --verbose=1", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+        Assert.Empty(fixture.Jobs.GetJobs());
+    }
+
+    [Fact]
+    public async Task ConcurrentExactMirrorApprovalReplaysOneJobAndExecutesOnce()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Concurrent approval", MirrorDirection.Download,
+            fixture.Directory.Path, "/gate-blocker");
+        var preview = await fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        var request = MirrorApproval(session.SessionId, definition, preview);
+
+        var approvals = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ =>
+            fixture.Service.ApproveMirrorAsync(request, TestContext.Current.CancellationToken)));
+        await fixture.ProcessHost.TransferGateEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        Assert.All(approvals, approval => Assert.Equal(preview.Id, approval.Job.Id));
+        Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == preview.Id);
+        var mismatchedReplay = await Assert.ThrowsAsync<ArgumentException>(() =>
+            fixture.Service.ApproveMirrorAsync(
+                request with { DeletionsApproved = true }, TestContext.Current.CancellationToken));
+        Assert.Contains("differs", mismatchedReplay.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" &&
+            item.Command.Contains("/gate-blocker", StringComparison.Ordinal) &&
+            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+
+        fixture.ProcessHost.ReleaseTransferGate.TrySetResult(true);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == preview.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task RestartedAgentRejectsMirrorApprovalReplayWhenDurableJobIdExists()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), profile.Id, "Restart replay", MirrorDirection.Download,
+            fixture.Directory.Path, "/gate-blocker");
+        var preview = await fixture.Service.PreviewMirrorAsync(
+            new(session.SessionId, definition), TestContext.Current.CancellationToken);
+        var request = MirrorApproval(session.SessionId, definition, preview);
+        var approved = await fixture.Service.ApproveMirrorAsync(
+            request, TestContext.Current.CancellationToken);
+        Assert.Equal(preview.Id, approved.Job.Id);
+
+        await using var restarted = new AgentWorkspaceService(
+            fixture.Profiles,
+            fixture.Secrets,
+            fixture.HostKeyManager,
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.Jobs,
+            new MirrorPlanner(),
+            fixture.Options,
+            scheduler: fixture.Scheduler);
+        var rejected = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            restarted.ApproveMirrorAsync(request, TestContext.Current.CancellationToken));
+
+        Assert.Contains("already consumed", rejected.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == preview.Id);
+        fixture.ProcessHost.ReleaseTransferGate.TrySetResult(true);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == preview.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer" &&
+            item.Command.Contains("/gate-blocker", StringComparison.Ordinal) &&
+            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            !item.Command.Contains("--dry-run", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task TypeCollisionDeletionInNonDeletingMirrorRequiresApprovalAndSecondPreview()
     {
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Collision mirror", MirrorDirection.Download,
             fixture.Directory.Path, "/collision-review");
         var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
         Assert.True(preview.ContainsDeletions);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken));
+            MirrorApproval(session.SessionId, definition, preview), TestContext.Current.CancellationToken));
         var approved = await fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, preview.ApprovalToken, DeletionsApproved: true),
+            MirrorApproval(session.SessionId, definition, preview, deletionsApproved: true),
             TestContext.Current.CancellationToken);
         await WaitUntilAsync(
             () => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Completed,
@@ -1565,13 +2641,13 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Drift", MirrorDirection.Download,
             fixture.Directory.Path, "/drift", DeleteExtraneous: true);
         var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
 
         var approved = await fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, preview.ApprovalToken, DeletionsApproved: true), TestContext.Current.CancellationToken);
+            MirrorApproval(session.SessionId, definition, preview, deletionsApproved: true), TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Failed, TestContext.Current.CancellationToken);
         var failed = fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id);
 
@@ -1588,14 +2664,14 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Clean drift", MirrorDirection.Download,
             fixture.Directory.Path, "/clean-collision-drift");
         var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
         Assert.False(preview.ContainsDeletions);
 
         var approved = await fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken);
+            MirrorApproval(session.SessionId, definition, preview), TestContext.Current.CancellationToken);
         await WaitUntilAsync(
             () => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Failed,
             TestContext.Current.CancellationToken);
@@ -1617,14 +2693,14 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Remote ancestor drift", MirrorDirection.Download,
             fixture.Directory.Path, "/remote/mirror-link-ancestor/root");
         var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
         Assert.False(preview.ContainsDeletions);
 
         var approved = await fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken);
+            MirrorApproval(session.SessionId, definition, preview), TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Failed,
             TestContext.Current.CancellationToken);
 
@@ -1645,13 +2721,13 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var definition = new MirrorDefinition(Guid.NewGuid(), profile.Id, "Post-preview remote drift",
             MirrorDirection.Download, fixture.Directory.Path, "/remote/post-mirror-link-ancestor/root");
         var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
         Assert.False(preview.ContainsDeletions);
         var approved = await fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken);
+            MirrorApproval(session.SessionId, definition, preview), TestContext.Current.CancellationToken);
 
         await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Failed,
             TestContext.Current.CancellationToken);
@@ -1673,7 +2749,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
         var parent = Path.Combine(fixture.Directory.Path, "post-dryrun-parent");
         var localRoot = Path.Combine(parent, "child");
         Directory.CreateDirectory(localRoot);
@@ -1688,7 +2764,7 @@ public sealed class WorkspaceTests
             MirrorDirection.Download, localRoot, "/local-post-dryrun");
         var preview = await fixture.Service.PreviewMirrorAsync(new(session.SessionId, definition), TestContext.Current.CancellationToken);
         var approved = await fixture.Service.ApproveMirrorAsync(
-            new(session.SessionId, definition, preview.Id, preview.ApprovalToken), TestContext.Current.CancellationToken);
+            MirrorApproval(session.SessionId, definition, preview), TestContext.Current.CancellationToken);
         try
         {
             await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Failed,
@@ -1715,7 +2791,7 @@ public sealed class WorkspaceTests
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Sftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.ExecuteConsoleAsync(
             new(session.SessionId, "cat x | sh"), TestContext.Current.CancellationToken));
@@ -1723,6 +2799,126 @@ public sealed class WorkspaceTests
         var result = await fixture.Service.ExecuteConsoleAsync(new(session.SessionId, "pwd"), TestContext.Current.CancellationToken);
         Assert.Contains(result.Result.Lines, line => line.Line == "/remote/home");
         Assert.Equal(1, fixture.ProcessHost.Starts.Count(start => start.Tag == "console"));
+    }
+
+    [Fact]
+    public async Task DisconnectWaitsForAdmittedConsoleCreationBeforeDisposingPersistentRoles()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var console = fixture.Service.ExecuteConsoleAsync(
+            new(session.SessionId, "pwd"), TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var disconnect = fixture.Service.DisconnectAsync(
+            new(session.SessionId), TestContext.Current.CancellationToken);
+        Assert.False(disconnect.IsCompleted);
+
+        releaseStart.TrySetResult(true);
+        _ = await console;
+        Assert.True(await disconnect);
+        Assert.Contains("console", fixture.ProcessHost.DisposedRoles);
+        Assert.Contains("browse", fixture.ProcessHost.DisposedRoles);
+    }
+
+    [Theory]
+    [InlineData("mirror-preview")]
+    [InlineData("directory-transfer-preview")]
+    [InlineData("remote-edit-download")]
+    [InlineData("remote-edit-commit")]
+    public async Task SessionCloseWaitsForEveryAdmittedEphemeralRole(string role)
+    {
+        await using var fixture = new WorkspaceFixture();
+        await using var registry = new SessionRegistry(
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.HostKeyManager,
+            fixture.Options);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var snapshot = await registry.ConnectAsync(profile, null, TestContext.Current.CancellationToken);
+        var session = registry.Get(snapshot.SessionId);
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var operation = session.WithEphemeralSessionAsync(
+            role,
+            _ => Task.FromResult(true),
+            TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var disconnect = registry.DisconnectAsync(snapshot.SessionId);
+        Assert.False(disconnect.IsCompleted);
+
+        releaseStart.TrySetResult(true);
+        Assert.True(await operation);
+        Assert.True(await disconnect);
+        Assert.Contains(role, fixture.ProcessHost.DisposedRoles);
+        Assert.Contains("browse", fixture.ProcessHost.DisposedRoles);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => session.WithEphemeralSessionAsync(
+            role,
+            _ => Task.FromResult(true),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task RegistryCloseRejectsAndCleansAConnectionThatCompletesAfterAdmissionCloses()
+    {
+        await using var fixture = new WorkspaceFixture(createService: false);
+        await using var registry = new SessionRegistry(
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.HostKeyManager,
+            fixture.Options);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var connect = registry.ConnectAsync(profile, null, TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var close = registry.DisposeAsync().AsTask();
+        Assert.False(close.IsCompleted);
+
+        releaseStart.TrySetResult(true);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => connect);
+        await close;
+        Assert.Empty(registry.GetSnapshots());
+        Assert.Contains("browse", fixture.ProcessHost.DisposedRoles);
+    }
+
+    [Fact]
+    public async Task RegistryCloseAttemptsEverySessionAndRetainsOnlyFailedCleanupForRetry()
+    {
+        await using var fixture = new WorkspaceFixture(createService: false);
+        await using var registry = new SessionRegistry(
+            fixture.ProcessHost,
+            fixture.Runtime,
+            fixture.HostKeyManager,
+            fixture.Options);
+        var first = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var second = first with { Id = Guid.NewGuid(), Name = "Second", Host = "second.example" };
+        _ = await registry.ConnectAsync(first, null, TestContext.Current.CancellationToken);
+        _ = await registry.ConnectAsync(second, null, TestContext.Current.CancellationToken);
+        fixture.ProcessHost.FailDisposeRole = "browse";
+        fixture.ProcessHost.RemainingDisposeFailures = 1;
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => registry.DisposeAsync().AsTask());
+        Assert.Contains("simulated disposal failure", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(registry.GetSnapshots());
+        Assert.Single(fixture.ProcessHost.DisposedRoles, role => role == "browse");
+
+        fixture.ProcessHost.FailDisposeRole = null;
+        await registry.DisposeAsync();
+        Assert.Empty(registry.GetSnapshots());
+        Assert.Equal(2, fixture.ProcessHost.DisposedRoles.Count(role => role == "browse"));
     }
 
     [Fact]
@@ -1737,9 +2933,10 @@ public sealed class WorkspaceTests
         await fixture.Profiles.SaveAsync(sftp, TestContext.Current.CancellationToken);
 
         var fxp = await fixture.Service.PlanRemoteTransferAsync(new(ftp.Id, ftp2.Id, "/a", "/b"), TestContext.Current.CancellationToken);
-        var relay = await fixture.Service.PlanRemoteTransferAsync(new(ftp.Id, sftp.Id, "/a", "/b"), TestContext.Current.CancellationToken);
         Assert.Equal(RemoteTransferMode.Fxp, fxp.Mode);
-        Assert.Equal(RemoteTransferMode.ClientRelay, relay.Mode);
+        var relayBlocked = await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.PlanRemoteTransferAsync(
+            new(ftp.Id, sftp.Id, "/a", "/b"), TestContext.Current.CancellationToken));
+        Assert.Contains("separately pinned", relayBlocked.Message, StringComparison.OrdinalIgnoreCase);
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.EnqueueRemoteTransferAsync(
             new(fxp), TestContext.Current.CancellationToken));
     }
@@ -1752,8 +2949,8 @@ public sealed class WorkspaceTests
         var destination = fixture.PasswordProfile(ConnectionProtocol.Ftp, "Destination", "destination.example");
         await fixture.Service.SaveProfileAsync(new(source, "source-secret"), TestContext.Current.CancellationToken);
         await fixture.Service.SaveProfileAsync(new(destination, "destination-secret"), TestContext.Current.CancellationToken);
-        await fixture.Service.ConnectAsync(new(source.Id), TestContext.Current.CancellationToken);
-        await fixture.Service.ConnectAsync(new(destination.Id), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
         var plan = await fixture.Service.PlanRemoteTransferAsync(
             new(source.Id, destination.Id, "/source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
 
@@ -1783,10 +2980,10 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
-    public async Task RemoteTransferMarksClientRelayAndRejectsDirectoriesAndUnapprovedOverwrite()
+    public async Task ConcurrentDuplicateRemoteTransferEnqueuesConvergeOnOneJobAndProcess()
     {
         await using var fixture = new WorkspaceFixture();
-        var source = fixture.AnonymousProfile(ConnectionProtocol.Sftp);
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
         {
             Id = Guid.NewGuid(),
@@ -1795,8 +2992,217 @@ public sealed class WorkspaceTests
         };
         await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
         await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
-        await fixture.Service.ConnectAsync(new(source.Id), TestContext.Current.CancellationToken);
-        await fixture.Service.ConnectAsync(new(destination.Id), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var requests = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+        {
+            await release.Task;
+            return await fixture.Service.EnqueueRemoteTransferAsync(
+                new(plan), TestContext.Current.CancellationToken);
+        })).ToArray();
+
+        release.TrySetResult(true);
+        var results = await Task.WhenAll(requests);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+
+        Assert.All(results, result => Assert.Equal(plan.Id, result.Job.Id));
+        Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+        Assert.Single(fixture.ProcessHost.Starts, start => start.Tag == "remote-transfer");
+    }
+
+    [Fact]
+    public async Task WorkspaceBootstrapWaitsForInFlightRemoteTransferCommit()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+        var publicationEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePublication = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        EventHandler<JobSnapshot> handler = (_, job) =>
+        {
+            if (job.Id != plan.Id || job.State != JobState.Queued) return;
+            publicationEntered.TrySetResult(true);
+            releasePublication.Task.GetAwaiter().GetResult();
+        };
+        fixture.Jobs.JobChanged += handler;
+
+        try
+        {
+            var enqueue = Task.Run(() => fixture.Service.EnqueueRemoteTransferAsync(
+                new(plan), TestContext.Current.CancellationToken));
+            await publicationEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            var bootstrap = fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+            Assert.False(bootstrap.IsCompleted);
+
+            releasePublication.TrySetResult(true);
+            var enqueued = await enqueue;
+            var snapshot = await bootstrap;
+            Assert.Contains(snapshot.Jobs, job => job.Id == enqueued.Job.Id);
+        }
+        finally
+        {
+            releasePublication.TrySetResult(true);
+            fixture.Jobs.JobChanged -= handler;
+        }
+    }
+
+    [Fact]
+    public async Task RemoteTransferReplayAfterAgentRestartRejectsWithoutStartingAnotherProcess()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+        _ = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        await fixture.Service.DisposeAsync();
+
+        await using var restarted = new AgentWorkspaceService(
+            fixture.Profiles, fixture.Secrets, fixture.HostKeyManager, fixture.ProcessHost, fixture.Runtime,
+            fixture.Jobs, new MirrorPlanner(), fixture.Options, scheduler: fixture.Scheduler);
+        var replay = await Assert.ThrowsAsync<InvalidOperationException>(() => restarted.EnqueueRemoteTransferAsync(
+            new(plan), TestContext.Current.CancellationToken));
+
+        Assert.Contains("already consumed", replay.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+        Assert.Single(fixture.ProcessHost.Starts, start => start.Tag == "remote-transfer");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RemoteTransferPlanRejectsChangedProfileIdentityAfterReconnect(bool changeSource)
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        var sourceSession = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        var destinationSession = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+        Assert.True(await fixture.Service.DisconnectAsync(
+            new(sourceSession.SessionId), TestContext.Current.CancellationToken));
+        Assert.True(await fixture.Service.DisconnectAsync(
+            new(destinationSession.SessionId), TestContext.Current.CancellationToken));
+        var changed = (changeSource ? source : destination) with
+        {
+            Host = changeSource ? "changed-source.example" : "changed-destination.example",
+            UserName = "changed-user",
+        };
+        await fixture.Service.SaveProfileAsync(new(changed), TestContext.Current.CancellationToken);
+        var activeSource = changeSource ? changed : source;
+        var activeDestination = changeSource ? destination : changed;
+        await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(activeSource)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(activeDestination)), TestContext.Current.CancellationToken);
+
+        var identityChange = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken));
+        var replay = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken));
+
+        Assert.Contains("identity changed", identityChange.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("did not create a job", replay.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag == "remote-transfer");
+        Assert.DoesNotContain(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+    }
+
+    [Fact]
+    public async Task RemoteTransferTrackingFailureReturnsOneCommittedFailedJobInsteadOfARejection()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+        var dependencyField = typeof(AgentWorkspaceService).GetField(
+            "_activeJobProfileDependencies",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The active job dependency registry was not found.");
+        var dependencies = Assert.IsType<ConcurrentDictionary<Guid, ImmutableHashSet<Guid>>>(
+            dependencyField.GetValue(fixture.Service));
+        Assert.True(dependencies.TryAdd(plan.Id, ImmutableHashSet.Create(source.Id)));
+
+        try
+        {
+            var first = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
+            var replay = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
+
+            Assert.Equal(plan.Id, first.Job.Id);
+            Assert.Equal(JobState.Failed, first.Job.State);
+            Assert.Equal(first.Job, replay.Job);
+            Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+            Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag == "remote-transfer");
+        }
+        finally
+        {
+            dependencies.TryRemove(plan.Id, out _);
+        }
+    }
+
+    [Fact]
+    public async Task RemoteTransferRejectsDirectoriesUnapprovedOverwriteAndForgedRoutingMode()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
 
         var directoryPlan = await fixture.Service.PlanRemoteTransferAsync(
             new(source.Id, destination.Id, "/source-folder", "/new-target.bin"), TestContext.Current.CancellationToken);
@@ -1806,19 +3212,83 @@ public sealed class WorkspaceTests
             new(source.Id, destination.Id, "/source.bin", "/existing.bin"), TestContext.Current.CancellationToken);
         await Assert.ThrowsAsync<IOException>(() => fixture.Service.EnqueueRemoteTransferAsync(
             new(collisionPlan), TestContext.Current.CancellationToken));
+        var replayedCollision = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.EnqueueRemoteTransferAsync(
+            new(collisionPlan), TestContext.Current.CancellationToken));
+        Assert.Contains("did not create a job", replayedCollision.Message, StringComparison.OrdinalIgnoreCase);
 
         var relayPlan = await fixture.Service.PlanRemoteTransferAsync(
             new(source.Id, destination.Id, "/source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
         await Assert.ThrowsAsync<ArgumentException>(() => fixture.Service.EnqueueRemoteTransferAsync(
-            new(relayPlan with { Mode = RemoteTransferMode.Fxp }), TestContext.Current.CancellationToken));
+            new(relayPlan with { Mode = RemoteTransferMode.ClientRelay }), TestContext.Current.CancellationToken));
         var enqueued = await fixture.Service.EnqueueRemoteTransferAsync(new(relayPlan), TestContext.Current.CancellationToken);
         await WaitUntilAsync(
             () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Completed,
             TestContext.Current.CancellationToken);
-        Assert.Equal(RemoteTransferMode.ClientRelay, enqueued.Mode);
-        Assert.Contains("Client-relay", enqueued.RoutingNote, StringComparison.Ordinal);
+        Assert.Equal(RemoteTransferMode.Fxp, enqueued.Mode);
+        Assert.Contains("FXP preferred", enqueued.RoutingNote, StringComparison.Ordinal);
         Assert.Contains(fixture.ProcessHost.Commands,
-            command => command.StartsWith("set ftp:use-fxp false", StringComparison.Ordinal));
+            command => command.StartsWith("set ftp:use-fxp true", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RemoteTransferPublicationCannotRaceEitherProfileRemovalBeforeDependencyRegistration()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        var sourceSession = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        var destinationSession = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/blocking-r2r.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+        var published = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePublication = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        EventHandler<JobSnapshot> handler = (_, job) =>
+        {
+            if (job.Kind != JobKind.RemoteTransfer || job.State != JobState.Queued) return;
+            published.TrySetResult(true);
+            releasePublication.Task.GetAwaiter().GetResult();
+        };
+        fixture.Jobs.JobChanged += handler;
+
+        try
+        {
+            var enqueue = Task.Run(() => fixture.Service.EnqueueRemoteTransferAsync(
+                new(plan), TestContext.Current.CancellationToken));
+            await published.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            var disconnect = fixture.Service.DisconnectAsync(
+                new(destinationSession.SessionId), TestContext.Current.CancellationToken);
+            var delete = fixture.Service.DeleteProfileAsync(
+                new(source.Id), TestContext.Current.CancellationToken);
+            Assert.False(disconnect.IsCompleted);
+            Assert.False(delete.IsCompleted);
+
+            releasePublication.TrySetResult(true);
+            var enqueued = await enqueue;
+            var disconnectBlocked = await Assert.ThrowsAsync<InvalidOperationException>(() => disconnect);
+            var deleteBlocked = await Assert.ThrowsAsync<InvalidOperationException>(() => delete);
+            Assert.Contains("jobs", disconnectBlocked.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("jobs", deleteBlocked.Message, StringComparison.OrdinalIgnoreCase);
+            var bootstrap = await fixture.Service.BootstrapAsync(TestContext.Current.CancellationToken);
+            Assert.Contains(bootstrap.Sessions,
+                session => session.SessionId == sourceSession.SessionId);
+
+            Assert.True(fixture.Service.TryCancelOperation(enqueued.Job.Id, "Test cleanup"));
+            await WaitUntilAsync(
+                () => fixture.ProcessHost.DisposedRoles.Contains("remote-transfer"),
+                TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            releasePublication.TrySetResult(true);
+            fixture.Jobs.JobChanged -= handler;
+        }
     }
 
     [Fact]
@@ -1834,23 +3304,89 @@ public sealed class WorkspaceTests
         };
         await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
         await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
-        await fixture.Service.ConnectAsync(new(source.Id), TestContext.Current.CancellationToken);
-        await fixture.Service.ConnectAsync(new(destination.Id), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        var destinationSession = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
         var plan = await fixture.Service.PlanRemoteTransferAsync(
             new(source.Id, destination.Id, "/blocking-r2r.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+        fixture.ProcessHost.BlockDisposeRole = "remote-transfer";
         var enqueued = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
         await WaitUntilAsync(
             () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Running,
             TestContext.Current.CancellationToken);
+
+        var disconnectBlocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.DisconnectAsync(
+            new(destinationSession.SessionId), TestContext.Current.CancellationToken));
+        Assert.Contains("jobs", disconnectBlocked.Message, StringComparison.OrdinalIgnoreCase);
+        var deleteBlocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.DeleteProfileAsync(
+            new(destination.Id), TestContext.Current.CancellationToken));
+        Assert.Contains("jobs", deleteBlocked.Message, StringComparison.OrdinalIgnoreCase);
 
         Assert.True(fixture.Service.TryCancelOperation(enqueued.Job.Id, "User cancelled remote transfer"));
         await WaitUntilAsync(
             () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Cancelled,
             TestContext.Current.CancellationToken);
         Assert.Equal("User cancelled remote transfer", fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).Status);
+        await fixture.ProcessHost.DisposeEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        Assert.DoesNotContain("remote-transfer", fixture.ProcessHost.DisposedRoles);
+        var cleanupDisconnectBlocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.DisconnectAsync(
+            new(destinationSession.SessionId), TestContext.Current.CancellationToken));
+        var cleanupDeleteBlocked = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.DeleteProfileAsync(
+            new(source.Id), TestContext.Current.CancellationToken));
+        Assert.Contains("jobs", cleanupDisconnectBlocked.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("jobs", cleanupDeleteBlocked.Message, StringComparison.OrdinalIgnoreCase);
+
+        fixture.ProcessHost.ReleaseDispose.TrySetResult(true);
         await WaitUntilAsync(
             () => fixture.ProcessHost.DisposedRoles.Contains("remote-transfer"),
             TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task CancellationSourceCannotBeDisposedAfterTheJobTransitionsButBeforeCancelSignals()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/completion-before-cancel.bin", "/new-target.bin"),
+            TestContext.Current.CancellationToken);
+        var enqueued = await fixture.Service.EnqueueRemoteTransferAsync(
+            new(plan), TestContext.Current.CancellationToken);
+        await fixture.ProcessHost.TransferGateEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        EventHandler<JobSnapshot> handler = (_, job) =>
+        {
+            if (job.Id != enqueued.Job.Id || job.State != JobState.Cancelled) return;
+            fixture.ProcessHost.ReleaseTransferGate.TrySetResult(true);
+            if (!SpinWait.SpinUntil(
+                () => fixture.ProcessHost.DisposedRoles.Contains("remote-transfer"),
+                TimeSpan.FromSeconds(2)))
+            {
+                throw new TimeoutException("The remote-transfer process did not finish before cancellation publication returned.");
+            }
+        };
+        fixture.Jobs.JobChanged += handler;
+
+        try
+        {
+            Assert.True(fixture.Service.TryCancelOperation(enqueued.Job.Id, "Deterministic cancellation race"));
+            Assert.Equal(JobState.Cancelled, fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State);
+        }
+        finally
+        {
+            fixture.ProcessHost.ReleaseTransferGate.TrySetResult(true);
+            fixture.Jobs.JobChanged -= handler;
+        }
     }
 
     [Fact]
@@ -1866,8 +3402,8 @@ public sealed class WorkspaceTests
         };
         await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
         await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
-        await fixture.Service.ConnectAsync(new(source.Id), TestContext.Current.CancellationToken);
-        await fixture.Service.ConnectAsync(new(destination.Id), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
         var plan = await fixture.Service.PlanRemoteTransferAsync(
             new(source.Id, destination.Id, "/failing-r2r.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
         var enqueued = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
@@ -1881,6 +3417,208 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
+    public async Task DisposalWaitsForAnAdmittedConnectRequestAndRejectsNewRequests()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var connect = fixture.Service.HandleAsync(
+            WorkspaceMethods.SessionConnect,
+            JsonSerializer.SerializeToElement(new SessionConnectRequest(ConnectionIdentity.FromProfile(profile)), FramedJsonStream.SerializerOptions),
+            TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        try
+        {
+            var disposal = fixture.Service.DisposeAsync().AsTask();
+            Assert.False(disposal.IsCompleted);
+            await Assert.ThrowsAsync<ObjectDisposedException>(() => fixture.Service.HandleAsync(
+                WorkspaceMethods.ProfileList,
+                JsonSerializer.SerializeToElement(new { }, FramedJsonStream.SerializerOptions),
+                TestContext.Current.CancellationToken));
+
+            releaseStart.TrySetResult(true);
+            var connected = (await connect).Deserialize<SessionSnapshot>(FramedJsonStream.SerializerOptions);
+            Assert.NotNull(connected);
+            await disposal.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+            Assert.Contains("browse", fixture.ProcessHost.DisposedRoles);
+            Assert.Equal(
+                fixture.ProcessHost.Starts.Count(start => start.Tag == "browse"),
+                fixture.ProcessHost.DisposedRoles.Count(role => role == "browse"));
+        }
+        finally
+        {
+            releaseStart.TrySetResult(true);
+        }
+    }
+
+    [Fact]
+    public async Task DisposalWaitsForAnAdmittedJobToBeTrackedBeforeTakingItsOperationSnapshot()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(),
+            profile.Id,
+            TransferDirection.Download,
+            "/remote/file.bin",
+            Path.Combine(fixture.Directory.Path, "dispose-admission.bin"));
+        var published = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePublication = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        EventHandler<JobSnapshot> handler = (_, job) =>
+        {
+            if (job.Kind != JobKind.Transfer || job.State != JobState.Queued) return;
+            published.TrySetResult(true);
+            releasePublication.Task.GetAwaiter().GetResult();
+        };
+        fixture.Jobs.JobChanged += handler;
+
+        try
+        {
+            var enqueue = Task.Run(() => fixture.Service.HandleAsync(
+                WorkspaceMethods.TransferEnqueue,
+                JsonSerializer.SerializeToElement(
+                    new TransferEnqueueRequest(session.SessionId, plan),
+                    FramedJsonStream.SerializerOptions),
+                TestContext.Current.CancellationToken));
+            await published.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            var disposal = fixture.Service.DisposeAsync().AsTask();
+            Assert.False(disposal.IsCompleted);
+
+            releasePublication.TrySetResult(true);
+            var result = (await enqueue).Deserialize<TransferEnqueueResult>(FramedJsonStream.SerializerOptions);
+            Assert.NotNull(result);
+            await disposal.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+            Assert.Equal(
+                JobState.Cancelled,
+                fixture.Jobs.GetJobs().Single(job => job.Id == result.Job.Id).State);
+            Assert.Contains("browse", fixture.ProcessHost.DisposedRoles);
+        }
+        finally
+        {
+            releasePublication.TrySetResult(true);
+            fixture.Jobs.JobChanged -= handler;
+        }
+    }
+
+    [Fact]
+    public async Task DisposalWaitsForAnAdmittedRemoteEditToBeRegisteredBeforeCleanup()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var startEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStart = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.ProcessHost.StartEntered = startEntered;
+        fixture.ProcessHost.ReleaseStart = releaseStart;
+
+        var start = fixture.Service.HandleAsync(
+            WorkspaceMethods.RemoteEditStart,
+            JsonSerializer.SerializeToElement(
+                new RemoteEditStartRequest(session.SessionId, "/active.txt"),
+                FramedJsonStream.SerializerOptions),
+            TestContext.Current.CancellationToken);
+        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        try
+        {
+            var disposal = fixture.Service.DisposeAsync().AsTask();
+            Assert.False(disposal.IsCompleted);
+
+            releaseStart.TrySetResult(true);
+            var edit = (await start).Deserialize<RemoteEditSession>(FramedJsonStream.SerializerOptions);
+            Assert.NotNull(edit);
+            await disposal.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+            Assert.False(File.Exists(edit.LocalPath));
+            Assert.Contains("remote-edit-download", fixture.ProcessHost.DisposedRoles);
+            Assert.Contains("browse", fixture.ProcessHost.DisposedRoles);
+        }
+        finally
+        {
+            releaseStart.TrySetResult(true);
+        }
+    }
+
+    [Fact]
+    public async Task VersionedPipeHostKeyReviewExposesOnlyFingerprintsAndApprovalToken()
+    {
+        await using var fixture = new WorkspaceFixture(createService: false);
+        fixture.HostKeys.AutoTrust = false;
+        await using var host = new AgentHost(
+            Path.Combine(fixture.Directory.Path, "host-key-pipe-jobs.json"),
+            profileStore: fixture.Profiles,
+            secretStore: fixture.Secrets,
+            hostKeyManager: fixture.HostKeyManager,
+            processHost: fixture.ProcessHost,
+            runtimeProvider: fixture.Runtime,
+            mirrorPlanner: new MirrorPlanner(),
+            workspaceOptions: fixture.Options);
+        var run = host.RunAsync(TestContext.Current.CancellationToken);
+        await using var client = new NamedPipeEngineClient(Environment.ProcessId);
+        var profile = fixture.PasswordProfile();
+        var blockedCredential = await Assert.ThrowsAsync<EngineRequestRejectedException>(() => client.RequestAsync(
+            WorkspaceMethods.ProfileSave,
+            new ProfileSaveRequest(profile, "must-not-cross-before-trust"),
+            TestContext.Current.CancellationToken));
+        Assert.Contains("metadata without a credential", blockedCredential.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fixture.Secrets.Values);
+        Assert.Empty(await fixture.Profiles.GetAllAsync(TestContext.Current.CancellationToken));
+        _ = await client.RequestAsync(
+            WorkspaceMethods.ProfileSave,
+            new ProfileSaveRequest(profile),
+            TestContext.Current.CancellationToken);
+        var untrustedCredential = await Assert.ThrowsAsync<EngineRequestRejectedException>(() => client.RequestAsync(
+            WorkspaceMethods.ProfileSave,
+            new ProfileSaveRequest(profile, "still-must-not-cross-before-trust"),
+            TestContext.Current.CancellationToken));
+        Assert.Contains("approved host key", untrustedCredential.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fixture.Secrets.Values);
+
+        var expectedKey = CreateTestHostKey(SftpHostKeyManager.CreateBinding(profile));
+        var inspectionElement = await client.RequestAsync(
+            WorkspaceMethods.SftpHostKeyInspect,
+            new SftpHostKeyInspectRequest(ConnectionIdentity.FromProfile(profile)),
+            TestContext.Current.CancellationToken);
+        var inspectionFields = EnumerateJsonFields(inspectionElement).ToArray();
+        var inspection = inspectionElement.Deserialize<SftpHostKeyInspection>(FramedJsonStream.SerializerOptions)!;
+        var review = Assert.IsType<SftpHostKeyReview>(inspection.Review);
+        Assert.Equal(expectedKey.FingerprintSha256, review.PresentedFingerprintSha256);
+        Assert.Contains(inspectionFields, field =>
+            field.Name == "presentedFingerprintSha256" && field.StringValue == review.PresentedFingerprintSha256);
+        Assert.Contains(inspectionFields, field =>
+            field.Name == "approvalToken" && field.StringValue == review.ApprovalToken);
+        Assert.DoesNotContain(inspectionFields, field =>
+            field.Name.Contains("publicKey", StringComparison.OrdinalIgnoreCase) ||
+            field.StringValue == expectedKey.PublicKeyBase64);
+
+        var approvalElement = await client.RequestAsync(
+            WorkspaceMethods.SftpHostKeyApprove,
+            new SftpHostKeyApproveRequest(profile.Id, review.ReviewId, review.ApprovalToken),
+            TestContext.Current.CancellationToken);
+        var approvalFields = EnumerateJsonFields(approvalElement).ToArray();
+        var approval = approvalElement.Deserialize<SftpHostKeyApproveResult>(FramedJsonStream.SerializerOptions)!;
+        Assert.Equal(expectedKey.FingerprintSha256, approval.FingerprintSha256);
+        Assert.Contains(approvalFields, field =>
+            field.Name == "fingerprintSha256" && field.StringValue == expectedKey.FingerprintSha256);
+        Assert.DoesNotContain(approvalFields, field =>
+            field.Name.Contains("publicKey", StringComparison.OrdinalIgnoreCase) ||
+            field.StringValue == expectedKey.PublicKeyBase64 ||
+            field.StringValue == review.ApprovalToken);
+
+        _ = await client.RequestAsync(AgentProtocol.StopMethod, cancellationToken: TestContext.Current.CancellationToken);
+        await run.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task VersionedPipeExposesWorkspaceMethods()
     {
         await using var fixture = new WorkspaceFixture(createService: false);
@@ -1888,6 +3626,7 @@ public sealed class WorkspaceTests
             Path.Combine(fixture.Directory.Path, "jobs.json"),
             profileStore: fixture.Profiles,
             secretStore: fixture.Secrets,
+            hostKeyManager: fixture.HostKeyManager,
             processHost: fixture.ProcessHost,
             runtimeProvider: fixture.Runtime,
             mirrorPlanner: new MirrorPlanner(),
@@ -1904,16 +3643,16 @@ public sealed class WorkspaceTests
         Assert.Equal(AgentProtocol.CurrentVersion, bootstrap?.ProtocolVersion);
         Assert.True(bootstrap?.Runtime.Available);
         var directJob = JobCoordinatorTests.Job(JobState.Queued);
-        var enqueueError = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var enqueueError = await Assert.ThrowsAsync<EngineRequestRejectedException>(() =>
             client.RequestAsync("jobs.enqueue", directJob, TestContext.Current.CancellationToken));
         Assert.Contains("Direct job creation is disabled", enqueueError.Message, StringComparison.Ordinal);
-        var transitionError = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var transitionError = await Assert.ThrowsAsync<EngineRequestRejectedException>(() =>
             client.RequestAsync("jobs.transition", new JobTransitionRequest(directJob.Id, JobState.Running), TestContext.Current.CancellationToken));
         Assert.Contains("Direct job mutation is disabled", transitionError.Message, StringComparison.Ordinal);
-        var connected = (await client.RequestAsync(WorkspaceMethods.SessionConnect, new SessionConnectRequest(profile.Id), TestContext.Current.CancellationToken))
+        var connected = (await client.RequestAsync(WorkspaceMethods.SessionConnect, new SessionConnectRequest(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken))
             .Deserialize<SessionSnapshot>(FramedJsonStream.SerializerOptions);
         Assert.True(connected?.IsConnected);
-        var retryError = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var retryError = await Assert.ThrowsAsync<EngineRequestRejectedException>(() =>
             client.RequestAsync(WorkspaceMethods.JobRetry, new JobRetryRequest(Guid.NewGuid()), TestContext.Current.CancellationToken));
         Assert.Contains("not found", retryError.Message, StringComparison.OrdinalIgnoreCase);
         stop.Cancel();
@@ -1936,6 +3675,7 @@ public sealed class WorkspaceTests
             Path.Combine(fixture.Directory.Path, "paged-jobs.json"),
             profileStore: fixture.Profiles,
             secretStore: fixture.Secrets,
+            hostKeyManager: fixture.HostKeyManager,
             processHost: fixture.ProcessHost,
             runtimeProvider: fixture.Runtime,
             mirrorPlanner: new MirrorPlanner(),
@@ -1986,6 +3726,21 @@ public sealed class WorkspaceTests
         Assert.Equal("target.txt", entries[2].LinkTarget);
     }
 
+    private static MirrorApproveRequest MirrorApproval(
+        Guid sessionId,
+        MirrorDefinition definition,
+        MirrorPreview preview,
+        bool deletionsApproved = false,
+        string? approvalToken = null,
+        MirrorPreview? reviewedPreview = null) =>
+        new(
+            sessionId,
+            definition,
+            preview.Id,
+            approvalToken ?? preview.ApprovalToken,
+            MirrorPlanner.ReviewFingerprint(reviewedPreview ?? preview),
+            deletionsApproved);
+
     private static async Task WaitUntilAsync(Func<bool> condition, CancellationToken cancellationToken)
     {
         var deadline = DateTimeOffset.UtcNow.AddSeconds(3);
@@ -2015,15 +3770,21 @@ public sealed class WorkspaceTests
 
     private sealed class WorkspaceFixture : IAsyncDisposable
     {
-        public WorkspaceFixture(bool createService = true, TimeProvider? timeProvider = null)
+        public WorkspaceFixture(
+            bool createService = true,
+            TimeProvider? timeProvider = null,
+            string? durableStorePath = null)
         {
             Directory = new();
             Profiles = new();
             Secrets = new();
+            HostKeys = new();
+            HostKeyProbe = new();
+            HostKeyManager = new(HostKeys, HostKeyProbe, timeProvider);
             ProcessHost = new();
             Runtime = new();
             Jobs = new();
-            Store = new(Path.Combine(Directory.Path, "jobs.json"));
+            Store = new(durableStorePath ?? Path.Combine(Directory.Path, "jobs.json"));
             Scheduler = new(Jobs, Store, timeProvider);
             Options = AgentWorkspaceOptions.CreateDefault(Directory.Path) with
             {
@@ -2034,13 +3795,16 @@ public sealed class WorkspaceTests
                 ConsoleTimeout = TimeSpan.FromSeconds(1),
             };
             Service = createService
-                ? new(Profiles, Secrets, ProcessHost, Runtime, Jobs, new MirrorPlanner(), Options, scheduler: Scheduler)
+                ? new(Profiles, Secrets, HostKeyManager, ProcessHost, Runtime, Jobs, new MirrorPlanner(), Options, scheduler: Scheduler)
                 : null!;
         }
 
         public TestDirectory Directory { get; }
         public MemoryProfileStore Profiles { get; }
         public MemorySecretStore Secrets { get; }
+        public MemoryHostKeyStore HostKeys { get; }
+        public FakeSshHostKeyProbe HostKeyProbe { get; }
+        public SftpHostKeyManager HostKeyManager { get; }
         public FakeProcessHost ProcessHost { get; }
         public FakeRuntimeProvider Runtime { get; }
         public JobCoordinator Jobs { get; }
@@ -2062,6 +3826,8 @@ public sealed class WorkspaceTests
         {
             ProcessHost.ReleaseReservedQueueSlots.TrySetResult(true);
             ProcessHost.ReleaseTransferGate.TrySetResult(true);
+            ProcessHost.ReleaseStart?.TrySetResult(true);
+            ProcessHost.ReleaseDispose.TrySetResult(true);
             await Scheduler.DisposeAsync();
             if (Service is not null) await Service.DisposeAsync();
             Directory.Dispose();
@@ -2071,6 +3837,8 @@ public sealed class WorkspaceTests
     private sealed class MemoryProfileStore : IProfileStore
     {
         private readonly ConcurrentDictionary<Guid, ConnectionProfile> _profiles = [];
+        public Exception? SaveFailure { get; set; }
+        public Exception? DeleteFailure { get; set; }
         public Task<IReadOnlyList<ConnectionProfile>> GetAllAsync(CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -2079,12 +3847,14 @@ public sealed class WorkspaceTests
         public Task SaveAsync(ConnectionProfile profile, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (SaveFailure is not null) return Task.FromException(SaveFailure);
             _profiles[profile.Id] = profile;
             return Task.CompletedTask;
         }
         public Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (DeleteFailure is not null) return Task.FromException(DeleteFailure);
             _profiles.TryRemove(profileId, out _);
             return Task.CompletedTask;
         }
@@ -2093,6 +3863,7 @@ public sealed class WorkspaceTests
     private sealed class MemorySecretStore : ISecretStore
     {
         public ConcurrentDictionary<string, string> Values { get; } = [];
+        public ConcurrentBag<SecretBinding> GetCalls { get; } = [];
         public Task SaveAsync(SecretValue secret, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -2102,6 +3873,7 @@ public sealed class WorkspaceTests
         public Task<string?> GetAsync(SecretBinding binding, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            GetCalls.Add(binding);
             return Task.FromResult(Values.TryGetValue(binding.CanonicalIdentity, out var value) ? value : null);
         }
         public Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default)
@@ -2110,6 +3882,83 @@ public sealed class WorkspaceTests
             foreach (var key in Values.Keys.Where(key => key.StartsWith(profileId.ToString("N"), StringComparison.Ordinal))) Values.TryRemove(key, out _);
             return Task.CompletedTask;
         }
+    }
+
+    private static IEnumerable<(string Name, string? StringValue)> EnumerateJsonFields(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                yield return (property.Name,
+                    property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() : null);
+                foreach (var nested in EnumerateJsonFields(property.Value)) yield return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+                foreach (var nested in EnumerateJsonFields(item)) yield return nested;
+        }
+    }
+
+    private sealed class MemoryHostKeyStore : IHostKeyStore
+    {
+        private readonly ConcurrentDictionary<HostKeyBinding, TrustedSftpHostKey> _keys = [];
+
+        public bool AutoTrust { get; set; } = true;
+
+        public Task<TrustedSftpHostKey?> GetAsync(HostKeyBinding binding, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_keys.TryGetValue(binding, out var key)) return Task.FromResult<TrustedSftpHostKey?>(key);
+            return Task.FromResult<TrustedSftpHostKey?>(AutoTrust ? CreateTestHostKey(binding) : null);
+        }
+
+        public Task SaveAsync(TrustedSftpHostKey key, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _keys[key.Binding] = key;
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var binding in _keys.Keys.Where(binding => binding.ProfileId == profileId))
+                _keys.TryRemove(binding, out _);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeSshHostKeyProbe : ISshHostKeyProbe
+    {
+        public ConcurrentBag<(Guid ProfileId, string Alias)> Calls { get; } = [];
+        public byte KeyMarker { get; set; } = 0x42;
+
+        public Task<TrustedSftpHostKey> ProbeAsync(
+            ConnectionProfile profile,
+            string hostKeyAlias,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Calls.Add((profile.Id, hostKeyAlias));
+            return Task.FromResult(CreateTestHostKey(SftpHostKeyManager.CreateBinding(profile), KeyMarker));
+        }
+    }
+
+    private static TrustedSftpHostKey CreateTestHostKey(HostKeyBinding binding, byte marker = 0x42)
+    {
+        const string algorithm = "ssh-ed25519";
+        var algorithmBytes = Encoding.ASCII.GetBytes(algorithm);
+        var blob = new byte[4 + algorithmBytes.Length + 4 + 32];
+        BinaryPrimitives.WriteUInt32BigEndian(blob.AsSpan(0, 4), (uint)algorithmBytes.Length);
+        algorithmBytes.CopyTo(blob.AsSpan(4));
+        BinaryPrimitives.WriteUInt32BigEndian(blob.AsSpan(4 + algorithmBytes.Length, 4), 32);
+        blob.AsSpan(8 + algorithmBytes.Length).Fill(marker);
+        var encoded = Convert.ToBase64String(blob);
+        var fingerprint = "SHA256:" + Convert.ToBase64String(SHA256.HashData(blob)).TrimEnd('=');
+        return new(binding, algorithm, encoded, fingerprint);
     }
 
     private sealed class FakeRuntimeProvider : ILftpRuntimeProvider
@@ -2137,21 +3986,52 @@ public sealed class WorkspaceTests
         public TaskCompletionSource<bool> ReleaseTransferGate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> ValidationGateEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> ScheduledValidationEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool>? StartEntered { get; set; }
+        public TaskCompletionSource<bool>? ReleaseStart { get; set; }
+        public string? BlockDisposeRole { get; set; }
+        public string? FailDisposeRole { get; set; }
+        public int RemainingDisposeFailures
+        {
+            get => Volatile.Read(ref _remainingDisposeFailures);
+            set => Volatile.Write(ref _remainingDisposeFailures, value);
+        }
+        public TaskCompletionSource<bool> DisposeEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseDispose { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Action? FinalDryRunAction { get; set; }
         public string? FailRolePrefix { get; set; }
 
-        public Task<ILftpSession> StartAsync(LftpProcessStartOptions options, CancellationToken cancellationToken = default)
+        public async Task<ILftpSession> StartAsync(LftpProcessStartOptions options, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (FailRolePrefix is not null && options.Tag.StartsWith(FailRolePrefix, StringComparison.Ordinal))
                 throw new System.ComponentModel.Win32Exception("simulated process launch failure");
             Starts.Add(options);
-            return Task.FromResult<ILftpSession>(new FakeSession(
+            var startEntered = StartEntered;
+            var releaseStart = ReleaseStart;
+            StartEntered = null;
+            startEntered?.TrySetResult(true);
+            if (releaseStart is not null)
+                await releaseStart.Task.WaitAsync(cancellationToken);
+            if (ReferenceEquals(ReleaseStart, releaseStart)) ReleaseStart = null;
+            return new FakeSession(
                 Interlocked.Increment(ref _nextId), options.Tag, Commands, TaggedCommands, StoppedRoles, DisposedRoles,
                 _queueAttempts, _statAttempts, QueueSlotsFilled, ReleaseReservedQueueSlots,
                 TransferGateEntered, ReleaseTransferGate, ValidationGateEntered, ScheduledValidationEntered,
-                () => FinalDryRunAction));
+                () => FinalDryRunAction, () => BlockDisposeRole, ShouldFailDispose, DisposeEntered, ReleaseDispose);
         }
+
+        private bool ShouldFailDispose(string role)
+        {
+            if (!string.Equals(FailDisposeRole, role, StringComparison.Ordinal)) return false;
+            while (true)
+            {
+                var remaining = Volatile.Read(ref _remainingDisposeFailures);
+                if (remaining <= 0) return false;
+                if (Interlocked.CompareExchange(ref _remainingDisposeFailures, remaining - 1, remaining) == remaining) return true;
+            }
+        }
+
+        private int _remainingDisposeFailures;
     }
 
     private sealed class FakeSession(
@@ -2169,7 +4049,11 @@ public sealed class WorkspaceTests
         TaskCompletionSource<bool> releaseTransferGate,
         TaskCompletionSource<bool> validationGateEntered,
         TaskCompletionSource<bool> scheduledValidationEntered,
-        Func<Action?> finalDryRunAction) : ILftpSession
+        Func<Action?> finalDryRunAction,
+        Func<string?> blockDisposeRole,
+        Func<string, bool> failDispose,
+        TaskCompletionSource<bool> disposeEntered,
+        TaskCompletionSource<bool> releaseDispose) : ILftpSession
     {
         public int ProcessId { get; } = processId;
         public bool IsRunning { get; private set; } = true;
@@ -2214,6 +4098,11 @@ public sealed class WorkspaceTests
             }
             if (role == "remote-transfer" && command.Contains("blocking-r2r.bin", StringComparison.Ordinal))
                 return WaitForCancellationAsync(cancellationToken);
+            if (role == "remote-transfer" && command.Contains("completion-before-cancel.bin", StringComparison.Ordinal))
+            {
+                transferGateEntered.TrySetResult(true);
+                return WaitForReleaseAsync(releaseTransferGate.Task, cancellationToken);
+            }
             if (role == "transfer" && command.Contains("mirror", StringComparison.Ordinal) &&
                 !command.Contains("--dry-run", StringComparison.Ordinal) &&
                 command.Contains("/gate-blocker", StringComparison.Ordinal))
@@ -2516,11 +4405,16 @@ public sealed class WorkspaceTests
             return Task.CompletedTask;
         }
 
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
+            if (failDispose(role)) throw new InvalidOperationException($"Simulated disposal failure for {role}.");
             IsRunning = false;
+            if (string.Equals(blockDisposeRole(), role, StringComparison.Ordinal))
+            {
+                disposeEntered.TrySetResult(true);
+                await releaseDispose.Task;
+            }
             disposedRoles.Add(role);
-            return ValueTask.CompletedTask;
         }
 
         public void Raise(LftpOutputLine line)

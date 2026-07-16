@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
@@ -80,14 +81,67 @@ public sealed partial class MirrorPlanner : IMirrorPlanner, IDisposable
     public static string Fingerprint(MirrorDefinition definition)
     {
         PlanValidator.Validate(definition);
-        var canonical = string.Join('\u001f',
-            definition.Id.ToString("N"), definition.ProfileId.ToString("N"), definition.Name,
-            definition.Direction.ToString(), definition.LocalRoot, definition.RemoteRoot,
-            definition.DeleteExtraneous.ToString(), definition.ParallelFiles.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            definition.SegmentsPerFile.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            definition.RateLimitBytesPerSecond?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
-            string.Join('\u001e', definition.EffectiveIncludes), string.Join('\u001e', definition.EffectiveExcludes));
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendString(hash, "LFTPPilot.MirrorDefinition.v1");
+        AppendGuid(hash, definition.Id);
+        AppendGuid(hash, definition.ProfileId);
+        AppendString(hash, definition.Name);
+        AppendInt32(hash, (int)definition.Direction);
+        AppendString(hash, definition.LocalRoot);
+        AppendString(hash, definition.RemoteRoot);
+        AppendInt32(hash, definition.EffectiveIncludes.Length);
+        foreach (var include in definition.EffectiveIncludes) AppendString(hash, include);
+        AppendInt32(hash, definition.EffectiveExcludes.Length);
+        foreach (var exclude in definition.EffectiveExcludes) AppendString(hash, exclude);
+        AppendInt32(hash, definition.DeleteExtraneous ? 1 : 0);
+        AppendInt32(hash, definition.ParallelFiles);
+        AppendInt32(hash, definition.SegmentsPerFile);
+        if (definition.RateLimitBytesPerSecond is { } rateLimit)
+        {
+            AppendInt32(hash, 1);
+            AppendInt64(hash, rateLimit);
+        }
+        else
+        {
+            AppendInt32(hash, 0);
+        }
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    public static string ReviewFingerprint(MirrorPreview preview)
+    {
+        ArgumentNullException.ThrowIfNull(preview);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendGuid(hash, preview.Id);
+        AppendGuid(hash, preview.DefinitionId);
+        AppendInt64(hash, preview.GeneratedAt.UtcTicks);
+        AppendInt64(hash, preview.GeneratedAt.Offset.Ticks);
+        AppendInt64(hash, preview.ExpiresAt.UtcTicks);
+        AppendInt64(hash, preview.ExpiresAt.Offset.Ticks);
+        AppendString(hash, preview.DefinitionFingerprint);
+        AppendInt32(hash, preview.Actions.IsDefault ? -1 : preview.Actions.Length);
+        if (!preview.Actions.IsDefault)
+        {
+            foreach (var action in preview.Actions)
+            {
+                if (action is null)
+                {
+                    AppendInt32(hash, -1);
+                    continue;
+                }
+                AppendInt32(hash, (int)action.Kind);
+                AppendString(hash, action.Path);
+                if (action.Detail is null)
+                {
+                    AppendInt32(hash, -1);
+                }
+                else
+                {
+                    AppendString(hash, action.Detail);
+                }
+            }
+        }
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
 
     public void Dispose()
@@ -241,9 +295,41 @@ public sealed partial class MirrorPlanner : IMirrorPlanner, IDisposable
 
     private string CreateToken(MirrorPreview preview)
     {
-        var actions = string.Join('\u001e', preview.Actions.Select(static action => $"{action.Kind}:{action.Path}:{action.Detail}"));
-        var input = Encoding.UTF8.GetBytes($"{preview.Id:N}|{preview.DefinitionId:N}|{preview.GeneratedAt.UtcTicks}|{preview.ExpiresAt.UtcTicks}|{preview.DefinitionFingerprint}|{actions}");
+        var input = Encoding.UTF8.GetBytes(ReviewFingerprint(preview));
         return Convert.ToBase64String(HMACSHA256.HashData(_approvalKey, input));
+    }
+
+    private static void AppendGuid(IncrementalHash hash, Guid value)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        value.TryWriteBytes(bytes, bigEndian: true, out _);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendInt32(IncrementalHash hash, int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendInt64(IncrementalHash hash, long value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64BigEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendString(IncrementalHash hash, string? value)
+    {
+        if (value is null)
+        {
+            AppendInt32(hash, -1);
+            return;
+        }
+        var bytes = Encoding.UTF8.GetBytes(value);
+        AppendInt32(hash, bytes.Length);
+        hash.AppendData(bytes);
     }
 
     [GeneratedRegex("^Transferring file [`'](.+?)'$", RegexOptions.CultureInvariant)]

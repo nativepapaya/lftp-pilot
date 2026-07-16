@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using LFTPPilot.Core;
 
 namespace LFTPPilot.Tests;
@@ -29,12 +30,94 @@ public sealed class JobCoordinatorTests
     }
 
     [Fact]
+    public void QueuedJobCanFailWhenPostCommitExecutionAdmissionFails()
+    {
+        var coordinator = new JobCoordinator();
+        var job = coordinator.Enqueue(Job(JobState.Queued));
+
+        var failed = coordinator.Transition(
+            job.Id,
+            JobState.Failed,
+            "Execution admission failed",
+            new("execution-admission-failed", "The committed job could not be tracked."));
+
+        Assert.Equal(JobState.Failed, failed.State);
+        Assert.Equal("execution-admission-failed", failed.Error?.Code);
+    }
+
+    [Fact]
     public void CancellationIsIdempotentlyDeniedForTerminalJobs()
     {
         var coordinator = new JobCoordinator();
         var job = coordinator.Enqueue(Job(JobState.Queued));
         Assert.True(coordinator.TryCancel(job.Id));
         Assert.False(coordinator.TryCancel(job.Id));
+    }
+
+    [Fact]
+    public void ThrowingSubscriberCannotInterruptCancellationOrLaterSubscribers()
+    {
+        var coordinator = new JobCoordinator();
+        var job = coordinator.Enqueue(Job(JobState.Queued));
+        JobSnapshot? observed = null;
+        coordinator.JobChanged += static (_, _) => throw new InvalidOperationException("simulated observer failure");
+        coordinator.JobChanged += (_, changed) => observed = changed;
+
+        Assert.True(coordinator.TryCancel(job.Id, "User cancelled"));
+
+        Assert.NotNull(observed);
+        Assert.Equal(JobState.Cancelled, observed.State);
+        Assert.Equal("User cancelled", observed.Status);
+        Assert.Equal(JobState.Cancelled, Assert.Single(coordinator.GetJobs()).State);
+    }
+
+    [Fact]
+    public void ThrowingSubscriberCannotInterruptEnqueueTransitionOrRetryPublications()
+    {
+        var coordinator = new JobCoordinator();
+        var observed = new List<JobState>();
+        coordinator.JobChanged += static (_, _) => throw new IOException("simulated observer failure");
+        coordinator.JobChanged += (_, changed) => observed.Add(changed.State);
+        var job = Job(JobState.Queued) with { RetryAvailable = true };
+
+        coordinator.Enqueue(job);
+        coordinator.Transition(job.Id, JobState.Running);
+        coordinator.Transition(job.Id, JobState.Failed, error: new("network", "Dropped"));
+        var retried = coordinator.Retry(job.Id);
+
+        Assert.Equal([JobState.Queued, JobState.Running, JobState.Failed, JobState.Queued], observed);
+        Assert.Equal(JobState.Queued, retried.State);
+        Assert.Equal(JobState.Queued, Assert.Single(coordinator.GetJobs()).State);
+    }
+
+    [Fact]
+    public async Task ConcurrentCancellationHasExactlyOneAtomicWinnerAndPublication()
+    {
+        const int workers = 16;
+        var coordinator = new JobCoordinator();
+        var job = coordinator.Enqueue(Job(JobState.Queued));
+        var publications = new ConcurrentBag<JobSnapshot>();
+        coordinator.JobChanged += (_, changed) =>
+        {
+            if (changed.State == JobState.Cancelled) publications.Add(changed);
+        };
+        using var start = new Barrier(workers);
+        var attempts = Enumerable.Range(0, workers).Select(_ => Task.Factory.StartNew(
+            () =>
+            {
+                start.SignalAndWait(TestContext.Current.CancellationToken);
+                return coordinator.TryCancel(job.Id, "Concurrent cancellation");
+            },
+            TestContext.Current.CancellationToken,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default)).ToArray();
+
+        var results = await Task.WhenAll(attempts);
+
+        Assert.Single(results, static result => result);
+        var published = Assert.Single(publications);
+        Assert.Equal("Concurrent cancellation", published.Status);
+        Assert.Equal(JobState.Cancelled, Assert.Single(coordinator.GetJobs()).State);
     }
 
     [Fact]

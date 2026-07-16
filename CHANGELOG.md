@@ -15,6 +15,39 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   transfer routing.
 - Profile-bound DPAPI secrets, authenticated named pipes, kill-on-close process
   trees, isolated read-only console sessions, and exact packaged-runtime trust.
+- Explicit SFTP host-key enrollment and changed-key review before credentials
+  can leave the App. The Agent probes with authentication disabled, persists
+  only profile/endpoint-bound trust, and gives every real LFTP session an
+  isolated one-key `known_hosts` file with strict checking and automatic host
+  confirmation disabled. Replacements are blocked while dependent work is
+  active or its LFTP process is still shutting down. Review endpoints and
+  fingerprints are selectable for out-of-band comparison.
+- Interrupted or malformed control-pipe exchanges now discard the connection
+  before another request, Agent shutdown drains admitted client work before
+  disposing workspace state, and job admission is serialized with session and
+  profile removal through underlying process cleanup.
+- SFTP and mixed-protocol remote-to-remote jobs now fail closed instead of
+  sharing LFTP's process-global SFTP connect program across two independently
+  pinned endpoints. FTP-family FXP remains available; secure SFTP relay will
+  use distinct processes.
+- Remote-to-remote route reviews now receive Agent-issued, single-use plan
+  identifiers that also become durable job identifiers. Concurrent duplicate
+  submissions and lost-reply reconciliation reuse that exact identifier, so
+  they converge on one job and one LFTP process instead of launching a second
+  transfer under a fresh review. Each review also pins both complete connection
+  identities; changing either endpoint, protocol, user, authentication mode, or
+  SSH key invalidates the old route before any remote stat or process launch.
+- Ordinary transfers now use their reviewed plan identifier as the durable job
+  identifier, and mirror approvals consume the reviewed preview identifier in
+  the same way. The App retains unresolved submissions across workspace
+  rebuilds and reconciles only that exact identifier, while the Agent records
+  terminal validation and launch failures so bounded replay caches cannot make
+  an old request executable again.
+- Mirror approval now round-trips a deterministic fingerprint of the exact
+  preview metadata and action list displayed by the App. The Agent compares it
+  with its stored HMAC-authenticated dry run before consumption, and expired
+  reviews reach the Agent for an authoritative rejection rather than leaving
+  the App in an unresolved state.
 - Native LFTP transfer queues, segmented downloads, rate controls, safe mirror
   previews/execution, cancellation, and run-once transfer scheduling.
 - Typed regular-file and directory transfers. Folder downloads use non-pruning

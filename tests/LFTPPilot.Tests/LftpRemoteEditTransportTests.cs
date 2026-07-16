@@ -373,7 +373,11 @@ public sealed class LftpRemoteEditTransportTests
                 BrowseTimeout = TimeSpan.FromSeconds(2),
                 TransferTimeout = TimeSpan.FromSeconds(2),
             };
-            var sessions = new SessionRegistry(host, new FakeRuntimeProvider(), options);
+            var sessions = new SessionRegistry(
+                host,
+                new FakeRuntimeProvider(),
+                new SftpHostKeyManager(new UnusedHostKeyStore(), new UnusedSshHostKeyProbe()),
+                options);
             try
             {
                 var profile = new ConnectionProfile(
@@ -416,6 +420,27 @@ public sealed class LftpRemoteEditTransportTests
             await _sessions.DisposeAsync();
             if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
         }
+    }
+
+    private sealed class UnusedHostKeyStore : IHostKeyStore
+    {
+        public Task<TrustedSftpHostKey?> GetAsync(HostKeyBinding binding, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("The FTP-only fixture must not read SFTP host-key state.");
+
+        public Task SaveAsync(TrustedSftpHostKey key, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("The FTP-only fixture must not save SFTP host-key state.");
+
+        public Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("The FTP-only fixture must not delete SFTP host-key state.");
+    }
+
+    private sealed class UnusedSshHostKeyProbe : ISshHostKeyProbe
+    {
+        public Task<TrustedSftpHostKey> ProbeAsync(
+            ConnectionProfile profile,
+            string hostKeyAlias,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("The FTP-only fixture must not probe an SFTP host key.");
     }
 
     private sealed class FakeRuntimeProvider : ILftpRuntimeProvider

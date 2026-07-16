@@ -9,11 +9,37 @@ using LFTPPilot.Core;
 
 namespace LFTPPilot.Engine;
 
+public sealed class EngineRequestOutcomeUnknownException : IOException
+{
+    public EngineRequestOutcomeUnknownException(string method, Exception innerException)
+        : base($"The outcome of the '{method}' Agent request is unknown because its transport failed after request I/O began.", innerException)
+    {
+        Method = method;
+    }
+
+    public string Method { get; }
+}
+
+public sealed class EngineRequestRejectedException : InvalidOperationException
+{
+    public EngineRequestRejectedException(string method, ProtocolError? error)
+        : base(error?.Message ?? "The Agent request failed.")
+    {
+        Method = method;
+        ErrorCode = error?.Code;
+    }
+
+    public string Method { get; }
+    public string? ErrorCode { get; }
+}
+
 public static class FramedJsonStream
 {
     public static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
+        RespectNullableAnnotations = true,
+        RespectRequiredConstructorParameters = true,
     };
 
     public static async ValueTask WriteAsync<T>(Stream stream, T value, CancellationToken cancellationToken = default)
@@ -74,8 +100,11 @@ public sealed partial class NamedPipeEngineClient : IEngineClient
     private readonly string _controlPipeName;
     private readonly string _eventPipeName;
     private readonly SemaphoreSlim _requestGate = new(1, 1);
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly object _disposeSync = new();
     private NamedPipeClientStream? _control;
-    private bool _disposed;
+    private Task? _disposeTask;
+    private volatile bool _disposed;
 
     public NamedPipeEngineClient(
         int expectedServerProcessId,
@@ -95,25 +124,44 @@ public sealed partial class NamedPipeEngineClient : IEngineClient
         await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            _control ??= await ConnectAsync(_controlPipeName, _expectedServerProcessId, cancellationToken).ConfigureAwait(false);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+            var requestToken = requestCancellation.Token;
+            var control = _control ??= await ConnectAsync(_controlPipeName, _expectedServerProcessId, requestToken).ConfigureAwait(false);
             var correlationId = Guid.NewGuid();
             var request = new AgentRequest(method, JsonSerializer.SerializeToElement(payload, FramedJsonStream.SerializerOptions));
             var envelope = new ProtocolEnvelope(AgentProtocol.CurrentVersion, "request", correlationId, JsonSerializer.SerializeToElement(request, FramedJsonStream.SerializerOptions));
-            await FramedJsonStream.WriteAsync(_control, envelope, cancellationToken).ConfigureAwait(false);
-            var responseEnvelope = await FramedJsonStream.ReadAsync<ProtocolEnvelope>(_control, cancellationToken).ConfigureAwait(false)
-                ?? throw new EndOfStreamException("The agent closed the control pipe.");
-            ValidateEnvelope(responseEnvelope, "response");
-            if (responseEnvelope.CorrelationId != correlationId) throw new InvalidDataException("The agent returned a mismatched correlation identifier.");
-            var response = responseEnvelope.Payload.Deserialize<AgentResponse>(FramedJsonStream.SerializerOptions)
-                ?? throw new InvalidDataException("The agent response was empty.");
-            if (!response.Success) throw new InvalidOperationException(response.Error?.Message ?? "The agent request failed.");
+            AgentResponse response;
+            try
+            {
+                // Once request I/O begins, any interrupted write/read or invalid response leaves
+                // the byte stream boundary unknowable. Never reuse that connection: a late reply
+                // could otherwise be mistaken for the next request's response.
+                await FramedJsonStream.WriteAsync(control, envelope, requestToken).ConfigureAwait(false);
+                var responseEnvelope = await FramedJsonStream.ReadAsync<ProtocolEnvelope>(control, requestToken).ConfigureAwait(false)
+                    ?? throw new EndOfStreamException("The agent closed the control pipe.");
+                ValidateEnvelope(responseEnvelope, "response");
+                if (responseEnvelope.CorrelationId != correlationId) throw new InvalidDataException("The agent returned a mismatched correlation identifier.");
+                response = responseEnvelope.Payload.Deserialize<AgentResponse>(FramedJsonStream.SerializerOptions)
+                    ?? throw new InvalidDataException("The agent response was empty.");
+            }
+            catch (Exception exception) when (exception is not (
+                OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException))
+            {
+                ResetControlConnection();
+                throw new EngineRequestOutcomeUnknownException(method, exception);
+            }
+            catch
+            {
+                ResetControlConnection();
+                throw;
+            }
+
+            // A well-framed, correlated Agent error completed the exchange and does not poison
+            // the connection. Give higher layers a type that cannot be confused with a local
+            // InvalidOperationException raised before request dispatch.
+            if (!response.Success) throw new EngineRequestRejectedException(method, response.Error);
             return response.Result ?? JsonSerializer.SerializeToElement<object?>(null, FramedJsonStream.SerializerOptions);
-        }
-        catch (IOException)
-        {
-            _control?.Dispose();
-            _control = null;
-            throw;
         }
         finally
         {
@@ -124,24 +172,77 @@ public sealed partial class NamedPipeEngineClient : IEngineClient
     public async IAsyncEnumerable<EngineEvent> Events([EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        await using var pipe = await ConnectAsync(_eventPipeName, _expectedServerProcessId, cancellationToken).ConfigureAwait(false);
-        while (!cancellationToken.IsCancellationRequested)
+        var lifetimeToken = _lifetime.Token;
+        using var eventCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetimeToken);
+        var eventToken = eventCancellation.Token;
+        NamedPipeClientStream pipe;
+        try
         {
-            var envelope = await FramedJsonStream.ReadAsync<ProtocolEnvelope>(pipe, cancellationToken).ConfigureAwait(false);
-            if (envelope is null) yield break;
-            ValidateEnvelope(envelope, "event");
-            yield return envelope.Payload.Deserialize<EngineEvent>(FramedJsonStream.SerializerOptions)
-                ?? throw new InvalidDataException("The agent event was empty.");
+            pipe = await ConnectAsync(_eventPipeName, _expectedServerProcessId, eventToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (lifetimeToken.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            yield break;
+        }
+
+        await using (pipe)
+        {
+            while (true)
+            {
+                ProtocolEnvelope? envelope;
+                try
+                {
+                    envelope = await FramedJsonStream.ReadAsync<ProtocolEnvelope>(pipe, eventToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (lifetimeToken.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    yield break;
+                }
+
+                if (envelope is null) yield break;
+                ValidateEnvelope(envelope, "event");
+                yield return envelope.Payload.Deserialize<EngineEvent>(FramedJsonStream.SerializerOptions)
+                    ?? throw new InvalidDataException("The agent event was empty.");
+            }
         }
     }
 
     public ValueTask DisposeAsync()
     {
-        if (_disposed) return ValueTask.CompletedTask;
-        _disposed = true;
-        _control?.Dispose();
-        _requestGate.Dispose();
-        return ValueTask.CompletedTask;
+        lock (_disposeSync)
+        {
+            if (_disposeTask is not null) return new ValueTask(_disposeTask);
+            _disposed = true;
+            _lifetime.Cancel();
+            ResetControlConnection();
+            _disposeTask = DrainRequestsAsync();
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DrainRequestsAsync()
+    {
+        // Do not dispose the semaphore while a request's finally block may still release it.
+        // Taking it proves the active request has observed cancellation and completed cleanup.
+        await _requestGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // A connect that raced the initial reset may have assigned its stream before it
+            // observed lifetime cancellation. Quiescence makes this final reset authoritative.
+            ResetControlConnection();
+            _lifetime.Dispose();
+        }
+        finally
+        {
+            _requestGate.Release();
+        }
+    }
+
+    private void ResetControlConnection()
+    {
+        var control = _control;
+        _control = null;
+        control?.Dispose();
     }
 
     private static async Task<NamedPipeClientStream> ConnectAsync(string pipeName, int expectedServerProcessId, CancellationToken cancellationToken)

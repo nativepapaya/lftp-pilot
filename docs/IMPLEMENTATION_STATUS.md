@@ -19,9 +19,20 @@ still needs real servers, signed packages, or additional product development.
 - A long-lived, single-instance Agent with bounded versioned JSON frames over
   separate current-user control/event pipes, kernel peer-PID checks, durable
   job snapshots, reconnect/resynchronization, and kill-on-close Job Objects.
-- Profile metadata stored separately from profile/endpoint/user/purpose-bound
-  DPAPI credentials. Package-scoped paths never probe or migrate old product
-  data.
+- Profile metadata stored separately from DPAPI credentials bound to the exact
+  profile, transport endpoint, user name, and authentication purpose. A change
+  to protocol, endpoint, user, authentication mode, or SSH key requires
+  quiescence and invalidates the old credential identity. Package-scoped paths
+  never probe or migrate old product data.
+- Explicit SFTP host-key enrollment and changed-key review. Credential-free
+  OpenSSH probes record a proposed key in an isolated temporary file; only the
+  algorithm and SHA-256 fingerprint cross into the App for review. Approved
+  trust is bound to the profile and canonical endpoint. Every allowed SFTP
+  browse, transfer, console, mirror, and edit session uses a private one-entry
+  `known_hosts` file with `StrictHostKeyChecking=yes`, while LFTP automatic host
+  confirmation and OpenSSH global trust/update sources are disabled.
+  Changed-key replacement requires explicit review and no active or scheduled
+  dependent work.
 - Authenticated packaged LFTP/MSYS2 runtime execution from a read-only MSIX,
   with an exact file inventory, `--norc`, isolated homes/caches, secret
   redaction, and no credential-bearing process arguments.
@@ -46,11 +57,22 @@ still needs real servers, signed packages, or additional product development.
 - Fresh mirror dry runs, bounded case-exact structured action parsing, explicit
   deletion approval, definition binding, expiry, and an immediate matching
   second dry run plus endpoint validation before every execution. Dry-run
-  script text is never executed.
+  script text is never executed. Transfer plan IDs and approved mirror preview
+  IDs are also their durable job IDs. Duplicate deliveries converge on one
+  result, terminal pre-launch failures remain consumed, and the App blocks new
+  work of the affected type while it reconciles a lost reply with the exact
+  original ID. A deterministic fingerprint binds the exact ordered action list
+  displayed by the App to the Agent-held preview before approval is consumed.
 - Read-only isolated advanced console; local shell syntax and structured
   mutation/transfer commands are blocked.
-- Reviewed remote-to-remote file plans and jobs. FTP-family pairs prefer FXP
-  with LFTP's client-relay fallback; SFTP/mixed pairs clearly require relay.
+- Reviewed FTP-family remote-to-remote file plans and jobs prefer FXP with
+  LFTP's client-relay fallback. SFTP and mixed pairs fail closed because
+  LFTP's SFTP connect program is process-global; they remain blocked until the
+  relay uses distinct processes with independently pinned host trust. The
+  Agent issues each reviewed plan ID, consumes it once as the durable job ID,
+  and makes concurrent or lost-reply replays converge on one LFTP process. The
+  plan pins both full connection identities, so a profile endpoint or user
+  change cannot redirect an earlier route review.
 - Run-once transfer scheduling while the same Agent remains alive. A stopped or
   restarted Agent marks pending schedules missed and never executes them late.
 - Managed-cache editing for regular remote files. The Agent alone chooses the
@@ -76,14 +98,18 @@ still needs real servers, signed packages, or additional product development.
 
 - Exercise authentication, Unicode, mutation, resume/retry/cancel, TLS, FXP,
   and relay behavior against controlled SFTP and FTP-family servers.
-- Add explicit SFTP host-key enrollment/change review and encrypted private-key
-  passphrase support.
+- Exercise first-use, unchanged, and rotating SFTP host keys against the
+  controlled SSH server matrix. Encrypted private-key passphrase support also
+  remains required.
 - Persist and restore session tabs after an Agent restart, not only while the
   background Agent remains alive.
 - Exercise managed-cache editing, concurrent target changes, staging promotion,
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.
 - Save reusable mirror definitions and add non-modal recursive remote search.
+- Implement SFTP/mixed remote-to-remote client relay with distinct source and
+  destination processes so each endpoint retains its own pinned host-key
+  configuration.
 - Add the tray surface, idle-exit policy, transfer progress/history plumbing,
   and wire notifications, taskbar progress, Jump Lists, and support-bundle UI.
 - Complete outbound Explorer drag/drop for remote files and add richer folder
