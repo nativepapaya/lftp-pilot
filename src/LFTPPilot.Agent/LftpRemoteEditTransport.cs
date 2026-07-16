@@ -177,56 +177,19 @@ internal sealed class LftpRemoteEditTransport : IRemoteEditTransport
 
     private async Task<RemoteMetadata?> StatMetadataAsync(Guid sessionId, string remotePath, CancellationToken cancellationToken)
     {
+        remotePath = FreshRemoteStatParser.ValidateRemotePath(remotePath, nameof(remotePath));
         var session = _sessions.Get(sessionId);
         var result = await session.Browse.ExecuteAsync(
             LftpCommandBuilder.BuildStat(remotePath, fresh: true),
             _options.BrowseTimeout,
             cancellationToken).ConfigureAwait(false);
-        if (result.TimedOut) throw new TimeoutException("The fresh remote edit identity check timed out.");
-        if (result.Failure is not null) throw new IOException($"The fresh remote edit identity check failed: {result.Failure}");
-        if (result.Truncated) throw new InvalidDataException("The fresh remote edit identity check produced too much output.");
-        var error = LftpOutputParser.FirstError(result.Lines);
-        if (error is not null)
-        {
-            if (error.Contains("no such", StringComparison.OrdinalIgnoreCase) || error.Contains("not found", StringComparison.OrdinalIgnoreCase)) return null;
-            throw new IOException($"The fresh remote edit identity check failed closed: {error}");
-        }
-
-        // LFTP 4.9.3 can pass this FTP 550 through without the command-name
-        // prefix that FirstError intentionally requires. Match the complete
-        // diagnostic, including the exact path we queried, so an unrelated
-        // 550, warning, or attacker-controlled noisy line cannot be mistaken
-        // for absence.
-        if (IsExactMissingPathDiagnostic(result, remotePath)) return null;
-
-        // LFTP 4.9.x can report a nonexistent path from `recls -ldB` as a
-        // successful command with no output at all. That exact result is the
-        // only parse-empty result that means "absent": diagnostics, blank or
-        // malformed lines, multiple lines, and unknown streams remain
-        // ambiguous and therefore fail closed.
-        if (result.Lines.Length == 0) return null;
-        if (result.Lines.Length != 1 ||
-            !string.Equals(result.Lines[0].Stream, "stdout", StringComparison.OrdinalIgnoreCase) ||
-            string.IsNullOrWhiteSpace(result.Lines[0].Line))
-            throw new InvalidDataException("The server returned ambiguous output for a fresh remote-edit identity check.");
-
-        var parent = remotePath.LastIndexOf('/') <= 0 ? "/" : remotePath[..remotePath.LastIndexOf('/')];
-        var entries = LftpOutputParser.ParseLongListing([result.Lines[0].Line], parent);
-        if (entries.Length != 1) throw new InvalidDataException("The server did not return one parseable fresh remote-edit identity.");
-        var entry = entries[0];
+        var entry = FreshRemoteStatParser.Parse(result, remotePath, "The fresh remote edit identity check");
+        if (entry is null) return null;
         if (entry.Kind != EntryKind.File) throw new NotSupportedException("Remote editing supports regular files only; links and special entries are not followed.");
-        if (!string.Equals(entry.FullPath, remotePath, StringComparison.Ordinal) || entry.Size is not { } size || entry.ModifiedAt is not { } modifiedAt)
+        if (entry.Size is not { } size || entry.ModifiedAt is not { } modifiedAt)
             throw new InvalidDataException("The server did not provide the canonical path, size, and modification time required for remote editing.");
         return new(remotePath, size, modifiedAt);
     }
-
-    private static bool IsExactMissingPathDiagnostic(LftpCommandResult result, string remotePath) =>
-        result.Lines.Length == 1 &&
-        string.Equals(result.Lines[0].Stream, "stderr", StringComparison.OrdinalIgnoreCase) &&
-        string.Equals(
-            result.Lines[0].Line,
-            $"Access failed: 550 No such file or directory. ({remotePath})",
-            StringComparison.Ordinal);
 
     private async Task RestoreBackupAsync(
         ILftpSession process,

@@ -29,16 +29,21 @@ public sealed partial class MirrorPlanner : IMirrorPlanner, IDisposable
         ArgumentNullException.ThrowIfNull(dryRunOutput);
         var generatedAt = now ?? DateTimeOffset.UtcNow;
         var actions = ImmutableArray.CreateBuilder<MirrorAction>();
+        // NTFS directories can opt into case-sensitive names. Treat every
+        // preview path as exact-case so distinct A.txt/a.txt removals can
+        // never collapse into one reviewed action.
+        var deletionKeys = new HashSet<string>(StringComparer.Ordinal);
         var pathCharacters = 0;
         foreach (var line in dryRunOutput)
         {
-            var action = ParseAction(line, definition.Direction);
+            var action = ParseAction(line, definition);
             if (action is null)
             {
                 if (DestructiveDryRunLineRegex().IsMatch(line ?? string.Empty))
-                    throw new InvalidDataException($"The LFTP dry-run contained an unrecognized deletion action: {BoundedDiagnostic(line)}");
+                    throw new InvalidDataException("The LFTP dry-run contained an unrecognized deletion action.");
                 continue;
             }
+            if (action.IsDeletion && !deletionKeys.Add($"{action.Kind}\u001f{action.Path}")) continue;
             if (action.Path.Length > 4096 || (pathCharacters += action.Path.Length) > MaximumPreviewPathCharacters || actions.Count >= MaximumPreviewActions)
                 throw new InvalidDataException("The mirror preview is too large to review safely as one operation. Narrow the mirror with include or exclude rules.");
             actions.Add(action);
@@ -61,7 +66,7 @@ public sealed partial class MirrorPlanner : IMirrorPlanner, IDisposable
         if (current < preview.GeneratedAt - TimeSpan.FromSeconds(5) || current > preview.ExpiresAt)
             throw new InvalidOperationException("The mirror preview is stale. Generate a new preview.");
 
-        if (definition.DeleteExtraneous)
+        if (definition.DeleteExtraneous || preview.ContainsDeletions)
         {
             if (string.IsNullOrWhiteSpace(approvalToken))
                 throw new InvalidOperationException("Deletion-capable mirrors require explicit approval of a fresh preview.");
@@ -92,24 +97,147 @@ public sealed partial class MirrorPlanner : IMirrorPlanner, IDisposable
         _disposed = true;
     }
 
-    private static MirrorAction? ParseAction(string line, MirrorDirection direction)
+    private static MirrorAction? ParseAction(string line, MirrorDefinition definition)
     {
         if (string.IsNullOrWhiteSpace(line)) return null;
         Match match;
         if ((match = TransferRegex().Match(line)).Success)
-            return new(direction == MirrorDirection.Download ? MirrorActionKind.Download : MirrorActionKind.Upload, match.Groups[1].Value);
+            return new(definition.Direction == MirrorDirection.Download ? MirrorActionKind.Download : MirrorActionKind.Upload, match.Groups[1].Value);
         if ((match = MakeDirectoryRegex().Match(line)).Success)
             return new(MirrorActionKind.CreateDirectory, match.Groups[1].Value);
         if ((match = RemoveFileRegex().Match(line)).Success)
-            return new(MirrorActionKind.DeleteFile, match.Groups[1].Value);
+            return new(MirrorActionKind.DeleteFile, NormalizeDescriptiveDeletionPath(match.Groups[1].Value, definition));
         if ((match = RemoveDirectoryRegex().Match(line)).Success)
-            return new(MirrorActionKind.DeleteDirectory, match.Groups[1].Value);
+            return new(MirrorActionKind.DeleteDirectory, NormalizeDescriptiveDeletionPath(match.Groups[1].Value, definition));
+        if ((match = RawRemoveRegex().Match(line)).Success)
+        {
+            var kind = match.Groups["recursive"].Success ? MirrorActionKind.DeleteDirectory : MirrorActionKind.DeleteFile;
+            return new(kind, NormalizeGeneratedDeletionTarget(match.Groups["target"].Value, definition));
+        }
+        if ((match = RawRemoveDirectoryRegex().Match(line)).Success)
+            return new(MirrorActionKind.DeleteDirectory, NormalizeGeneratedDeletionTarget(match.Groups["target"].Value, definition));
         return null;
     }
 
-    private static string BoundedDiagnostic(string? value) => string.IsNullOrEmpty(value)
-        ? "<empty>"
-        : value.Length <= 256 ? value : value[..256] + "...";
+    private static string NormalizeDescriptiveDeletionPath(string value, MirrorDefinition definition)
+    {
+        var candidate = value.Trim();
+        RejectPathControls(candidate);
+        if (definition.Direction == MirrorDirection.Download)
+        {
+            var root = NormalizeAbsolutePath(LftpCommandBuilder.ToMsysPath(definition.LocalRoot));
+            if (Path.IsPathFullyQualified(candidate)) candidate = LftpCommandBuilder.ToMsysPath(candidate);
+            return candidate.StartsWith("/", StringComparison.Ordinal)
+                ? RelativeToReviewedRoot(NormalizeAbsolutePath(candidate), root, StringComparison.Ordinal)
+                : NormalizeRelativePath(candidate);
+        }
+
+        var remoteRoot = NormalizeAbsolutePath(definition.RemoteRoot);
+        return candidate.StartsWith("/", StringComparison.Ordinal)
+            ? RelativeToReviewedRoot(NormalizeAbsolutePath(candidate), remoteRoot, StringComparison.Ordinal)
+            : NormalizeRelativePath(candidate);
+    }
+
+    private static string NormalizeGeneratedDeletionTarget(string value, MirrorDefinition definition)
+    {
+        ValidateGeneratedTargetToken(value);
+        if (definition.Direction == MirrorDirection.Download)
+        {
+            if (!value.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("A generated local deletion must use a file URL.");
+            var encodedPath = value["file:".Length..];
+            var decodedPath = DecodeUrlPath(encodedPath);
+            if (decodedPath.StartsWith("///", StringComparison.Ordinal)) decodedPath = decodedPath[2..];
+            RejectPathControls(decodedPath);
+            var root = NormalizeAbsolutePath(LftpCommandBuilder.ToMsysPath(definition.LocalRoot));
+            return RelativeToReviewedRoot(NormalizeAbsolutePath(decodedPath), root, StringComparison.Ordinal);
+        }
+
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
+            uri.Scheme is not ("ftp" or "ftps" or "sftp") ||
+            string.IsNullOrWhiteSpace(uri.Host) ||
+            !string.IsNullOrEmpty(uri.Query) ||
+            !string.IsNullOrEmpty(uri.Fragment))
+            throw new InvalidDataException("A generated remote deletion must use a supported endpoint URL without query or fragment syntax.");
+        var decodedRemotePath = DecodeUrlPath(uri.AbsolutePath);
+        RejectPathControls(decodedRemotePath);
+        return RelativeToReviewedRoot(
+            NormalizeAbsolutePath(decodedRemotePath),
+            NormalizeAbsolutePath(definition.RemoteRoot),
+            StringComparison.Ordinal);
+    }
+
+    private static void ValidateGeneratedTargetToken(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.IndexOfAny(
+                ['\0', '\r', '\n', ';', '&', '|', '`', '$', '(', ')', '<', '>', '"', '\'', '\\', '*', '[', ']', '{', '}']) >= 0)
+            throw new InvalidDataException("The generated deletion target contains command or glob syntax.");
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (value[index] != '%') continue;
+            if (index + 2 >= value.Length || !Uri.IsHexDigit(value[index + 1]) || !Uri.IsHexDigit(value[index + 2]))
+                throw new InvalidDataException("The generated deletion target contains invalid URL escaping.");
+            index += 2;
+        }
+    }
+
+    private static string DecodeUrlPath(string value)
+    {
+        try
+        {
+            return Uri.UnescapeDataString(value);
+        }
+        catch (Exception exception) when (exception is UriFormatException or ArgumentException)
+        {
+            throw new InvalidDataException("The generated deletion target contains invalid URL escaping.", exception);
+        }
+    }
+
+    private static string NormalizeAbsolutePath(string value)
+    {
+        RejectPathControls(value);
+        if (!value.StartsWith("/", StringComparison.Ordinal) || value.Contains('\\'))
+            throw new InvalidDataException("A generated deletion path is not an absolute slash-delimited path.");
+        var isUnc = value.StartsWith("//", StringComparison.Ordinal);
+        var minimumLength = isUnc ? 2 : 1;
+        if (value.Length > minimumLength) value = value.TrimEnd('/');
+        var segments = value.TrimStart('/').Split('/', StringSplitOptions.None);
+        if (segments.Length == 1 && segments[0].Length == 0)
+        {
+            if (isUnc) throw new InvalidDataException("A UNC deletion path requires a server and share root.");
+            return "/";
+        }
+        if (segments.Any(static segment => string.IsNullOrEmpty(segment) || segment is "." or ".."))
+            throw new InvalidDataException("A generated deletion path contains an empty, current-directory, or parent-directory segment.");
+        return (isUnc ? "//" : "/") + string.Join('/', segments);
+    }
+
+    private static string NormalizeRelativePath(string value)
+    {
+        RejectPathControls(value);
+        if (value.Contains('\\'))
+            throw new InvalidDataException("A deletion preview path must use slash separators.");
+        var segments = value.Split('/', StringSplitOptions.None);
+        if (segments.Any(static segment => string.IsNullOrEmpty(segment) || segment is "." or ".."))
+            throw new InvalidDataException("A deletion preview path contains an empty, current-directory, or parent-directory segment.");
+        return string.Join('/', segments);
+    }
+
+    private static string RelativeToReviewedRoot(string path, string root, StringComparison comparison)
+    {
+        if (string.Equals(path, root, comparison))
+            throw new InvalidDataException("A generated deletion cannot remove the reviewed mirror root itself.");
+        var prefix = root == "/" ? "/" : root + "/";
+        if (!path.StartsWith(prefix, comparison))
+            throw new InvalidDataException("A generated deletion falls outside the reviewed mirror destination root.");
+        return NormalizeRelativePath(path[prefix.Length..]);
+    }
+
+    private static void RejectPathControls(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.IndexOfAny(['\0', '\r', '\n']) >= 0)
+            throw new InvalidDataException("A deletion preview path is empty or contains a protocol control character.");
+    }
 
     private string CreateToken(MirrorPreview preview)
     {
@@ -118,17 +246,23 @@ public sealed partial class MirrorPlanner : IMirrorPlanner, IDisposable
         return Convert.ToBase64String(HMACSHA256.HashData(_approvalKey, input));
     }
 
-    [GeneratedRegex("Transferring file [`'](.+?)'", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^Transferring file [`'](.+?)'$", RegexOptions.CultureInvariant)]
     private static partial Regex TransferRegex();
 
-    [GeneratedRegex("Making directory [`'](.+?)'", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^Making directory [`'](.+?)'$", RegexOptions.CultureInvariant)]
     private static partial Regex MakeDirectoryRegex();
 
-    [GeneratedRegex("Removing old file [`'](.+?)'", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^Removing old (?:(?:local|remote) )?file [`'](.+?)'$", RegexOptions.CultureInvariant)]
     private static partial Regex RemoveFileRegex();
 
-    [GeneratedRegex("Removing old directory [`'](.+?)'", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^Removing old (?:(?:local|remote) )?directory [`'](.+?)'$", RegexOptions.CultureInvariant)]
     private static partial Regex RemoveDirectoryRegex();
+
+    [GeneratedRegex(@"^rm(?<recursive> -r)? (?<target>\S+)$", RegexOptions.CultureInvariant)]
+    private static partial Regex RawRemoveRegex();
+
+    [GeneratedRegex(@"^rmdir (?<target>\S+)$", RegexOptions.CultureInvariant)]
+    private static partial Regex RawRemoveDirectoryRegex();
 
     [GeneratedRegex(@"\b(?:remov(?:e|ed|es|ing)|delet(?:e|ed|es|ing)|rm|rmdir|unlink(?:ed|s|ing)?|purg(?:e|ed|es|ing))\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DestructiveDryRunLineRegex();

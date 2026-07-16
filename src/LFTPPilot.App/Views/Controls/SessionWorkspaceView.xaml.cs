@@ -49,7 +49,14 @@ public sealed partial class SessionWorkspaceView : UserControl
     {
         if (DataContext is SessionViewModel viewModel)
         {
-            await viewModel.QueuePathsAsync(TransferDirection.Download, e.Paths).ConfigureAwait(true);
+            try
+            {
+                await viewModel.QueueSourcesAsync(TransferDirection.Download, e.Sources).ConfigureAwait(true);
+            }
+            catch (Exception exception)
+            {
+                await ShowTransferQueueErrorAsync(TransferDirection.Download, exception).ConfigureAwait(true);
+            }
         }
     }
 
@@ -57,9 +64,19 @@ public sealed partial class SessionWorkspaceView : UserControl
     {
         if (DataContext is SessionViewModel viewModel)
         {
-            await viewModel.QueuePathsAsync(TransferDirection.Upload, e.Paths).ConfigureAwait(true);
+            try
+            {
+                await viewModel.QueueSourcesAsync(TransferDirection.Upload, e.Sources).ConfigureAwait(true);
+            }
+            catch (Exception exception)
+            {
+                await ShowTransferQueueErrorAsync(TransferDirection.Upload, exception).ConfigureAwait(true);
+            }
         }
     }
+
+    private async void Pane_DropRejected(object? sender, FilePaneDropRejectedEventArgs e) =>
+        await ShowNoticeAsync("Explorer items were not queued", e.Rejection.Message).ConfigureAwait(true);
 
     private async void RemotePane_RemoteEditRequested(object? sender, FilePaneRemoteEditEventArgs e)
     {
@@ -89,8 +106,8 @@ public sealed partial class SessionWorkspaceView : UserControl
     private async Task ShowTransferOptionsAsync(TransferDirection direction)
     {
         if (DataContext is not SessionViewModel viewModel) return;
-        var paths = viewModel.GetSelectedPaths(direction);
-        if (paths.Count == 0)
+        var sources = viewModel.GetSelectedSources(direction);
+        if (sources.Count == 0)
         {
             var paneName = direction == TransferDirection.Upload ? "local" : "remote";
             await ShowNoticeAsync(
@@ -100,16 +117,18 @@ public sealed partial class SessionWorkspaceView : UserControl
         }
 
         var isDownload = direction == TransferDirection.Download;
+        var containsDirectory = sources.Any(static source => source.Kind == TransferSourceKind.Directory);
         var destinationRoot = isDownload ? viewModel.LocalPane.Path : viewModel.RemotePane.Path;
         var mode = new ComboBox
         {
             Header = "Transfer mode",
-            // LFTP's no-clobber control applies to downloads. Upload Skip
-            // cannot be made race-free if the remote target appears after the
-            // Agent's preflight, so the native UI does not offer it.
-            ItemsSource = isDownload
-                ? Enum.GetValues<TransferMode>()
-                : Enum.GetValues<TransferMode>().Where(static value => value != TransferMode.Skip).ToArray(),
+            // Directory mirror transfers support only Auto and Resume. LFTP's
+            // no-clobber control applies to downloads; upload Skip cannot be
+            // made race-free if the remote target appears after Agent preflight.
+            ItemsSource = Enum.GetValues<TransferMode>()
+                .Where(value => (!containsDirectory || value is TransferMode.Auto or TransferMode.Resume) &&
+                    (isDownload || value != TransferMode.Skip))
+                .ToArray(),
             SelectedItem = TransferMode.Auto,
             HorizontalAlignment = HorizontalAlignment.Stretch,
         };
@@ -210,12 +229,12 @@ public sealed partial class SessionWorkspaceView : UserControl
         var content = new StackPanel { Spacing = 12, MaxWidth = 560 };
         content.Children.Add(new TextBlock
         {
-            Text = $"Review {paths.Count} selected item{(paths.Count == 1 ? string.Empty : "s")} before queueing.",
+            Text = $"Review {sources.Count} selected item{(sources.Count == 1 ? string.Empty : "s")} before queueing.",
             Style = Application.Current.Resources["BodyStrongTextBlockStyle"] as Style,
         });
         content.Children.Add(new ListView
         {
-            ItemsSource = paths,
+            ItemsSource = sources.Select(static source => source.Path),
             SelectionMode = ListViewSelectionMode.None,
             MaxHeight = 124,
         });
@@ -257,11 +276,11 @@ public sealed partial class SessionWorkspaceView : UserControl
         if (await dialog.ShowAsync() != ContentDialogResult.Primary || selectedOptions is null) return;
         try
         {
-            await viewModel.QueuePathsAsync(direction, paths, selectedOptions).ConfigureAwait(true);
+            await viewModel.QueueSourcesAsync(direction, sources, selectedOptions).ConfigureAwait(true);
         }
         catch (Exception exception)
         {
-            await ShowOperationErrorAsync("The transfer could not be queued", exception).ConfigureAwait(true);
+            await ShowTransferQueueErrorAsync(direction, exception).ConfigureAwait(true);
         }
 
         void SetBandwidthEnabled(bool enabled)
@@ -358,6 +377,15 @@ public sealed partial class SessionWorkspaceView : UserControl
             Content = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap },
             CloseButtonText = "OK",
         }.ShowAsync();
+    }
+
+    private Task ShowTransferQueueErrorAsync(TransferDirection direction, Exception exception)
+    {
+        var itemName = direction == TransferDirection.Upload ? "uploads" : "downloads";
+        var title = exception is TransferQueueException { Result.IsPartialSuccess: true }
+            ? $"Only some {itemName} were queued"
+            : $"No {itemName} were queued";
+        return ShowOperationErrorAsync(title, exception);
     }
 
     private async Task ShowOperationErrorAsync(string title, Exception exception)

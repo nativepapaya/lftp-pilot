@@ -28,7 +28,7 @@
             <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
             <StackPanel Spacing="8">
                 <TextBlock Text="Proposed actions" Style="{ThemeResource SubtitleTextBlockStyle}" />
-                <InfoBar IsOpen="{Binding RequiresDeletionApproval}" IsClosable="False" Severity="Warning" Title="Deletion approval required" Message="Deletion is enabled. Review the full preview and explicitly approve deletion even when no deletion is currently listed; the destination can change before execution. Any changed action forces a fresh preview." />
+                <InfoBar IsOpen="{Binding RequiresDeletionApproval}" IsClosable="False" Severity="Warning" Title="Deletion approval required" Message="The reviewed job enables deletion or lists a deletion or type-collision action. Review every listed removal or replacement and explicitly approve it. The destination can change before execution; any changed action forces a fresh preview." />
             </StackPanel>
             <ListView Grid.Row="1" ItemsSource="{Binding PreviewActions}" SelectionMode="None" Margin="0,10,0,10" AutomationProperties.Name="Mirror preview actions">
                 <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style></ListView.ItemContainerStyle>
@@ -43,7 +43,7 @@
                 </ListView.ItemTemplate>
             </ListView>
             <StackPanel Grid.Row="2" Spacing="8">
-                <CheckBox Content="I reviewed this preview and approve deleting extraneous destination items" IsChecked="{Binding DeletionsApproved, Mode=TwoWay}" Visibility="{Binding RequiresDeletionApproval, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <CheckBox Content="I reviewed this preview and approve all listed or enabled deletion and type-collision actions" IsChecked="{Binding DeletionsApproved, Mode=TwoWay}" Visibility="{Binding RequiresDeletionApproval, Converter={StaticResource BoolToVisibilityConverter}}" />
                 <Button Content="Run reviewed mirror" Command="{Binding RunCommand}" Style="{ThemeResource AccentButtonStyle}" HorizontalAlignment="Right" />
             </StackPanel>
         </Grid>

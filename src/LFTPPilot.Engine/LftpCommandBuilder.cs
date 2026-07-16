@@ -118,11 +118,27 @@ public static class LftpCommandBuilder
 
         var commands = new List<string>();
         if (plan.RateLimitBytesPerSecond is { } rate) commands.Add($"set net:limit-rate {rate}:{rate}");
-        if (plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip) commands.Add("set xfer:clobber no");
+        if (plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip)
+        {
+            commands.Add("set xfer:use-temp-file no");
+            commands.Add("set xfer:clobber no");
+        }
         commands.Add(command);
-        if (plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip) commands.Add("set xfer:clobber yes");
+        if (plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip)
+        {
+            commands.Add("set xfer:clobber yes");
+            commands.Add("set xfer:use-temp-file yes");
+        }
         if (plan.RateLimitBytesPerSecond is not null) commands.Add("set net:limit-rate 0:0");
         return string.Join("; ", commands);
+    }
+
+    public static string BuildDirectoryTransferPreview(TransferPlan plan)
+    {
+        PlanValidator.Validate(plan);
+        if (plan.SourceKind != TransferSourceKind.Directory)
+            throw new ArgumentException("A directory transfer plan is required for a mirror preview.", nameof(plan));
+        return BuildDirectoryTransfer(plan, dryRun: true);
     }
 
     public static string BuildQueuedTransfer(
@@ -152,8 +168,10 @@ public static class LftpCommandBuilder
         }
         if (plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip)
         {
+            setup.Add("set xfer:use-temp-file no");
             setup.Add("set xfer:clobber no");
             cleanup.Add("set xfer:clobber yes");
+            cleanup.Add("set xfer:use-temp-file yes");
         }
 
         setup.Add(BuildTransferCore(plan));
@@ -173,14 +191,15 @@ public static class LftpCommandBuilder
         var builder = new StringBuilder("mirror --verbose=1");
         if (dryRun) builder.Append(" --dry-run");
         if (definition.Direction == MirrorDirection.Upload) builder.Append(" --reverse");
+        builder.Append(" --no-symlinks --overwrite");
         if (definition.DeleteExtraneous) builder.Append(" --delete");
         builder.Append(" --parallel=").Append(definition.ParallelFiles);
         if (definition.Direction == MirrorDirection.Download)
             builder.Append(" --use-pget-n=").Append(definition.SegmentsPerFile);
         foreach (var pattern in definition.EffectiveIncludes) builder.Append(" --include-glob ").Append(Quote(pattern));
         foreach (var pattern in definition.EffectiveExcludes) builder.Append(" --exclude-glob ").Append(Quote(pattern));
-        var source = definition.Direction == MirrorDirection.Download ? DashSafe(definition.RemoteRoot) : ToMsysPath(definition.LocalRoot);
-        var destination = definition.Direction == MirrorDirection.Download ? ToMsysPath(definition.LocalRoot) : DashSafe(definition.RemoteRoot);
+        var source = definition.Direction == MirrorDirection.Download ? DashSafe(definition.RemoteRoot) : ToMsysMirrorRoot(definition.LocalRoot);
+        var destination = definition.Direction == MirrorDirection.Download ? ToMsysMirrorRoot(definition.LocalRoot) : DashSafe(definition.RemoteRoot);
         builder.Append(' ').Append(Quote(source)).Append(' ').Append(Quote(destination));
         if (definition.RateLimitBytesPerSecond is not { } rate) return builder.ToString();
         return $"set net:limit-rate {rate}:{rate}; {builder}; set net:limit-rate 0:0";
@@ -193,8 +212,8 @@ public static class LftpCommandBuilder
         var destination = SlotUrl("destination", plan.DestinationPath);
         var routing = plan.Mode == RemoteTransferMode.Fxp ? "set ftp:use-fxp true" : "set ftp:use-fxp false";
         var overwrite = plan.Overwrite ? " -e" : string.Empty;
-        var clobber = plan.Overwrite ? string.Empty : "set xfer:clobber no; ";
-        return $"{routing}; {clobber}get{overwrite} {Quote(source)} -o {Quote(destination)}";
+        if (plan.Overwrite) return $"{routing}; get{overwrite} {Quote(source)} -o {Quote(destination)}";
+        return $"{routing}; set xfer:use-temp-file no; set xfer:clobber no; get {Quote(source)} -o {Quote(destination)}; set xfer:clobber yes; set xfer:use-temp-file yes";
     }
 
     public static string BuildRemoteEditDownload(string remotePath, string managedLocalPath)
@@ -238,6 +257,9 @@ public static class LftpCommandBuilder
 
     private static string BuildTransferCore(TransferPlan plan)
     {
+        if (plan.SourceKind == TransferSourceKind.Directory)
+            return BuildDirectoryTransfer(plan);
+
         var modeOption = plan.Mode switch
         {
             TransferMode.Resume => " -c",
@@ -252,6 +274,27 @@ public static class LftpCommandBuilder
             return $"{verb}{modeOption} {Quote(DashSafe(plan.SourcePath))} -o {Quote(ToMsysPath(plan.DestinationPath))}";
         }
         return $"put{modeOption} {Quote(ToMsysPath(plan.SourcePath))} -o {Quote(DashSafe(plan.DestinationPath))}";
+    }
+
+    private static string BuildDirectoryTransfer(TransferPlan plan, bool dryRun = false)
+    {
+        var builder = new StringBuilder("mirror");
+        if (dryRun) builder.Append(" --verbose=1 --dry-run");
+        if (plan.Direction == TransferDirection.Upload) builder.Append(" --reverse");
+        if (plan.Mode == TransferMode.Resume) builder.Append(" --continue");
+        builder.Append(" --no-symlinks --overwrite");
+        if (plan.Direction == TransferDirection.Download && plan.Segments > 1)
+            builder.Append(" --use-pget-n=").Append(plan.Segments);
+
+        var source = plan.Direction == TransferDirection.Download ? DashSafe(plan.SourcePath) : ToMsysMirrorRoot(plan.SourcePath);
+        var destination = plan.Direction == TransferDirection.Download ? ToMsysMirrorRoot(plan.DestinationPath) : DashSafe(plan.DestinationPath);
+        return builder.Append(' ').Append(Quote(source)).Append(' ').Append(Quote(destination)).ToString();
+    }
+
+    private static string ToMsysMirrorRoot(string value)
+    {
+        var mapped = ToMsysPath(value);
+        return mapped.Length > 1 ? mapped.TrimEnd('/') : mapped;
     }
 
     private static void EnsureMarker(string marker, string parameterName)

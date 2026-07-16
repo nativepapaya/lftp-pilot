@@ -73,6 +73,43 @@ public sealed class LftpRemoteEditTransportTests
     }
 
     [Fact]
+    public async Task SoleCommandPrefixedPathlessMissingDiagnosticIsTreatedAsAbsent()
+    {
+        await using var harness = await Harness.CreateAsync();
+        harness.Host.StatResultForPath = static path => path == "/missing.txt"
+            ? new([new("stderr", "cls: Access failed: No such file")])
+            : null;
+
+        var identity = await harness.Transport.StatAsync(
+            harness.SessionId,
+            "/missing.txt",
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(identity);
+    }
+
+    [Fact]
+    public async Task CommandPrefixedPathBoundMissingDiagnosticRequiresTheRequestedPath()
+    {
+        await using var harness = await Harness.CreateAsync();
+        harness.Host.StatResultForPath = static path => path switch
+        {
+            "/missing.txt" => new([new("stderr", "recls: Access failed: 550 No such file or directory. (/missing.txt)")]),
+            "/requested.txt" => new([new("stderr", "recls: Access failed: 550 No such file or directory. (/different.txt)")]),
+            _ => null,
+        };
+
+        Assert.Null(await harness.Transport.StatAsync(
+            harness.SessionId,
+            "/missing.txt",
+            TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<InvalidDataException>(() => harness.Transport.StatAsync(
+            harness.SessionId,
+            "/requested.txt",
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task Ftp550MissingDiagnosticForDifferentPathFailsClosed()
     {
         await using var harness = await Harness.CreateAsync();
@@ -96,6 +133,10 @@ public sealed class LftpRemoteEditTransportTests
             "/stderr-noise.txt" => new([new("stderr", "server emitted an unclassified warning")]),
             "/blank.txt" => new([new("stdout", string.Empty)]),
             "/multiple.txt" => new([new("stdout", "first"), new("stdout", "second")]),
+            "/mixed-missing.txt" => new([
+                new("stderr", "cls: Access failed: No such file"),
+                new("stdout", "-rw-r--r-- 1 alice staff 12 2026-07-15 12:34 mixed-missing.txt"),
+            ]),
             "/truncated.txt" => new([], Truncated: true),
             "/failure.txt" => new([], Failure: "simulated transport failure"),
             _ => null,
@@ -109,6 +150,8 @@ public sealed class LftpRemoteEditTransportTests
             harness.SessionId, "/blank.txt", TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<InvalidDataException>(() => harness.Transport.StatAsync(
             harness.SessionId, "/multiple.txt", TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<InvalidDataException>(() => harness.Transport.StatAsync(
+            harness.SessionId, "/mixed-missing.txt", TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<InvalidDataException>(() => harness.Transport.StatAsync(
             harness.SessionId, "/truncated.txt", TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<IOException>(() => harness.Transport.StatAsync(

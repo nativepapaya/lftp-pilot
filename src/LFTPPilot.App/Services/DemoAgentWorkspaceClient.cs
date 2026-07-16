@@ -162,8 +162,8 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
     public Task<JobSnapshot> ApproveMirrorAsync(MirrorUiPreview preview, bool deletionsApproved, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (preview.Definition.DeleteExtraneous && !deletionsApproved)
-            throw new InvalidOperationException("Deletion-capable mirrors require explicit approval.");
+        if ((preview.Definition.DeleteExtraneous || preview.Preview.ContainsDeletions) && !deletionsApproved)
+            throw new InvalidOperationException("Mirror previews containing deletion actions require explicit approval.");
         var now = DateTimeOffset.Now;
         return Task.FromResult(new JobSnapshot(Guid.NewGuid(), JobKind.Mirror, preview.Definition.ProfileId, preview.Definition.Name, JobState.Queued, now, now, Status: "Approved preview queued"));
     }

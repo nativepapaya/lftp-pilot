@@ -58,10 +58,28 @@ public sealed class SessionViewModel : ObservableObject
         if (profile.Id == ProfileId) RemotePane.UpdateProfile(profile);
     }
 
-    public IReadOnlyList<string> GetSelectedPaths(TransferDirection direction)
+    public IReadOnlyList<FilePaneTransferSource> GetSelectedSources(TransferDirection direction)
     {
         var pane = direction == TransferDirection.Upload ? LocalPane : RemotePane;
-        return pane.SelectedEntries.Select(static item => item.FullPath).ToArray();
+        var sources = new List<FilePaneTransferSource>(pane.SelectedEntries.Count);
+        foreach (var item in pane.SelectedEntries)
+        {
+            var kind = item.Entry.Kind switch
+            {
+                EntryKind.File => TransferSourceKind.File,
+                EntryKind.Directory => TransferSourceKind.Directory,
+                _ => (TransferSourceKind?)null,
+            };
+            if (kind is null)
+            {
+                StatusText = "Only regular files and directories can be transferred";
+                return [];
+            }
+
+            sources.Add(new(item.FullPath, kind.Value));
+        }
+
+        return sources;
     }
 
     public async Task<RemoteEditSession> StartRemoteEditAsync(FileEntryViewModel entry)
@@ -75,24 +93,58 @@ public sealed class SessionViewModel : ObservableObject
         return edit;
     }
 
-    public async Task QueuePathsAsync(
+    public async Task QueueSourcesAsync(
         TransferDirection direction,
-        IReadOnlyList<string> paths,
+        IReadOnlyList<FilePaneTransferSource> sources,
         TransferUiOptions? options = null)
     {
-        if (paths.Count == 0) return;
+        if (sources is null)
+        {
+            StatusText = "No items were queued";
+            throw new ArgumentNullException(nameof(sources));
+        }
+
+        if (sources.Count == 0)
+        {
+            StatusText = "No items selected";
+            return;
+        }
+
+        if (!FilePaneDragDropRegistry.TryCopyValidSources(sources, out var validatedSources))
+        {
+            StatusText = "No items were queued";
+            throw new ArgumentException("Select between 1 and 100 regular files or directories with valid paths.", nameof(sources));
+        }
 
         options ??= TransferUiOptions.Defaults(direction);
+        if (validatedSources.Any(static source => source.Kind == TransferSourceKind.Directory) &&
+            options.Mode is not TransferMode.Auto and not TransferMode.Resume)
+        {
+            StatusText = "No items were queued";
+            throw new ArgumentException("Directory transfers support only Auto or Resume mode.", nameof(options));
+        }
+
         StatusText = direction == TransferDirection.Upload ? "Queueing upload…" : "Queueing download…";
         var destinationRoot = direction == TransferDirection.Upload ? RemotePane.Path : LocalPane.Path;
         var segments = direction == TransferDirection.Download ? Math.Clamp(options.DownloadSegments, 1, 16) : 1;
-        var queued = 0;
-
-        foreach (var sourcePath in paths)
+        var execution = await TransferQueueAggregation.ExecuteAsync<JobSnapshot>(validatedSources, EnqueueOneAsync).ConfigureAwait(true);
+        foreach (var failure in execution.Failures)
         {
+            System.Diagnostics.Debug.WriteLine(
+                $"A {failure.Source.Kind.ToString().ToLowerInvariant()} transfer enqueue attempt failed before Agent acceptance.");
+        }
+
+        var result = execution.ToResult();
+        StatusText = TransferQueueAggregation.FormatStatus(result, options.RunAt is not null);
+        if (result.FailedCount > 0) throw new TransferQueueException(result, execution.Failures);
+
+        async Task<JobSnapshot> EnqueueOneAsync(FilePaneTransferSource source)
+        {
+            var sourcePath = source.Path;
+            var destinationLeaf = TransferLeafName(direction, sourcePath);
             var destinationPath = direction == TransferDirection.Upload
-                ? CombineRemote(destinationRoot, Path.GetFileName(sourcePath))
-                : Path.Combine(destinationRoot, RemoteFileName(sourcePath));
+                ? CombineRemote(destinationRoot, destinationLeaf)
+                : Path.Combine(destinationRoot, destinationLeaf);
             var plan = new TransferPlan(
                 Guid.NewGuid(),
                 ProfileId,
@@ -102,28 +154,46 @@ public sealed class SessionViewModel : ObservableObject
                 options.Mode,
                 segments,
                 options.RateLimitBytesPerSecond,
-                options.RunAt);
+                options.RunAt,
+                SourceKind: source.Kind);
             var job = await _agent.EnqueueTransferAsync(SessionId, plan).ConfigureAwait(true);
-            JobQueued?.Invoke(this, job);
-            queued++;
-        }
+            try
+            {
+                JobQueued?.Invoke(this, job);
+            }
+            catch (Exception exception)
+            {
+                // A presentation subscriber cannot turn an Agent-accepted job into
+                // a failed transfer or cause the user to queue it a second time.
+                System.Diagnostics.Debug.WriteLine(exception);
+            }
 
-        var status = options.RunAt is null ? "Queued" : "Scheduled";
-        StatusText = $"{status} {queued} item{(queued == 1 ? string.Empty : "s")}";
+            return job;
+        }
     }
 
     private async Task TransferAsync(TransferDirection direction)
     {
-        var paths = GetSelectedPaths(direction);
-        if (paths.Count == 0) return;
-        await QueuePathsAsync(direction, paths, TransferUiOptions.Defaults(direction)).ConfigureAwait(true);
+        var sources = GetSelectedSources(direction);
+        if (sources.Count == 0) return;
+        await QueueSourcesAsync(direction, sources, TransferUiOptions.Defaults(direction)).ConfigureAwait(true);
     }
 
     private static string CombineRemote(string root, string name) =>
         root.EndsWith("/", StringComparison.Ordinal) ? $"{root}{name}" : $"{root}/{name}";
 
-    private static string RemoteFileName(string path) =>
-        path.TrimEnd('/').Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "download";
+    private static string TransferLeafName(TransferDirection direction, string path)
+    {
+        var name = direction == TransferDirection.Upload
+            ? Path.GetFileName(Path.TrimEndingDirectorySeparator(path))
+            : path.TrimEnd('/').Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            throw new InvalidOperationException(
+                "Root-wide folder transfers require the reviewed Mirror workflow; select an item below the root instead.");
+        }
+        return name;
+    }
 
     private void ReportError(Exception exception) => StatusText = exception.Message;
 }

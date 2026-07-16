@@ -23,6 +23,7 @@ public enum AuthenticationKind
 public enum PaneKind { Local, Remote }
 public enum EntryKind { File, Directory, SymbolicLink, Other }
 public enum TransferDirection { Download, Upload }
+public enum TransferSourceKind { File, Directory }
 public enum TransferMode { Auto, Resume, Overwrite, Skip }
 public enum MirrorDirection { Download, Upload }
 public enum MirrorActionKind { Download, Upload, CreateDirectory, DeleteFile, DeleteDirectory, UpdateMetadata, Other }
@@ -89,7 +90,8 @@ public sealed record TransferPlan(
     TransferMode Mode = TransferMode.Auto,
     int Segments = 1,
     long? RateLimitBytesPerSecond = null,
-    DateTimeOffset? RunAt = null);
+    DateTimeOffset? RunAt = null,
+    TransferSourceKind SourceKind = TransferSourceKind.File);
 
 public sealed record MirrorDefinition(
     Guid Id,

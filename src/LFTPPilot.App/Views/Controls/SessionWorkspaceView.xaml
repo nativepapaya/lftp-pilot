@@ -10,7 +10,7 @@
             <ColumnDefinition Width="*" MinWidth="320" />
         </Grid.ColumnDefinitions>
 
-        <controls:FilePaneView x:Name="LocalPane" DataContext="{Binding LocalPane}" TransferRequested="LocalPane_TransferRequested" TransferOptionsRequested="LocalPane_TransferOptionsRequested" FilesDropped="LocalPane_FilesDropped" />
+        <controls:FilePaneView x:Name="LocalPane" DataContext="{Binding LocalPane}" TransferRequested="LocalPane_TransferRequested" TransferOptionsRequested="LocalPane_TransferOptionsRequested" FilesDropped="LocalPane_FilesDropped" DropRejected="Pane_DropRejected" />
 
         <StackPanel Grid.Column="1" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
             <Button
@@ -61,6 +61,6 @@
             </Button>
         </StackPanel>
 
-        <controls:FilePaneView x:Name="RemotePane" Grid.Column="2" DataContext="{Binding RemotePane}" TransferRequested="RemotePane_TransferRequested" TransferOptionsRequested="RemotePane_TransferOptionsRequested" FilesDropped="RemotePane_FilesDropped" RemoteEditRequested="RemotePane_RemoteEditRequested" />
+        <controls:FilePaneView x:Name="RemotePane" Grid.Column="2" DataContext="{Binding RemotePane}" TransferRequested="RemotePane_TransferRequested" TransferOptionsRequested="RemotePane_TransferOptionsRequested" FilesDropped="RemotePane_FilesDropped" DropRejected="Pane_DropRejected" RemoteEditRequested="RemotePane_RemoteEditRequested" />
     </Grid>
 </UserControl>

@@ -29,7 +29,7 @@ public sealed record AgentWorkspaceOptions(
 
 public sealed class SessionRegistry : IAsyncDisposable
 {
-    private const string CommonSettings = "set cmd:fail-exit no; set file:charset UTF-8; set cmd:cls-exact-time no; set cache:expire 2m; set net:idle 10m";
+    private const string CommonSettings = "set cmd:fail-exit no; set file:charset UTF-8; set cmd:cls-exact-time no; set cache:expire 2m; set net:idle 10m; set xfer:make-backup no; set xfer:use-temp-file yes";
     private readonly ILftpProcessHost _processHost;
     private readonly ILftpRuntimeProvider _runtimeProvider;
     private readonly AgentWorkspaceOptions _options;
@@ -309,8 +309,10 @@ internal sealed class WorkspaceSession : IAsyncDisposable
     private readonly SessionRegistry _registry;
     private readonly SemaphoreSlim _roleGate = new(1, 1);
     private readonly SemaphoreSlim _transferOperationGate = new(1, 1);
+    private readonly SemaphoreSlim _validationOperationGate = new(1, 1);
     private ILftpSession? _transfer;
     private ILftpSession? _console;
+    private ILftpSession? _validation;
     private NativeTransferQueue? _nativeTransferQueue;
     private SessionSnapshot _snapshot;
     private bool _disposed;
@@ -341,17 +343,23 @@ internal sealed class WorkspaceSession : IAsyncDisposable
     public Task<ILftpSession> GetConsoleAsync(CancellationToken cancellationToken) => GetRoleAsync("console", cancellationToken);
     public Task<ILftpSession> CreateEphemeralAsync(string role, CancellationToken cancellationToken) => _registry.StartEphemeralAsync(this, role, cancellationToken);
 
-    public async Task ExecuteQueuedTransferAsync(TransferPlan plan, CancellationToken cancellationToken)
+    public async Task ExecuteQueuedTransferAsync(
+        TransferPlan plan,
+        Func<ILftpSession, CancellationToken, Task> preSubmit,
+        CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(preSubmit);
+        if (plan.SourceKind == TransferSourceKind.Directory)
+            throw new InvalidOperationException("Directory transfers require the guarded foreground transfer session.");
         if (plan.RateLimitBytesPerSecond is not null ||
             plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip)
         {
             await using var isolated = await _registry.StartIsolatedTransferQueueAsync(this, plan.Id, cancellationToken).ConfigureAwait(false);
-            await isolated.ExecuteAsync(plan, cancellationToken).ConfigureAwait(false);
+            await isolated.ExecuteAsync(plan, preSubmit, cancellationToken).ConfigureAwait(false);
             return;
         }
         var queue = await GetTransferQueueAsync(cancellationToken).ConfigureAwait(false);
-        await queue.ExecuteAsync(plan, cancellationToken).ConfigureAwait(false);
+        await queue.ExecuteAsync(plan, preSubmit, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<T> WithTransferSessionAsync<T>(Func<ILftpSession, Task<T>> operation, CancellationToken cancellationToken)
@@ -370,6 +378,22 @@ internal sealed class WorkspaceSession : IAsyncDisposable
         }
     }
 
+    public async Task<T> WithValidationSessionAsync<T>(Func<ILftpSession, Task<T>> operation, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _validationOperationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var validation = await GetRoleAsync("validation", cancellationToken).ConfigureAwait(false);
+            return await operation(validation).ConfigureAwait(false);
+        }
+        finally
+        {
+            _validationOperationGate.Release();
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
@@ -378,9 +402,11 @@ internal sealed class WorkspaceSession : IAsyncDisposable
         await Browse.DisposeAsync().ConfigureAwait(false);
         if (_transfer is not null) await _transfer.DisposeAsync().ConfigureAwait(false);
         if (_console is not null) await _console.DisposeAsync().ConfigureAwait(false);
+        if (_validation is not null) await _validation.DisposeAsync().ConfigureAwait(false);
         if (_nativeTransferQueue is not null) await _nativeTransferQueue.DisposeAsync().ConfigureAwait(false);
         _roleGate.Dispose();
         _transferOperationGate.Dispose();
+        _validationOperationGate.Dispose();
     }
 
     private async Task<NativeTransferQueue> GetTransferQueueAsync(CancellationToken cancellationToken)
@@ -406,11 +432,19 @@ internal sealed class WorkspaceSession : IAsyncDisposable
         await _roleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var current = role == "transfer" ? _transfer : _console;
+            var current = role switch
+            {
+                "transfer" => _transfer,
+                "console" => _console,
+                "validation" => _validation,
+                _ => throw new ArgumentOutOfRangeException(nameof(role), "The persistent LFTP session role is unsupported."),
+            };
             if (current?.IsRunning == true) return current;
             if (current is not null) await current.DisposeAsync().ConfigureAwait(false);
             current = await _registry.StartAuxiliaryAsync(this, role, cancellationToken).ConfigureAwait(false);
-            if (role == "transfer") _transfer = current; else _console = current;
+            if (role == "transfer") _transfer = current;
+            else if (role == "console") _console = current;
+            else _validation = current;
             return current;
         }
         finally
