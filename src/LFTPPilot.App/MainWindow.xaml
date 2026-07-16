@@ -1,0 +1,107 @@
+<Window
+    x:Class="LFTPPilot.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:LFTPPilot.App.Views.Controls"
+    xmlns:pages="using:LFTPPilot.App.Views.Pages"
+    Title="LFTP Pilot">
+
+    <Grid x:Name="RootGrid" Background="Transparent">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="14,0,8,0" Background="Transparent">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Border Width="28" Height="28" CornerRadius="7" Background="{ThemeResource PilotAccentBrush}">
+                <FontIcon Glyph="&#xE8AB;" FontSize="15" Foreground="{ThemeResource PilotOnAccentBrush}" AutomationProperties.Name="LFTP Pilot" />
+            </Border>
+            <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+                <TextBlock Text="LFTP Pilot" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                <TextBlock Text="{Binding AgentStatus}" FontSize="11" Opacity="0.72" />
+            </StackPanel>
+            <CommandBar Grid.Column="2" Margin="0,0,144,0" DefaultLabelPosition="Right" Background="Transparent" IsOpen="False">
+                <AppBarButton Label="Connect" Click="Connect_Click" AutomationProperties.Name="Manage connections">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE710;" /></AppBarButton.Icon>
+                    <AppBarButton.KeyboardAccelerators>
+                        <KeyboardAccelerator Key="N" Modifiers="Control" />
+                    </AppBarButton.KeyboardAccelerators>
+                </AppBarButton>
+                <AppBarButton Label="Mirror" Click="Mirror_Click" AutomationProperties.Name="Plan a mirror job">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE895;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarButton Label="Server transfer" Click="RemoteTransfer_Click" AutomationProperties.Name="Remote-to-remote transfer">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE8AB;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarButton Label="Active edits" Click="ActiveEdits_Click" AutomationProperties.Name="Review active managed remote edits">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE70F;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarButton Label="Console" Click="Console_Click" AutomationProperties.Name="Open isolated LFTP console">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE756;" /></AppBarButton.Icon>
+                </AppBarButton>
+                <AppBarButton Label="Settings" Click="Settings_Click" AutomationProperties.Name="Open settings">
+                    <AppBarButton.Icon><FontIcon Glyph="&#xE713;" /></AppBarButton.Icon>
+                </AppBarButton>
+            </CommandBar>
+        </Grid>
+
+        <StackPanel Grid.Row="1" Margin="12,0,12,8" Spacing="6">
+            <InfoBar
+                IsOpen="{Binding IsDemoMode}"
+                IsClosable="False"
+                Severity="Informational"
+                Title="Interactive diagnostic workspace"
+                Message="The explicit diagnostic demo transport is active; commands do not reach the Agent." />
+            <InfoBar
+                IsOpen="{Binding HasAgentError}"
+                IsClosable="False"
+                Severity="Error"
+                Title="Agent connection failed"
+                Message="{Binding AgentStatus}">
+                <InfoBar.ActionButton>
+                    <Button Content="Retry" Command="{Binding InitializeCommand}" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+        </StackPanel>
+
+        <Grid Grid.Row="2" Margin="12,0,12,8">
+            <ProgressRing
+                Width="48"
+                Height="48"
+                IsActive="{Binding IsLoading}"
+                Visibility="{Binding IsLoading, Converter={StaticResource BoolToVisibilityConverter}}"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Canvas.ZIndex="10"
+                AutomationProperties.Name="Loading workspace" />
+            <TabView
+                x:Name="SessionTabs"
+                TabItemsSource="{Binding Sessions}"
+                SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
+                IsAddTabButtonVisible="True"
+                AddTabButtonClick="SessionTabs_AddTabButtonClick"
+                TabCloseRequested="SessionTabs_TabCloseRequested"
+                AutomationProperties.Name="Connection sessions">
+                <TabView.TabItemTemplate>
+                    <DataTemplate>
+                        <TabViewItem Header="{Binding DisplayName}" IsClosable="True">
+                            <TabViewItem.IconSource>
+                                <FontIconSource Glyph="{Binding ConnectionGlyph}" />
+                            </TabViewItem.IconSource>
+                            <controls:SessionWorkspaceView DataContext="{Binding}" />
+                        </TabViewItem>
+                    </DataTemplate>
+                </TabView.TabItemTemplate>
+            </TabView>
+        </Grid>
+
+        <controls:ActivityCenterView Grid.Row="3" Margin="12,0,12,12" DataContext="{Binding Activity}" />
+    </Grid>
+</Window>

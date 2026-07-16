@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "sdkVersion": "10.0.302",
+  "runtimeIdentifier": "win-x64",
+  "packs": [
+    {
+      "frameworkReference": "Microsoft.NETCore.App",
+      "name": "Microsoft.NETCore.App.Runtime.win-x64",
+      "version": "10.0.10",
+      "contentHash": "d/6m2bwNP35/bBDmtNPb0GBLwlK0eyM8/Qb7zEtIFJDgjAo960bROUlB6XcuLM4VmfA8hklOgGDU98nUg6xDwA==",
+      "sha512": "77fea6d9bc0d3f7e7f6c10e6b4d3dbd0604bc252b47b233cfd06fbcc4b481490e08c0a3deb46d1394941e9772e2cce1599f03c86494e8060d4f7c9d483ac43c0"
+    }
+  ]
+}

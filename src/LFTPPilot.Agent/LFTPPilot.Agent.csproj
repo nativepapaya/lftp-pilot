@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RootNamespace>LFTPPilot.Agent</RootNamespace>
+    <AssemblyName>LFTPPilot.Agent</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\LFTPPilot.Core\LFTPPilot.Core.csproj" />
+    <ProjectReference Include="..\LFTPPilot.Engine\LFTPPilot.Engine.csproj" />
+    <ProjectReference Include="..\LFTPPilot.Windows\LFTPPilot.Windows.csproj" />
+  </ItemGroup>
+</Project>

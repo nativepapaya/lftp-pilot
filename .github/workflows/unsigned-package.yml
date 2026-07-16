@@ -1,0 +1,96 @@
+name: Build unsigned MSIX
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  package:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: 'true'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          global-json-file: global.json
+      - name: Calculate monotonic package version
+        id: version
+        shell: pwsh
+        run: ./build/Get-MsixVersion.ps1 -ProductVersion '1.0' -Sequence ${{ github.run_number }} -GitHubOutput $env:GITHUB_OUTPUT
+      - name: Restore and test
+        shell: pwsh
+        run: |
+          dotnet restore LFTPPilot.slnx --locked-mode -r win-x64
+          dotnet test tests/LFTPPilot.Tests/LFTPPilot.Tests.csproj -c Release --no-restore
+          Get-ChildItem ./build/tests/*.Tests.ps1 | Sort-Object Name | ForEach-Object { & $_.FullName }
+      - name: Generate reviewed package assets and set identity version
+        shell: pwsh
+        env:
+          MSIX_VERSION: ${{ steps.version.outputs.msix_version }}
+        run: |
+          ./build/Generate-PlaceholderAssets.ps1 | Out-Null
+          ./build/Set-PackageVersion.ps1 -Version $env:MSIX_VERSION | Out-Null
+      - name: Publish companion processes
+        shell: pwsh
+        run: |
+          $agent = Join-Path $env:RUNNER_TEMP 'companions\agent'
+          $engine = Join-Path $env:RUNNER_TEMP 'companions\engine'
+          dotnet publish src/LFTPPilot.Agent/LFTPPilot.Agent.csproj -c Release -r win-x64 --self-contained true --no-restore -o $agent
+          if ($LASTEXITCODE -ne 0) { throw 'Agent publish failed.' }
+          dotnet publish src/LFTPPilot.Engine/LFTPPilot.Engine.csproj -c Release -r win-x64 --self-contained true --no-restore -o $engine
+          if ($LASTEXITCODE -ne 0) { throw 'Engine publish failed.' }
+      - name: Acquire authenticated locked LFTP runtime
+        shell: pwsh
+        run: >-
+          ./build/Acquire-LftpRuntime.ps1
+          -UseAuthenticatedLockEvidence
+          -ArchiveDirectory $env:RUNNER_TEMP\msys2-archives
+          -OutputDirectory $env:RUNNER_TEMP\lftp-runtime
+      - name: Publish explicitly unsigned self-contained x64 MSIX
+        shell: pwsh
+        run: |
+          $agent = (Join-Path $env:RUNNER_TEMP 'companions\agent') + [IO.Path]::DirectorySeparatorChar
+          $engine = (Join-Path $env:RUNNER_TEMP 'companions\engine') + [IO.Path]::DirectorySeparatorChar
+          $runtime = (Join-Path $env:RUNNER_TEMP 'lftp-runtime') + [IO.Path]::DirectorySeparatorChar
+          $package = (Join-Path $env:RUNNER_TEMP 'AppPackages') + [IO.Path]::DirectorySeparatorChar
+          dotnet publish src/LFTPPilot.App/LFTPPilot.App.csproj `
+            -c Release -r win-x64 --self-contained true --no-restore `
+            -p:Platform=x64 -p:GenerateAppxPackageOnBuild=true `
+            -p:AppxPackageSigningEnabled=false -p:AppxBundle=Never `
+            -p:AppxSymbolPackageEnabled=false -p:UapAppxPackageBuildMode=SideloadOnly `
+            -p:PublishReadyToRun=false -p:IncludeCompanionPayloads=true -p:IncludeLftpRuntime=true `
+            "-p:AgentPublishDir=$agent" "-p:EnginePublishDir=$engine" "-p:LftpRuntimeDir=$runtime" "-p:AppxPackageDir=$package"
+          if ($LASTEXITCODE -ne 0) { throw 'App package publish failed.' }
+      - name: Stage and validate package
+        shell: pwsh
+        env:
+          MSIX_VERSION: ${{ steps.version.outputs.msix_version }}
+        run: |
+          $packages = @(Get-ChildItem $env:RUNNER_TEMP\AppPackages -Recurse -File -Filter *.msix)
+          if ($packages.Count -ne 1) { throw "Expected one MSIX, found $($packages.Count)." }
+          ./build/Test-UnsignedPackage.ps1 -MsixPath $packages[0].FullName -ExpectedVersion $env:MSIX_VERSION -RequireRuntime
+          ./build/Test-PackagedLftp.ps1 -MsixPath $packages[0].FullName
+          New-Item $env:RUNNER_TEMP\unsigned -ItemType Directory -Force | Out-Null
+          Copy-Item $packages[0].FullName $env:RUNNER_TEMP\unsigned\LFTPPilot.msix
+          ./build/New-AppInstaller.ps1 -Version $env:MSIX_VERSION -OutputPath $env:RUNNER_TEMP\unsigned\LFTPPilot.appinstaller | Out-Null
+      - name: Attest exact unsigned MSIX
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ runner.temp }}\unsigned\LFTPPilot.msix
+      - name: Upload unsigned package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lftp-pilot-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\unsigned
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

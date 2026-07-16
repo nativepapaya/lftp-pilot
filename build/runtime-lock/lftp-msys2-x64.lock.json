@@ -1,0 +1,655 @@
+{
+  "schema": 3,
+  "repository": "https://repo.msys2.org/msys/x86_64/",
+  "architecture": "x64",
+  "bundleRevision": "8",
+  "inventorySha256": "9330244e563b83c2b5be8a9881bc93c0672097cc1996b28676831dbd2e05fecf",
+  "roots": [
+    "msys2-runtime",
+    "lftp",
+    "openssh",
+    "bash",
+    "ca-certificates"
+  ],
+  "packages": [
+    {
+      "name": "msys2-runtime",
+      "version": "3.6.9-2",
+      "filename": "msys2-runtime-3.6.9-2-x86_64.pkg.tar.zst",
+      "sha256": "20f39ad6d0fd2aae93ca84c2e9efbe567d3d7f5d465dc0810b700d7cbac0c3a4",
+      "dependencies": [],
+      "signature": {
+        "sha256": "14e050e7c7f3aa508861c0f2b3192dcc7f02a65ca50aaa7b3e05ef31f9fb78a6",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "lftp",
+      "version": "4.9.3-1",
+      "filename": "lftp-4.9.3-1-x86_64.pkg.tar.zst",
+      "sha256": "1f831bbfdd2b29d6cd54bea849f3f3f5f8ce5fbe45fbcce9a670c63d930e92cf",
+      "dependencies": [
+        "ca-certificates",
+        "expat",
+        "gcc-libs",
+        "gettext",
+        "libexpat",
+        "libgnutls",
+        "libiconv",
+        "libidn2",
+        "libintl",
+        "libreadline",
+        "libunistring",
+        "openssh",
+        "zlib"
+      ],
+      "signature": {
+        "sha256": "79beb4b99419840c35fd3ad5c611cd4ee7fdc0a660163efc0a70a104a1aee479",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "gcc-libs",
+      "version": "15.3.0-1",
+      "filename": "gcc-libs-15.3.0-1-x86_64.pkg.tar.zst",
+      "sha256": "0d99a122c453c05ae21ba3dcea910f2e0d93d38ae067c677a112a315b0f3cec5",
+      "dependencies": [],
+      "signature": {
+        "sha256": "994ccac224e5a7a3c5c11e9ea11193c956bc5d1288b1be42f9fa437286542599",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "ca-certificates",
+      "version": "20250419-1",
+      "filename": "ca-certificates-20250419-1-any.pkg.tar.zst",
+      "sha256": "7afc4754426fa1309be91d33037455f017704742f54b34fe071284a772875caa",
+      "dependencies": [
+        "bash",
+        "coreutils",
+        "findutils",
+        "openssl",
+        "p11-kit",
+        "sed"
+      ],
+      "signature": {
+        "sha256": "df3a010c44011cce6462e7f114636cf9c480dca34f8fe1e3d9ffc0f074a26e64",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "bash",
+      "version": "5.3.015-1",
+      "filename": "bash-5.3.015-1-x86_64.pkg.tar.zst",
+      "sha256": "ecd097c0b85938b3167abd7e839a6113b25c8b581b14954aad02e1f8ce556c8e",
+      "dependencies": [],
+      "signature": {
+        "sha256": "374843698dde21c358a227b99692824d4425a078ba7ad56c85d0087ba0ed7853",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "openssl",
+      "version": "3.6.3-1",
+      "filename": "openssl-3.6.3-1-x86_64.pkg.tar.zst",
+      "sha256": "26b53a063e95bd9295b796053ac34d0a4ec77dc49fb11fc135454ea676e7e9c5",
+      "dependencies": [
+        "libopenssl"
+      ],
+      "signature": {
+        "sha256": "ee27897f2b167fe31258dd2bf7be8944202e111c37bba735a72e1bc643d577de",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libopenssl",
+      "version": "3.6.3-1",
+      "filename": "libopenssl-3.6.3-1-x86_64.pkg.tar.zst",
+      "sha256": "f85f28d46b09d02229bfe923c9cc323463810fc4dbea2e8275a2fdc40edb2c53",
+      "dependencies": [],
+      "signature": {
+        "sha256": "d58483fe2e0088503e163bb845a7cf2770cd2b0bc9caf1754d6f007f68aebfbb",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "findutils",
+      "version": "4.10.0-3",
+      "filename": "findutils-4.10.0-3-x86_64.pkg.tar.zst",
+      "sha256": "77665a1e69d41461a1a628f7da557fee5936469808282dc674d703effdfccb6e",
+      "dependencies": [
+        "libiconv",
+        "libintl"
+      ],
+      "signature": {
+        "sha256": "bd4b968534eff71357c2277f252d9197eef88455990c83a842e41099df0d2939",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libiconv",
+      "version": "1.19-1",
+      "filename": "libiconv-1.19-1-x86_64.pkg.tar.zst",
+      "sha256": "0fa55ea2a6ccf97cf8c58b24b2615815e15e16e6e4e888091c263c2c83c5313d",
+      "dependencies": [
+        "gcc-libs"
+      ],
+      "signature": {
+        "sha256": "273339e4ff358e016840a7808f6cdebc119b820ada9467f49cc4396d1d406a97",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libintl",
+      "version": "0.22.5-1",
+      "filename": "libintl-0.22.5-1-x86_64.pkg.tar.zst",
+      "sha256": "336d66b9d95cf9c1804958f8e260762a3e83bf158ed5981f783bc772a31073cf",
+      "dependencies": [
+        "gcc-libs",
+        "libiconv"
+      ],
+      "signature": {
+        "sha256": "1adbb78dc17437af97cea7491aa1637917ec09e69d3d94a628624e2b32b4d937",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "coreutils",
+      "version": "8.32-5",
+      "filename": "coreutils-8.32-5-x86_64.pkg.tar.zst",
+      "sha256": "62dfee1c39fd15f99c39802b35e82643bc14fffc16d6c76d4001caa385ec77e3",
+      "dependencies": [
+        "gmp",
+        "libiconv",
+        "libintl"
+      ],
+      "signature": {
+        "sha256": "622861ad85807d070f3665d7f6c524c27a5e1d2050b0ee3f806247f185a07ad2",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "gmp",
+      "version": "6.3.0-2",
+      "filename": "gmp-6.3.0-2-x86_64.pkg.tar.zst",
+      "sha256": "f84536138e618d47a1df2da83916cfebbd449f159ffad52f994a71060a41cf34",
+      "dependencies": [],
+      "signature": {
+        "sha256": "2fe4effbb7950beba40d46dfd83db242c79d8989ee712c125e89bc292e94f24d",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "sed",
+      "version": "4.9-1",
+      "filename": "sed-4.9-1-x86_64.pkg.tar.zst",
+      "sha256": "3748af28f69e946ec5a42e6670c9bbf6da7352dc93baaa537f69e99c5483b9fc",
+      "dependencies": [
+        "bash",
+        "libintl"
+      ],
+      "signature": {
+        "sha256": "f581e034fe9b375764c64880278604e0b42cb544f40c1ce01eb1492d0af1e056",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "p11-kit",
+      "version": "0.26.4-1",
+      "filename": "p11-kit-0.26.4-1-x86_64.pkg.tar.zst",
+      "sha256": "f1ef8c518e53e5f439e0b01587e326536330ad547221af17a3b6a514f7f9a812",
+      "dependencies": [
+        "libp11-kit"
+      ],
+      "signature": {
+        "sha256": "617c55791dca82ad67539b615e057bcbc1da58067ef5964c6a59aa61fcc32f7c",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libp11-kit",
+      "version": "0.26.4-1",
+      "filename": "libp11-kit-0.26.4-1-x86_64.pkg.tar.zst",
+      "sha256": "8c682d3010b3d641cc34e22221b5d042ff45bb3dd32fa669531c7e3ef5f9f13e",
+      "dependencies": [
+        "libffi",
+        "libintl",
+        "libtasn1"
+      ],
+      "signature": {
+        "sha256": "55f02754b35e7355e7e1787b4c9967237c0b0fb5af78c865d3dbaa34197a7966",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libffi",
+      "version": "3.7.1-1",
+      "filename": "libffi-3.7.1-1-x86_64.pkg.tar.zst",
+      "sha256": "d33024a6839127a13db1d0331e3c08b3b80488a111c7ad6b1694a9a02b55b8f2",
+      "dependencies": [],
+      "signature": {
+        "sha256": "e947a227ef21f5c1ab422a161d43124d2b6ea24e32452dcd3349723e203e9653",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libtasn1",
+      "version": "4.21.0-1",
+      "filename": "libtasn1-4.21.0-1-x86_64.pkg.tar.zst",
+      "sha256": "14f15c4b2b6ebeb6bfcf060cab27a32cd8967f70b0e68cc14670062cce546f04",
+      "dependencies": [
+        "info"
+      ],
+      "signature": {
+        "sha256": "ae7d5d10f0d524153dfe8bdb106ba1e0b397bf9e1d22d16fcba806e67df41e15",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "info",
+      "version": "7.2-3",
+      "filename": "info-7.2-3-x86_64.pkg.tar.zst",
+      "sha256": "69242603357aa7011356f7d15a2017ad086e5682c8577f13520943c94bd2b03e",
+      "dependencies": [
+        "gzip",
+        "libintl",
+        "libxcrypt",
+        "ncurses"
+      ],
+      "signature": {
+        "sha256": "3d009bb77efd7b553898f73b21f4325188111e0f1b66397a0a57c4b283513ffd",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "gzip",
+      "version": "1.14-2",
+      "filename": "gzip-1.14-2-x86_64.pkg.tar.zst",
+      "sha256": "d63e8d98ff030c88663cc64cf8ebd04203fba17365807477efa06f717d7daedc",
+      "dependencies": [
+        "bash",
+        "less"
+      ],
+      "signature": {
+        "sha256": "a7cc40f2a7b0fa29c204c0ac1366f595ba33fdd0d4013f91f38f459a105f1a41",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "less",
+      "version": "704-1",
+      "filename": "less-704-1-x86_64.pkg.tar.zst",
+      "sha256": "0fddcf47bb99487616a0044bd98cda8528952cf5097666436d34383ecffe7fd6",
+      "dependencies": [
+        "libpcre2_8",
+        "ncurses"
+      ],
+      "signature": {
+        "sha256": "cd7147888cabacc0c9807c2d90aa97b79758be4f74170d665a08591405e65526",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "ncurses",
+      "version": "6.6-2",
+      "filename": "ncurses-6.6-2-x86_64.pkg.tar.zst",
+      "sha256": "828c92f09b17f00d3b49362fcfa4affa58e5e50e238f290ea36eb7a690da3acb",
+      "dependencies": [
+        "gcc-libs"
+      ],
+      "signature": {
+        "sha256": "96552e3391030cd6b26a94acfdd21880e4a2865608b94bf30759c93ca6b62e08",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libpcre2_8",
+      "version": "10.47-1",
+      "filename": "libpcre2_8-10.47-1-x86_64.pkg.tar.zst",
+      "sha256": "550804c3fd7c802daf5edb54396ef164cb3c1b4329e250def440eb18a3285ec6",
+      "dependencies": [
+        "gcc-libs"
+      ],
+      "signature": {
+        "sha256": "ca7aeb634157237c8fb78b7d182865a771ff0df02c06789411dd40d594095252",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libxcrypt",
+      "version": "4.5.2-1",
+      "filename": "libxcrypt-4.5.2-1-x86_64.pkg.tar.zst",
+      "sha256": "e63db0aa2b708359e25f61f506e2d2c92c315febf5f88cc9f386e4ec0bdf4fa5",
+      "dependencies": [],
+      "signature": {
+        "sha256": "d2dda19a9fa14dc5c1cba7a41a9b47fedcdfd798fc52e3b530934146c96a6d91",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "expat",
+      "version": "2.8.2-1",
+      "filename": "expat-2.8.2-1-x86_64.pkg.tar.zst",
+      "sha256": "5f883859b5484727f51adfdd047d3a04caaa1fb9b726368fb9dd904cc06ac34c",
+      "dependencies": [],
+      "signature": {
+        "sha256": "7a472a6a0b3ccf97534af58e5ae566793fe09d7aa23a3209b4f8a00bf9f7a788",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "gettext",
+      "version": "0.22.5-1",
+      "filename": "gettext-0.22.5-1-x86_64.pkg.tar.zst",
+      "sha256": "b31ab065c3538ecb1fb6ab48ab2b3049243d6d9e585331c882f38326eefc1831",
+      "dependencies": [
+        "libasprintf",
+        "libgettextpo",
+        "libintl"
+      ],
+      "signature": {
+        "sha256": "66995cb353db6537ffc23ccc3049b3dcb36cfa98c51981ec2d87491734240781",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libgettextpo",
+      "version": "0.22.5-1",
+      "filename": "libgettextpo-0.22.5-1-x86_64.pkg.tar.zst",
+      "sha256": "a9f3ef6b3712e20f0dc6eecaf8c2ec6aff5f259b2dbe87422a0aaca7b27c98d5",
+      "dependencies": [
+        "gcc-libs"
+      ],
+      "signature": {
+        "sha256": "4c37a6483148ec0e3c7fe0e6b73109be0a6d82ef9069ea92c63e22438e00783f",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libasprintf",
+      "version": "0.22.5-1",
+      "filename": "libasprintf-0.22.5-1-x86_64.pkg.tar.zst",
+      "sha256": "fdd59ae72d355ae1c5615f12429493611782f3e38bf1f7ca9ca83b61fcfb6c26",
+      "dependencies": [
+        "gcc-libs"
+      ],
+      "signature": {
+        "sha256": "57f2c559f8521d0aae13bb14a180edf388c974f7240ad6cad141f3d9898474e2",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libexpat",
+      "version": "2.8.2-1",
+      "filename": "libexpat-2.8.2-1-x86_64.pkg.tar.zst",
+      "sha256": "e5d4a947b2b39aa9c5e9233165470fc78e670b679cafda801a2f41c36714dded",
+      "dependencies": [
+        "gcc-libs"
+      ],
+      "signature": {
+        "sha256": "75ddd8da718c63abe05eedcab4b85cfd0f8721154b0e69e837f45309f099fe46",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libgnutls",
+      "version": "3.8.13-2",
+      "filename": "libgnutls-3.8.13-2-x86_64.pkg.tar.zst",
+      "sha256": "144a34bda1456dfbc0ca83ce8ed1ce49e89d750987ef096ab4083676dbcb373e",
+      "dependencies": [
+        "gcc-libs",
+        "gmp",
+        "libiconv",
+        "libidn2",
+        "libintl",
+        "libnettle",
+        "libp11-kit",
+        "libtasn1",
+        "zlib"
+      ],
+      "signature": {
+        "sha256": "93747b5872434917969136798bada84bdc41c712241d38342d17ab6ded7f20da",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libidn2",
+      "version": "2.3.8-1",
+      "filename": "libidn2-2.3.8-1-x86_64.pkg.tar.zst",
+      "sha256": "55e0de96b893e9f67f14a4283d411fc2a45d7b59333bc16e2a9b16e5bfc9282f",
+      "dependencies": [
+        "libintl",
+        "libunistring"
+      ],
+      "signature": {
+        "sha256": "0a63ede3181976c7ffe97aec1aab6dc8c52e45e550eaf1edb93e3cd777901ffb",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libunistring",
+      "version": "1.4.2-1",
+      "filename": "libunistring-1.4.2-1-x86_64.pkg.tar.zst",
+      "sha256": "bcd04706d95b5e7127d39834565bceed6b400192f5fb51599745aba28d5da018",
+      "dependencies": [
+        "libiconv"
+      ],
+      "signature": {
+        "sha256": "e42366a37f23d640892962d99378c16544c3444e7ac76a4ab8011d6fdc78d6f0",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libnettle",
+      "version": "4.0-1",
+      "filename": "libnettle-4.0-1-x86_64.pkg.tar.zst",
+      "sha256": "aa2a398eb5af88247f29d5de683c6d1d7411733c07cc5e6c62803e1e77337cf7",
+      "dependencies": [
+        "libhogweed"
+      ],
+      "signature": {
+        "sha256": "85fd6cf7226bca625bcbda7fc1463a0ae15eead01d1f017be8dab2d76f84495c",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libhogweed",
+      "version": "4.0-1",
+      "filename": "libhogweed-4.0-1-x86_64.pkg.tar.zst",
+      "sha256": "1302b7e86c5c54c93bd431685ccefa89df5f1b01257c68e24f2609df953cfdc2",
+      "dependencies": [
+        "gmp"
+      ],
+      "signature": {
+        "sha256": "ebc58ddd409135d14a9595cdeae51c4700ec28ec5e9297a3eecac854660cafe7",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "zlib",
+      "version": "1.3.2-1",
+      "filename": "zlib-1.3.2-1-x86_64.pkg.tar.zst",
+      "sha256": "a04aa79996c57f0db936be66cf94326d7e67e9cd8dbffe4cf6e97693d0a1d9ef",
+      "dependencies": [
+        "gcc-libs"
+      ],
+      "signature": {
+        "sha256": "97d2a513a19b53edd250476da081803124c985e1fc726b52602fb82908d2d62e",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libreadline",
+      "version": "8.3.003-1",
+      "filename": "libreadline-8.3.003-1-x86_64.pkg.tar.zst",
+      "sha256": "f78e11a496010305fb80b6804518d5c1257794fc87bc8caaf8c4a65d7a983dec",
+      "dependencies": [
+        "ncurses"
+      ],
+      "signature": {
+        "sha256": "df5750167ac977dfeb76559f8d04b093a3f77215346e59ff2de4daa065ed8f36",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "openssh",
+      "version": "10.4p1-1",
+      "filename": "openssh-10.4p1-1-x86_64.pkg.tar.zst",
+      "sha256": "778592d988c4d99bfcd76ad0293b4e6a065fdfc877a291cb2f7dba2a41a1cd5a",
+      "dependencies": [
+        "heimdal",
+        "libedit",
+        "libfido2",
+        "libxcrypt",
+        "openssl"
+      ],
+      "signature": {
+        "sha256": "b29151a1f399880a37dd8c121ed6652e9bea3f34d38c6bbba220551eea51c43e",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "heimdal",
+      "version": "7.8.0-5",
+      "filename": "heimdal-7.8.0-5-x86_64.pkg.tar.zst",
+      "sha256": "4b3906a2a677232d43db712b6fecab50da761c5b229c5018178a577c5c25ec64",
+      "dependencies": [
+        "heimdal-libs"
+      ],
+      "signature": {
+        "sha256": "113236a4daf2914fd119d541664aeb8398092ce55c05bcad630b440d4ee03a98",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "heimdal-libs",
+      "version": "7.8.0-5",
+      "filename": "heimdal-libs-7.8.0-5-x86_64.pkg.tar.zst",
+      "sha256": "d5f139b6feebd75f0b5fefec952c7fbb4cdfa16235601c223dabc3b1bcead19f",
+      "dependencies": [
+        "libdb",
+        "libedit",
+        "libopenssl",
+        "libsqlite",
+        "libxcrypt"
+      ],
+      "signature": {
+        "sha256": "3ed7244898fe3cd66e9bf04cd57926640f47593d44073300afa0e45ef56d9552",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libdb",
+      "version": "6.2.32-6",
+      "filename": "libdb-6.2.32-6-x86_64.pkg.tar.zst",
+      "sha256": "27a35786f3aab14e625c02df7bcd8a9dda0da782ce4f0549a427a21316b4d179",
+      "dependencies": [
+        "gcc-libs"
+      ],
+      "signature": {
+        "sha256": "1f0efaa8e2c0065af9e9fa8bdd8ae990ad414f121e67cb7b7e57fb8e46016294",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libedit",
+      "version": "20240808_3.1-1",
+      "filename": "libedit-20240808_3.1-1-x86_64.pkg.tar.zst",
+      "sha256": "aada8ba7dfe41fdcac28d3706c0dc7c621b7667035a5e629cb5f3af7fb3f7de0",
+      "dependencies": [
+        "bash",
+        "ncurses"
+      ],
+      "signature": {
+        "sha256": "cea62afb5546b9dc5d95e134ab4ce9db868e541b8b2b9516d8cee99276882413",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libsqlite",
+      "version": "3.53.3-1",
+      "filename": "libsqlite-3.53.3-1-x86_64.pkg.tar.zst",
+      "sha256": "2423b33f291f9f1cdf51c2fc5d6f9e4b56c2bace43edb386c1eca6ca95087222",
+      "dependencies": [],
+      "signature": {
+        "sha256": "9c324df9c7cf2af7585833284daf0b871ad90656f949be45be7a680dc93feb05",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libfido2",
+      "version": "1.17.0-1",
+      "filename": "libfido2-1.17.0-1-x86_64.pkg.tar.zst",
+      "sha256": "30794db36fa21af67c7126a221e2cb95b177be08845bb38720a8c9f28c39cdbb",
+      "dependencies": [
+        "libcbor",
+        "openssl",
+        "zlib"
+      ],
+      "signature": {
+        "sha256": "a423daadd68eb7720a053bbc2f1df0b0e41d8277549a678ceeb08688d9191ed9",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    },
+    {
+      "name": "libcbor",
+      "version": "0.14.0-2",
+      "filename": "libcbor-0.14.0-2-x86_64.pkg.tar.zst",
+      "sha256": "a661826edc2d452f8d74bae2cd5974dfbcd84e23bfbfa7ea3db38ee010d7b004",
+      "dependencies": [],
+      "signature": {
+        "sha256": "aa81966a4929ac9b1f4e34c0566090236e65bfbaee4c5a931e85b8e5e797bd4a",
+        "signerFingerprint": "5F944B027F7FE2091985AA2EFA11531AA0AA7F57",
+        "signingKeyId": "FA11531AA0AA7F57"
+      }
+    }
+  ],
+  "caBundleSha256": "9a55dcba9a6a3ee56c3884745b4913629071320618bc291aa95c3e6195bde475",
+  "caSource": {
+    "type": "msys2-package",
+    "package": "ca-certificates",
+    "filename": "ca-certificates-20250419-1-any.pkg.tar.zst"
+  }
+}

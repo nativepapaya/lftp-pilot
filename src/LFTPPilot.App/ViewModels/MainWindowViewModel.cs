@@ -1,0 +1,309 @@
+using System.Collections.ObjectModel;
+using System.Text.Json;
+using LFTPPilot.App.Infrastructure;
+using LFTPPilot.App.Services;
+using LFTPPilot.Core;
+
+namespace LFTPPilot.App.ViewModels;
+
+public sealed class MainWindowViewModel : ObservableObject
+{
+    private readonly IAgentWorkspaceClient _agent;
+    private SessionViewModel? _selectedSession;
+    private bool _isLoading = true;
+    private bool _isDemoMode;
+    private string _agentStatus = "Starting Agent…";
+    private bool _hasAgentError;
+    private readonly SynchronizationContext? _uiContext;
+    private readonly SemaphoreSlim _initializationGate = new(1, 1);
+    private readonly SemaphoreSlim _resyncGate = new(1, 1);
+    private RemoteEditItemViewModel? _selectedActiveRemoteEdit;
+    private int _stateInvalidated;
+
+    public MainWindowViewModel(IAgentWorkspaceClient agent)
+    {
+        _agent = agent;
+        _uiContext = SynchronizationContext.Current;
+        Activity = new ActivityCenterViewModel(agent);
+        Connections = new ConnectionProfilesViewModel(agent);
+        Mirror = new MirrorViewModel(agent);
+        Console = new ConsoleViewModel(agent);
+        RemoteTransfer = new RemoteTransferViewModel(agent);
+        Settings = new SettingsViewModel(agent);
+        InitializeCommand = new AsyncRelayCommand(_ => InitializeAsync(), null, ReportError);
+        Connections.SessionConnected += (_, seed) => AddSession(seed);
+        Connections.Profiles.CollectionChanged += (_, _) =>
+        {
+            Mirror.LoadProfiles(Connections.Profiles);
+            RemoteTransfer.LoadProfiles(Connections.Profiles);
+        };
+        Mirror.JobQueued += (_, job) => Activity.Add(job);
+        RemoteTransfer.JobQueued += (_, job) => Activity.Add(job);
+        _agent.EventReceived += Agent_EventReceived;
+        _agent.StateInvalidated += Agent_StateInvalidated;
+    }
+
+    public ObservableCollection<SessionViewModel> Sessions { get; } = [];
+    public ObservableCollection<RemoteEditItemViewModel> ActiveRemoteEdits { get; } = [];
+    public ActivityCenterViewModel Activity { get; }
+    public ConnectionProfilesViewModel Connections { get; }
+    public MirrorViewModel Mirror { get; }
+    public ConsoleViewModel Console { get; }
+    public RemoteTransferViewModel RemoteTransfer { get; }
+    public SettingsViewModel Settings { get; }
+    public AsyncRelayCommand InitializeCommand { get; }
+    public event Action<RemoteEditLocalChange>? RemoteEditLocalChanged;
+
+    public SessionViewModel? SelectedSession
+    {
+        get => _selectedSession;
+        set => SetProperty(ref _selectedSession, value);
+    }
+
+    public RemoteEditItemViewModel? SelectedActiveRemoteEdit
+    {
+        get => _selectedActiveRemoteEdit;
+        set => SetProperty(ref _selectedActiveRemoteEdit, value);
+    }
+
+    public bool IsLoading { get => _isLoading; private set => SetProperty(ref _isLoading, value); }
+    public bool IsDemoMode { get => _isDemoMode; private set => SetProperty(ref _isDemoMode, value); }
+    public string AgentStatus { get => _agentStatus; private set => SetProperty(ref _agentStatus, value); }
+    public bool HasAgentError { get => _hasAgentError; private set => SetProperty(ref _hasAgentError, value); }
+    public int ActiveRemoteEditCount => ActiveRemoteEdits.Count;
+
+    public async Task InitializeAsync(Guid? requestedProfileId = null)
+    {
+        await _initializationGate.WaitAsync().ConfigureAwait(true);
+        IsLoading = true;
+        try
+        {
+            var bootstrap = await _agent.LoadAsync().ConfigureAwait(true);
+            HasAgentError = false;
+            IsDemoMode = bootstrap.IsDemoMode;
+            AgentStatus = bootstrap.AgentStatus;
+            Activity.Load(bootstrap);
+            LoadRemoteEdits(bootstrap.RemoteEdits);
+            Connections.Load(bootstrap.Profiles);
+            Mirror.LoadProfiles(bootstrap.Profiles);
+            RemoteTransfer.LoadProfiles(bootstrap.Profiles);
+            Sessions.Clear();
+            foreach (var seed in bootstrap.Sessions) AddSession(seed);
+            Console.LoadSessions(Sessions);
+
+            if (requestedProfileId is Guid id)
+            {
+                var profile = bootstrap.Profiles.FirstOrDefault(candidate => candidate.Id == id);
+                if (profile is not null)
+                {
+                    AddSession(await _agent.ConnectAsync(profile).ConfigureAwait(true));
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            HasAgentError = true;
+            AgentStatus = $"Agent unavailable · {exception.Message}";
+            Activity.Log.Insert(0, new(DateTimeOffset.Now, "Error", "Agent", exception.Message));
+        }
+        finally
+        {
+            IsLoading = false;
+            _initializationGate.Release();
+        }
+    }
+
+    public async Task EnsureStateCurrentAsync()
+    {
+        if (Volatile.Read(ref _stateInvalidated) == 0) return;
+        await _resyncGate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                await Task.Delay(100).ConfigureAwait(true);
+                if (Interlocked.Exchange(ref _stateInvalidated, 0) == 0) return;
+                await InitializeAsync().ConfigureAwait(true);
+            }
+        }
+        finally
+        {
+            _resyncGate.Release();
+        }
+    }
+
+    public async Task CloseSessionAsync(SessionViewModel session)
+    {
+        try
+        {
+            if (!await _agent.DisconnectAsync(session.SessionId).ConfigureAwait(true))
+                throw new InvalidOperationException("The Agent declined the session disconnect request.");
+        }
+        catch (Exception exception)
+        {
+            AgentStatus = $"Disconnect blocked · {exception.Message}";
+            throw;
+        }
+
+        RemoveSession(session);
+    }
+
+    public async Task AddDefaultSessionAsync()
+    {
+        var profile = Connections.SelectedProfile ?? Connections.Profiles.FirstOrDefault();
+        if (profile is null) return;
+        AddSession(await _agent.ConnectAsync(profile).ConfigureAwait(true));
+    }
+
+    public Task<RemoteEditReview> ReviewRemoteEditAsync(string editId) => _agent.ReviewRemoteEditAsync(editId);
+
+    public async Task<RemoteEditActionResult> ResolveRemoteEditAsync(string editId, string reviewToken, RemoteEditResolution resolution)
+    {
+        var result = await _agent.ResolveRemoteEditAsync(editId, reviewToken, resolution).ConfigureAwait(true);
+        UpsertRemoteEdit(result.Session);
+        return result;
+    }
+
+    public async Task<bool> CompleteRemoteEditAsync(string editId)
+    {
+        var completed = await _agent.CompleteRemoteEditAsync(editId).ConfigureAwait(true);
+        if (completed) RemoveRemoteEdit(editId);
+        return completed;
+    }
+
+    private void AddSession(Models.WorkspaceSessionSeed seed)
+    {
+        var existing = Sessions.FirstOrDefault(session => session.ProfileId == seed.Snapshot.ProfileId && session.DisplayName == seed.Snapshot.DisplayName);
+        if (existing is not null)
+        {
+            SelectedSession = existing;
+            return;
+        }
+
+        var profile = Connections.Profiles.FirstOrDefault(candidate => candidate.Id == seed.Snapshot.ProfileId);
+        if (profile is null) return;
+        var session = new SessionViewModel(_agent, seed, profile);
+        session.JobQueued += (_, job) => Activity.Add(job);
+        Sessions.Add(session);
+        SelectedSession = session;
+        Console.LoadSessions(Sessions);
+    }
+
+    private void ReportError(Exception exception)
+    {
+        AgentStatus = $"Agent error · {exception.Message}";
+        IsLoading = false;
+    }
+
+    private void Agent_EventReceived(object? sender, EngineEvent engineEvent)
+    {
+        if (_uiContext is null) return;
+        _uiContext.Post(_ => ApplyAgentEvent(engineEvent), null);
+    }
+
+    private void Agent_StateInvalidated(object? sender, EventArgs e)
+    {
+        Interlocked.Exchange(ref _stateInvalidated, 1);
+        _uiContext?.Post(_ => _ = EnsureStateCurrentAsync(), null);
+    }
+
+    private void ApplyAgentEvent(EngineEvent engineEvent)
+    {
+        if (engineEvent.Name == "job.changed" && DeserializePayload<JobSnapshot>(engineEvent.Payload) is { } job)
+        {
+            Activity.Add(job);
+        }
+        else if (engineEvent.Name == "profile.saved" && DeserializePayload<ConnectionProfile>(engineEvent.Payload) is { } profile)
+        {
+            Connections.Upsert(profile);
+            foreach (var session in Sessions.Where(candidate => candidate.ProfileId == profile.Id)) session.UpdateProfile(profile);
+        }
+        else if (engineEvent.Name == "session.disconnected" && PayloadGuid(engineEvent.Payload) is { } sessionId)
+        {
+            var session = Sessions.FirstOrDefault(candidate => candidate.SessionId == sessionId);
+            if (session is not null) RemoveSession(session);
+        }
+        else if (engineEvent.Name == "remoteEdit.localChanged" && DeserializePayload<RemoteEditLocalChange>(engineEvent.Payload) is { } change)
+        {
+            Activity.Log.Insert(0, new(engineEvent.Timestamp,
+                change.Kind == RemoteEditLocalChangeKind.Saved ? "Info" : "Warning", "Remote edit", change.Message));
+            ActiveRemoteEdits.FirstOrDefault(candidate => string.Equals(candidate.EditId, change.EditId, StringComparison.Ordinal))?.Apply(change);
+            RemoteEditLocalChanged?.Invoke(change);
+        }
+        else if (engineEvent.Name == "remoteEdit.started" && DeserializePayload<RemoteEditSession>(engineEvent.Payload) is { } edit)
+        {
+            UpsertRemoteEdit(edit);
+        }
+        else if (engineEvent.Name == "remoteEdit.completed" && DeserializePayload<RemoteEditCompleted>(engineEvent.Payload) is { } completed)
+        {
+            RemoveRemoteEdit(completed.EditId);
+        }
+        else
+        {
+            Activity.Log.Insert(0, new(engineEvent.Timestamp, "Info", engineEvent.Kind.ToString(), engineEvent.Name));
+        }
+    }
+
+    private static T? DeserializePayload<T>(object? payload) where T : class => payload switch
+    {
+        T typed => typed,
+        JsonElement element => element.Deserialize<T>(new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+        _ => null,
+    };
+
+    private static Guid? PayloadGuid(object? payload) => payload switch
+    {
+        Guid value => value,
+        JsonElement { ValueKind: JsonValueKind.String } element when element.TryGetGuid(out var value) => value,
+        _ => null,
+    };
+
+    private void LoadRemoteEdits(IEnumerable<RemoteEditSession> edits)
+    {
+        var selectedId = SelectedActiveRemoteEdit?.EditId;
+        ActiveRemoteEdits.Clear();
+        foreach (var edit in edits.OrderByDescending(static edit => edit.LastLocalChangeAt ?? DateTimeOffset.MinValue))
+            ActiveRemoteEdits.Add(new(edit));
+        SelectedActiveRemoteEdit = selectedId is null
+            ? ActiveRemoteEdits.FirstOrDefault()
+            : ActiveRemoteEdits.FirstOrDefault(candidate => string.Equals(candidate.EditId, selectedId, StringComparison.Ordinal))
+                ?? ActiveRemoteEdits.FirstOrDefault();
+        OnPropertyChanged(nameof(ActiveRemoteEditCount));
+    }
+
+    private void UpsertRemoteEdit(RemoteEditSession edit)
+    {
+        var existing = ActiveRemoteEdits.FirstOrDefault(candidate => string.Equals(candidate.EditId, edit.EditId, StringComparison.Ordinal));
+        if (existing is not null)
+        {
+            existing.Update(edit);
+            return;
+        }
+
+        var item = new RemoteEditItemViewModel(edit);
+        ActiveRemoteEdits.Insert(0, item);
+        SelectedActiveRemoteEdit ??= item;
+        OnPropertyChanged(nameof(ActiveRemoteEditCount));
+    }
+
+    private void RemoveRemoteEdit(string editId)
+    {
+        var existing = ActiveRemoteEdits.FirstOrDefault(candidate => string.Equals(candidate.EditId, editId, StringComparison.Ordinal));
+        if (existing is null) return;
+        ActiveRemoteEdits.Remove(existing);
+        if (ReferenceEquals(SelectedActiveRemoteEdit, existing)) SelectedActiveRemoteEdit = ActiveRemoteEdits.FirstOrDefault();
+        OnPropertyChanged(nameof(ActiveRemoteEditCount));
+    }
+
+    private void RemoveSession(SessionViewModel session)
+    {
+        var index = Sessions.IndexOf(session);
+        if (index < 0) return;
+        Sessions.RemoveAt(index);
+        if (ReferenceEquals(SelectedSession, session))
+        {
+            SelectedSession = Sessions.ElementAtOrDefault(Math.Clamp(index - 1, 0, Math.Max(0, Sessions.Count - 1)));
+        }
+        Console.LoadSessions(Sessions);
+    }
+}

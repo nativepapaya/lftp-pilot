@@ -1,0 +1,72 @@
+using System.Collections.ObjectModel;
+using LFTPPilot.App.Infrastructure;
+using LFTPPilot.App.Models;
+using LFTPPilot.App.Services;
+using LFTPPilot.Core;
+
+namespace LFTPPilot.App.ViewModels;
+
+public sealed class ActivityCenterViewModel : ObservableObject
+{
+    private readonly IAgentWorkspaceClient _agent;
+    private bool _isExpanded = true;
+
+    public ActivityCenterViewModel(IAgentWorkspaceClient agent)
+    {
+        _agent = agent;
+        CancelJobCommand = new AsyncRelayCommand(CancelJobAsync, CanCancelJob, ReportError);
+    }
+
+    public ObservableCollection<JobSnapshot> Jobs { get; } = [];
+    public ObservableCollection<HistoryRecord> History { get; } = [];
+    public ObservableCollection<ActivityLogEntry> Log { get; } = [];
+    public AsyncRelayCommand CancelJobCommand { get; }
+
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set => SetProperty(ref _isExpanded, value);
+    }
+
+    public int ActiveCount => Jobs.Count(job => job.State is JobState.Queued or JobState.Running or JobState.Scheduled or JobState.Paused);
+
+    public void Load(UiWorkspaceBootstrap bootstrap)
+    {
+        Replace(Jobs, bootstrap.Jobs);
+        Replace(History, bootstrap.History);
+        Replace(Log, bootstrap.Log);
+        OnPropertyChanged(nameof(ActiveCount));
+        CancelJobCommand.NotifyCanExecuteChanged();
+    }
+
+    public void Add(JobSnapshot job)
+    {
+        var existing = Jobs.FirstOrDefault(candidate => candidate.Id == job.Id);
+        if (existing is null) Jobs.Insert(0, job);
+        else Jobs[Jobs.IndexOf(existing)] = job;
+        OnPropertyChanged(nameof(ActiveCount));
+        CancelJobCommand.NotifyCanExecuteChanged();
+    }
+
+    private static bool CanCancelJob(object? parameter) =>
+        parameter is JobSnapshot { State: JobState.Queued or JobState.Running or JobState.Paused or JobState.Scheduled };
+
+    private async Task CancelJobAsync(object? parameter)
+    {
+        if (parameter is not JobSnapshot job || !CanCancelJob(job)) return;
+        if (!await _agent.CancelJobAsync(job.Id).ConfigureAwait(true))
+            Log.Insert(0, new(DateTimeOffset.Now, "Warning", "Agent", $"Job '{job.DisplayName}' could not be cancelled because its state already changed."));
+    }
+
+    private void ReportError(Exception exception) =>
+        Log.Insert(0, new(DateTimeOffset.Now, "Error", "Agent", exception.Message));
+
+    private static void Replace<T>(ObservableCollection<T> target, IEnumerable<T> source)
+    {
+        target.Clear();
+        foreach (var item in source)
+        {
+            target.Add(item);
+        }
+    }
+}

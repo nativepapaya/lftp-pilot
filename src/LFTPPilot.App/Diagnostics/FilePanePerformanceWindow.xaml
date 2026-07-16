@@ -1,0 +1,38 @@
+<Window
+    x:Class="LFTPPilot.App.Diagnostics.FilePanePerformanceWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:LFTPPilot.App.Views.Controls"
+    Title="LFTP Pilot · File pane diagnostic">
+    <Grid x:Name="Root" Padding="16" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="10,000-row native pane diagnostic" Style="{ThemeResource TitleTextBlockStyle}" />
+                <TextBlock Text="Uses the production FilePaneView and deterministic in-memory metadata. It performs no filesystem or network I/O." TextWrapping="Wrap" />
+            </StackPanel>
+            <Button Grid.Column="1" Content="Sort by size" Click="SortSize_Click" AutomationProperties.Name="Sort diagnostic rows by size" />
+            <Button Grid.Column="2" Content="Filter 025" Click="Filter_Click" AutomationProperties.Name="Filter diagnostic rows" />
+            <Button Grid.Column="3" Content="Clear filter" Click="ClearFilter_Click" AutomationProperties.Name="Clear diagnostic filter" />
+        </Grid>
+        <controls:FilePaneView x:Name="PaneView" Grid.Row="1" MinHeight="560" />
+        <InfoBar
+            x:Name="ResultBar"
+            Grid.Row="2"
+            IsOpen="True"
+            IsClosable="False"
+            Severity="Informational"
+            Title="Measuring virtualization"
+            Message="Waiting for two completed layout passes…" />
+    </Grid>
+</Window>

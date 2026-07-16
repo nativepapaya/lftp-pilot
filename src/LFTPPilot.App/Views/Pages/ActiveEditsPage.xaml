@@ -1,0 +1,63 @@
+<UserControl
+    x:Class="LFTPPilot.App.Views.Pages.ActiveEditsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:viewModels="using:LFTPPilot.App.ViewModels">
+    <Grid Width="720" MinHeight="400" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Spacing="4">
+            <TextBlock Text="Managed remote files" Style="{ThemeResource SubtitleTextBlockStyle}" />
+            <TextBlock Text="Select an edit, then review and sync it or explicitly finish it. Closing this view leaves every managed edit active." TextWrapping="Wrap" Opacity="0.72" />
+        </StackPanel>
+
+        <InfoBar
+            Grid.Row="1"
+            IsOpen="True"
+            IsClosable="False"
+            Severity="Informational"
+            Title="Agent-owned managed copies"
+            Message="The Agent continues save monitoring while this window is closed. It never uploads a local change until you review the current remote identity and approve the action." />
+
+        <ListView
+            Grid.Row="2"
+            ItemsSource="{Binding ActiveRemoteEdits}"
+            SelectedItem="{Binding SelectedActiveRemoteEdit, Mode=TwoWay}"
+            SelectionMode="Single"
+            IsItemClickEnabled="True"
+            HorizontalContentAlignment="Stretch"
+            AutomationProperties.Name="Active managed remote edits">
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="viewModels:RemoteEditItemViewModel">
+                    <Border Style="{ThemeResource PilotCardStyle}" Padding="12" Margin="0,0,8,8">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="32" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Glyph="&#xE70F;" FontSize="18" Foreground="{ThemeResource PilotAccentTextBrush}" VerticalAlignment="Top" Margin="0,3,0,0" />
+                            <StackPanel Grid.Column="1" Spacing="3">
+                                <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" Style="{ThemeResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{x:Bind RemotePath, Mode=OneWay}" TextWrapping="Wrap" Opacity="0.82" />
+                                <TextBlock Text="{x:Bind BaselineText, Mode=OneWay}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.68" />
+                                <TextBlock Text="{x:Bind LastLocalChangeText, Mode=OneWay}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.68" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Spacing="6" HorizontalAlignment="Right">
+                                <Border Background="{ThemeResource PilotSubtleBrush}" CornerRadius="10" Padding="9,3">
+                                    <TextBlock Text="{x:Bind StatusText, Mode=OneWay}" Style="{ThemeResource CaptionTextBlockStyle}" />
+                                </Border>
+                                <TextBlock Text="Unsynced local change" Visibility="{x:Bind Dirty, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" Foreground="{ThemeResource PilotAccentTextBrush}" HorizontalAlignment="Right" Style="{ThemeResource CaptionTextBlockStyle}" />
+                                <TextBlock Text="Watcher failed" Visibility="{x:Bind WatcherFailed, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" HorizontalAlignment="Right" Style="{ThemeResource CaptionTextBlockStyle}" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+    </Grid>
+</UserControl>

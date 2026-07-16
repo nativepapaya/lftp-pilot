@@ -1,0 +1,80 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.22000.0</TargetPlatformMinVersion>
+    <RootNamespace>LFTPPilot.App</RootNamespace>
+    <AssemblyName>LFTPPilot</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>MSIX</WindowsPackageType>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <SelfContained>true</SelfContained>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <AppxBundle>Never</AppxBundle>
+    <AppxBundlePlatforms>x64</AppxBundlePlatforms>
+    <GenerateAppInstallerFile>false</GenerateAppInstallerFile>
+    <DefaultLanguage>en-US</DefaultLanguage>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LFTPPilot.Core\LFTPPilot.Core.csproj" />
+    <ProjectReference Include="..\LFTPPilot.Engine\LFTPPilot.Engine.csproj" />
+    <ProjectReference Include="..\LFTPPilot.Windows\LFTPPilot.Windows.csproj" />
+  </ItemGroup>
+
+  <!-- Keep the high-resolution design source in Git without carrying it in the
+       installed package. Release builds consume only the generated MSIX assets. -->
+  <ItemGroup>
+    <Content Remove="Assets\LFTPPilot.Master.png" />
+    <None Include="Assets\LFTPPilot.Master.png" />
+  </ItemGroup>
+
+  <!-- Release automation publishes the long-lived Agent separately, then opts in to
+       staging its complete self-contained payload at the MSIX package root. Keeping
+       this conditional preserves fast UI-only builds and makes missing release inputs
+       fail at the packaging boundary instead of silently shipping an incomplete Agent. -->
+  <ItemGroup Condition="'$(IncludeCompanionPayloads)' == 'true'">
+    <Content Include="$(AgentPublishDir)**\*">
+      <Link>agent\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="$(EnginePublishDir)LFTPPilot.Engine.dll" Condition="!Exists('$(AgentPublishDir)LFTPPilot.Engine.dll')">
+      <Link>agent\LFTPPilot.Engine.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(IncludeLftpRuntime)' == 'true'">
+    <Content Include="$(LftpRuntimeDir)**\*">
+      <Link>lftp\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <Target Name="ValidateCompanionPayloads" BeforeTargets="PrepareForBuild" Condition="'$(IncludeCompanionPayloads)' == 'true'">
+    <Error Condition="!Exists('$(AgentPublishDir)LFTPPilot.Agent.exe')" Text="Companion Agent payload is missing: $(AgentPublishDir)LFTPPilot.Agent.exe" />
+    <Error Condition="!Exists('$(EnginePublishDir)LFTPPilot.Engine.dll') AND !Exists('$(AgentPublishDir)LFTPPilot.Engine.dll')" Text="Companion Engine payload is missing from both publish directories." />
+  </Target>
+
+  <Target Name="ValidateLftpRuntimePayload" BeforeTargets="PrepareForBuild" Condition="'$(IncludeLftpRuntime)' == 'true'">
+    <Error Condition="!Exists('$(LftpRuntimeDir)usr\bin\lftp.exe')" Text="Authenticated LFTP runtime is missing: $(LftpRuntimeDir)usr\bin\lftp.exe" />
+    <Error Condition="!Exists('$(LftpRuntimeDir)usr\bin\ssh.exe')" Text="Authenticated OpenSSH runtime is missing: $(LftpRuntimeDir)usr\bin\ssh.exe" />
+    <Error Condition="!Exists('$(LftpRuntimeDir)bundle-manifest.json')" Text="Authenticated runtime manifest is missing: $(LftpRuntimeDir)bundle-manifest.json" />
+  </Target>
+</Project>

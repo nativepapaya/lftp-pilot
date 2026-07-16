@@ -1,0 +1,12 @@
+{
+  "schema": 3,
+  "complete": false,
+  "bundle": {
+    "schema": 3,
+    "bundleRevision": "8",
+    "architecture": "x64",
+    "inventorySha256": "9330244e563b83c2b5be8a9881bc93c0672097cc1996b28676831dbd2e05fecf"
+  },
+  "packages": [],
+  "managedPackages": []
+}

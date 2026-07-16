@@ -1,0 +1,51 @@
+<UserControl
+    x:Class="LFTPPilot.App.Views.Pages.MirrorPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Width="860" MinHeight="570" ColumnSpacing="18">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="350" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="10" Padding="0,0,8,0">
+                <TextBlock Text="One-way mirror" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                <ComboBox Header="Connection" ItemsSource="{Binding Profiles}" SelectedItem="{Binding SelectedProfile, Mode=TwoWay}" DisplayMemberPath="Name" HorizontalAlignment="Stretch" />
+                <TextBox Header="Job name" Text="{Binding Name, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <ComboBox Header="Direction" ItemsSource="{Binding Directions}" SelectedItem="{Binding Direction, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+                <TextBox Header="Local root" Text="{Binding LocalRoot, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBox Header="Remote root" Text="{Binding RemoteRoot, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBox Header="Include patterns" Text="{Binding Includes, Mode=TwoWay}" PlaceholderText="images/**;docs/*.pdf" />
+                <TextBox Header="Exclude patterns" Text="{Binding Excludes, Mode=TwoWay}" />
+                <CheckBox Content="Delete destination items that do not exist at the source" IsChecked="{Binding DeleteExtraneous, Mode=TwoWay}" />
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <NumberBox Header="Parallel files" Value="{Binding ParallelFiles, Mode=TwoWay}" Minimum="1" Maximum="16" SpinButtonPlacementMode="Compact" />
+                    <NumberBox Grid.Column="1" Header="Segments / file" Value="{Binding SegmentsPerFile, Mode=TwoWay}" Minimum="1" Maximum="16" SpinButtonPlacementMode="Compact" />
+                </Grid>
+                <Button Content="Create dry-run preview" Command="{Binding PreviewCommand}" Style="{ThemeResource AccentButtonStyle}" HorizontalAlignment="Left" />
+                <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Style="{ThemeResource CaptionTextBlockStyle}" />
+            </StackPanel>
+        </ScrollViewer>
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+            <StackPanel Spacing="8">
+                <TextBlock Text="Proposed actions" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                <InfoBar IsOpen="{Binding RequiresDeletionApproval}" IsClosable="False" Severity="Warning" Title="Deletion approval required" Message="Deletion is enabled. Review the full preview and explicitly approve deletion even when no deletion is currently listed; the destination can change before execution. Any changed action forces a fresh preview." />
+            </StackPanel>
+            <ListView Grid.Row="1" ItemsSource="{Binding PreviewActions}" SelectionMode="None" Margin="0,10,0,10" AutomationProperties.Name="Mirror preview actions">
+                <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style></ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Padding="8,5" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="120" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Kind}" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                            <StackPanel Grid.Column="1"><TextBlock Text="{Binding Path}" TextTrimming="CharacterEllipsis" /><TextBlock Text="{Binding Detail}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.7" /></StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+            <StackPanel Grid.Row="2" Spacing="8">
+                <CheckBox Content="I reviewed this preview and approve deleting extraneous destination items" IsChecked="{Binding DeletionsApproved, Mode=TwoWay}" Visibility="{Binding RequiresDeletionApproval, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <Button Content="Run reviewed mirror" Command="{Binding RunCommand}" Style="{ThemeResource AccentButtonStyle}" HorizontalAlignment="Right" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</UserControl>

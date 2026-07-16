@@ -1,0 +1,51 @@
+<UserControl
+    x:Class="LFTPPilot.App.Views.Pages.ConnectionProfilesPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Width="720" MinHeight="460" ColumnSpacing="18">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="240" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <StackPanel Spacing="8">
+            <TextBlock Text="Saved connections" Style="{ThemeResource SubtitleTextBlockStyle}" />
+            <ListView
+                ItemsSource="{Binding Profiles}"
+                SelectedItem="{Binding SelectedProfile, Mode=TwoWay}"
+                DisplayMemberPath="Name"
+                SelectionMode="Single"
+                Height="380"
+                AutomationProperties.Name="Saved connections" />
+        </StackPanel>
+        <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="12" Padding="0,0,8,0">
+                <TextBlock Text="Connection details" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                <TextBox Header="Name" Text="{Binding Name, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBox Header="Host" Text="{Binding Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="server.example.com" />
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="140" /></Grid.ColumnDefinitions>
+                    <ComboBox Header="Protocol" ItemsSource="{Binding Protocols}" SelectedItem="{Binding Protocol, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+                    <NumberBox Grid.Column="1" Header="Port" Value="{Binding Port, Mode=TwoWay}" Minimum="1" Maximum="65535" SpinButtonPlacementMode="Compact" />
+                </Grid>
+                <TextBox Header="Username" Text="{Binding UserName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <ComboBox Header="Authentication" ItemsSource="{Binding AuthenticationKinds}" SelectedItem="{Binding Authentication, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+                <Grid Visibility="{Binding IsSshKeyAuthentication, Converter={StaticResource BoolToVisibilityConverter}}" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <TextBox Header="OpenSSH private key" Text="{Binding SshKeyPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="C:\Users\you\.ssh\id_ed25519" />
+                    <Button Grid.Column="1" Content="Browse…" Click="SshKeyBrowse_Click" VerticalAlignment="Bottom" />
+                </Grid>
+                <PasswordBox x:Name="CredentialBox" Header="Password or ask-on-connect credential" PasswordChanged="Credential_PasswordChanged" AutomationProperties.Name="Connection credential" Visibility="{Binding IsCredentialAuthentication, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <CheckBox Content="Remember password securely for password authentication" IsChecked="{Binding RememberCredential, Mode=TwoWay}" Visibility="{Binding CanRememberCredential, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Message="Credentials are requested or stored by the Agent using profile-bound DPAPI protection; this window never persists passwords." />
+                <TextBlock Text="A profile cannot be deleted while one of its sessions owns an active managed edit. Use Active edits from the main toolbar to review or finish it first." Style="{ThemeResource CaptionTextBlockStyle}" TextWrapping="Wrap" Opacity="0.72" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="Connect selected" Command="{Binding ConnectCommand}" />
+                    <Button Content="Create and connect" Command="{Binding CreateAndConnectCommand}" Style="{ThemeResource AccentButtonStyle}" />
+                    <Button Content="Save" Command="{Binding SaveCommand}" />
+                    <Button Content="Delete" Command="{Binding DeleteCommand}" />
+                </StackPanel>
+                <TextBlock Text="{Binding Status}" Style="{ThemeResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

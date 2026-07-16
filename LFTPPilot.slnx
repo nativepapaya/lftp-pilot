@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LFTPPilot.App/LFTPPilot.App.csproj" />
+    <Project Path="src/LFTPPilot.Agent/LFTPPilot.Agent.csproj" />
+    <Project Path="src/LFTPPilot.Core/LFTPPilot.Core.csproj" />
+    <Project Path="src/LFTPPilot.Engine/LFTPPilot.Engine.csproj" />
+    <Project Path="src/LFTPPilot.Windows/LFTPPilot.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LFTPPilot.Tests/LFTPPilot.Tests.csproj" />
+  </Folder>
+</Solution>

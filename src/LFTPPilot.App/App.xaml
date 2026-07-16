@@ -1,0 +1,48 @@
+<Application
+    x:Class="LFTPPilot.App.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Microsoft.UI.Xaml.Controls"
+    xmlns:infrastructure="using:LFTPPilot.App.Infrastructure">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <controls:XamlControlsResources />
+            </ResourceDictionary.MergedDictionaries>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Default">
+                    <SolidColorBrush x:Key="PilotPaneBrush" Color="#B3FFFFFF" />
+                    <SolidColorBrush x:Key="PilotSubtleBrush" Color="#0F000000" />
+                    <SolidColorBrush x:Key="PilotAccentBrush" Color="#FF165B99" />
+                    <SolidColorBrush x:Key="PilotOnAccentBrush" Color="White" />
+                    <SolidColorBrush x:Key="PilotAccentTextBrush" Color="#FF005FB8" />
+                    <SolidColorBrush x:Key="PilotBorderBrush" Color="#19000000" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="PilotPaneBrush" Color="#B31C1C1C" />
+                    <SolidColorBrush x:Key="PilotSubtleBrush" Color="#20FFFFFF" />
+                    <SolidColorBrush x:Key="PilotAccentBrush" Color="#FF0067C0" />
+                    <SolidColorBrush x:Key="PilotOnAccentBrush" Color="White" />
+                    <SolidColorBrush x:Key="PilotAccentTextBrush" Color="#FF60CDFF" />
+                    <SolidColorBrush x:Key="PilotBorderBrush" Color="#28FFFFFF" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="HighContrast">
+                    <SolidColorBrush x:Key="PilotPaneBrush" Color="{ThemeResource SystemColorWindowColor}" />
+                    <SolidColorBrush x:Key="PilotSubtleBrush" Color="{ThemeResource SystemColorButtonFaceColor}" />
+                    <SolidColorBrush x:Key="PilotAccentBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+                    <SolidColorBrush x:Key="PilotOnAccentBrush" Color="{ThemeResource SystemColorHighlightTextColor}" />
+                    <SolidColorBrush x:Key="PilotAccentTextBrush" Color="{ThemeResource SystemColorHotlightColor}" />
+                    <SolidColorBrush x:Key="PilotBorderBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+            <Style x:Key="PilotCardStyle" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource PilotPaneBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource PilotBorderBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="8" />
+            </Style>
+            <infrastructure:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+            <infrastructure:JobStateToCancellableConverter x:Key="JobStateToCancellableConverter" />
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
