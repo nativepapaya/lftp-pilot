@@ -170,8 +170,17 @@ try {
         @($nuget | Where-Object { $_.hashes.alg -ne 'SHA-512' -or $_.hashes.content -notmatch '^[a-f0-9]{128}$' }).Count -ne 0) {
         throw 'SBOM NuGet components are missing, duplicated, or not anchored to locked SHA-512 hashes.'
     }
+    $appLock = Get-Content -LiteralPath (Join-Path $repository 'src\LFTPPilot.App\packages.lock.json') -Raw | ConvertFrom-Json
+    $expectedBuildToolsVersions = @($appLock.dependencies.PSObject.Properties.Value |
+        ForEach-Object { $_.PSObject.Properties['Microsoft.Windows.SDK.BuildTools'] } |
+        Where-Object { $null -ne $_ } |
+        ForEach-Object { $_.Value.resolved } |
+        Sort-Object -Unique)
+    if ($expectedBuildToolsVersions.Count -ne 1 -or [string]::IsNullOrWhiteSpace($expectedBuildToolsVersions[0])) {
+        throw 'The application lock must select exactly one Windows SDK BuildTools version.'
+    }
     $buildTools = @($nuget | Where-Object name -eq 'Microsoft.Windows.SDK.BuildTools')
-    if ($buildTools.Count -ne 1 -or $buildTools[0].version -ne '10.0.26100.7705') {
+    if ($buildTools.Count -ne 1 -or $buildTools[0].version -ne $expectedBuildToolsVersions[0]) {
         throw 'SBOM contains split or stale Windows SDK BuildTools metadata.'
     }
     if (@($nuget | Where-Object { $_.name -match '^(?:xunit|Microsoft\.NET\.Test\.Sdk)' }).Count -ne 0) {
