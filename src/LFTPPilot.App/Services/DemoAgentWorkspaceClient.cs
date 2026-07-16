@@ -76,6 +76,24 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
         return Task.FromResult(true);
     }
 
+    public Task<SftpHostKeyInspection> InspectSftpHostKeyAsync(ConnectionProfile profile, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(profile);
+        _ = ConnectionIdentity.FromProfile(profile);
+        return Task.FromResult(new SftpHostKeyInspection(SftpHostKeyState.Trusted));
+    }
+
+    public Task<SftpHostKeyApproveResult> ApproveSftpHostKeyAsync(
+        SftpHostKeyReview review,
+        bool replaceExisting,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromException<SftpHostKeyApproveResult>(
+            new NotSupportedException("The diagnostic demo transport does not enroll SFTP host keys."));
+    }
+
     public Task<WorkspaceSessionSeed> ConnectAsync(ConnectionProfile profile, string? ephemeralCredential = null, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -165,7 +183,7 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
         if ((preview.Definition.DeleteExtraneous || preview.Preview.ContainsDeletions) && !deletionsApproved)
             throw new InvalidOperationException("Mirror previews containing deletion actions require explicit approval.");
         var now = DateTimeOffset.Now;
-        return Task.FromResult(new JobSnapshot(Guid.NewGuid(), JobKind.Mirror, preview.Definition.ProfileId, preview.Definition.Name, JobState.Queued, now, now, Status: "Approved preview queued"));
+        return Task.FromResult(new JobSnapshot(preview.Preview.Id, JobKind.Mirror, preview.Definition.ProfileId, preview.Definition.Name, JobState.Queued, now, now, Status: "Approved preview queued"));
     }
 
     public Task<IReadOnlyList<string>> ExecuteConsoleAsync(Guid sessionId, string command, CancellationToken cancellationToken = default)

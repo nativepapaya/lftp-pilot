@@ -19,9 +19,12 @@ public sealed partial class AgentHost : IAsyncDisposable
     private readonly AgentWorkspaceService? _workspace;
     private readonly AgentEventHub _events = new();
     private readonly Func<int, bool>? _clientAuthorizer;
+    private readonly Func<Stream, ProtocolEnvelope, CancellationToken, ValueTask> _writeControlResponse =
+        static (stream, response, cancellationToken) => FramedJsonStream.WriteAsync(stream, response, cancellationToken);
     private readonly CancellationTokenSource _lifetime = new();
     private readonly List<Task> _clients = [];
     private readonly object _clientGate = new();
+    private readonly TaskCompletionSource _acceptorsStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool _started;
     private bool _disposed;
 
@@ -30,6 +33,7 @@ public sealed partial class AgentHost : IAsyncDisposable
         TimeProvider? timeProvider = null,
         IProfileStore? profileStore = null,
         ISecretStore? secretStore = null,
+        SftpHostKeyManager? hostKeyManager = null,
         ILftpProcessHost? processHost = null,
         ILftpRuntimeProvider? runtimeProvider = null,
         IMirrorPlanner? mirrorPlanner = null,
@@ -41,15 +45,23 @@ public sealed partial class AgentHost : IAsyncDisposable
         _scheduler = new(_coordinator, _store, timeProvider);
         _coordinator.JobChanged += OnJobChanged;
         _clientAuthorizer = clientAuthorizer;
-        var services = new object?[] { profileStore, secretStore, processHost, runtimeProvider, mirrorPlanner, workspaceOptions };
+        var services = new object?[] { profileStore, secretStore, hostKeyManager, processHost, runtimeProvider, mirrorPlanner, workspaceOptions };
         if (services.Any(static service => service is not null) && services.Any(static service => service is null))
             throw new ArgumentException("All workspace services must be supplied together.");
         if (profileStore is not null)
         {
-            _workspace = new(profileStore, secretStore!, processHost!, runtimeProvider!, _coordinator, mirrorPlanner!, workspaceOptions!,
+            _workspace = new(profileStore, secretStore!, hostKeyManager!, processHost!, runtimeProvider!, _coordinator, mirrorPlanner!, workspaceOptions!,
                 (kind, name, payload, jobId, sessionId) => _events.Publish(kind, name, payload, jobId, sessionId),
                 _scheduler);
         }
+    }
+
+    internal AgentHost(
+        string statePath,
+        Func<Stream, ProtocolEnvelope, CancellationToken, ValueTask> controlResponseWriter)
+        : this(statePath)
+    {
+        _writeControlResponse = controlResponseWriter ?? throw new ArgumentNullException(nameof(controlResponseWriter));
     }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -57,13 +69,20 @@ public sealed partial class AgentHost : IAsyncDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_started) throw new InvalidOperationException("The agent host is already running.");
         _started = true;
-        var state = await _store.LoadAsync(cancellationToken).ConfigureAwait(false);
-        var restoredJobs = NormalizeInterruptedJobs(state.Jobs);
-        _coordinator.Restore(restoredJobs);
-        await _scheduler.RestoreAsync(restoredJobs, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var state = await _store.LoadAsync(cancellationToken).ConfigureAwait(false);
+            var restoredJobs = NormalizeInterruptedJobs(state.Jobs);
+            _coordinator.Restore(restoredJobs);
+            await _scheduler.RestoreAsync(restoredJobs, cancellationToken).ConfigureAwait(false);
 
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
-        await Task.WhenAll(AcceptControlClientsAsync(linked.Token), AcceptEventClientsAsync(linked.Token)).ConfigureAwait(false);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+            await Task.WhenAll(AcceptControlClientsAsync(linked.Token), AcceptEventClientsAsync(linked.Token)).ConfigureAwait(false);
+        }
+        finally
+        {
+            _acceptorsStopped.TrySetResult();
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -71,6 +90,10 @@ public sealed partial class AgentHost : IAsyncDisposable
         if (_disposed) return;
         _disposed = true;
         _lifetime.Cancel();
+        if (_started) await _acceptorsStopped.Task.ConfigureAwait(false);
+        Task[] clients;
+        lock (_clientGate) clients = _clients.ToArray();
+        await Task.WhenAll(clients).ConfigureAwait(false);
         if (_started)
         {
             try { await _scheduler.MarkPendingMissedAsync("The agent was explicitly stopped.").ConfigureAwait(false); }
@@ -79,9 +102,6 @@ public sealed partial class AgentHost : IAsyncDisposable
         await _scheduler.DisposeAsync().ConfigureAwait(false);
         if (_workspace is not null) await _workspace.DisposeAsync().ConfigureAwait(false);
         await _store.SaveAsync(_coordinator.GetJobs()).ConfigureAwait(false);
-        Task[] clients;
-        lock (_clientGate) clients = _clients.ToArray();
-        try { await Task.WhenAll(clients).ConfigureAwait(false); } catch (IOException) { } catch (OperationCanceledException) { }
         _coordinator.JobChanged -= OnJobChanged;
         _lifetime.Dispose();
     }
@@ -135,12 +155,21 @@ public sealed partial class AgentHost : IAsyncDisposable
                 var envelope = await FramedJsonStream.ReadAsync<ProtocolEnvelope>(pipe, cancellationToken).ConfigureAwait(false);
                 if (envelope is null) return;
                 var dispatch = await DispatchAsync(envelope, clientProcessId, cancellationToken).ConfigureAwait(false);
-                await FramedJsonStream.WriteAsync(pipe, dispatch.Response, cancellationToken).ConfigureAwait(false);
                 if (dispatch.StopAfterReply)
                 {
-                    _lifetime.Cancel();
+                    try
+                    {
+                        await _writeControlResponse(pipe, dispatch.Response, cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        // Stop is committed by dispatch, not by successful delivery of its reply.
+                        // A broken client pipe must not leave the Agent or its LFTP children alive.
+                        _lifetime.Cancel();
+                    }
                     return;
                 }
+                await _writeControlResponse(pipe, dispatch.Response, cancellationToken).ConfigureAwait(false);
             }
         }
     }

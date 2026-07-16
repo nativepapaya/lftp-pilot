@@ -1,10 +1,21 @@
 using System.Collections.Immutable;
+using LFTPPilot.Core;
 
 namespace LFTPPilot.App.Services;
 
 internal sealed record TransferQueueSuccess<TResult>(FilePaneTransferSource Source, TResult Value);
 
-internal sealed record TransferQueueFailure(FilePaneTransferSource Source, Exception Error);
+internal sealed record TransferQueueFailure(FilePaneTransferSource Source, Exception Error)
+{
+    internal bool IsOutcomeUnknown => Error is AgentRequestOutcomeUnknownException;
+    internal bool IsConfirmedTerminal => Error is TransferSubmissionTerminalException;
+}
+
+internal sealed class TransferSubmissionTerminalException(JobSnapshot job) : Exception(
+    $"The Agent recorded transfer job {job.Id} in terminal state {job.State}.")
+{
+    internal JobSnapshot Job { get; } = job;
+}
 
 internal sealed record TransferQueueExecution<TResult>(
     ImmutableArray<TransferQueueSuccess<TResult>> Successes,
@@ -12,17 +23,28 @@ internal sealed record TransferQueueExecution<TResult>(
 {
     internal TransferQueueResult ToResult() => new(
         Successes.Select(static success => success.Source).ToImmutableArray(),
-        Failures.Select(static failure => failure.Source).ToImmutableArray());
+        Failures.Where(static failure => !failure.IsOutcomeUnknown && !failure.IsConfirmedTerminal)
+            .Select(static failure => failure.Source).ToImmutableArray(),
+        Failures.Where(static failure => failure.IsOutcomeUnknown)
+            .Select(static failure => failure.Source).ToImmutableArray(),
+        Failures.Where(static failure => failure.IsConfirmedTerminal)
+            .Select(static failure => failure.Source).ToImmutableArray());
 }
 
 internal sealed record TransferQueueResult(
     ImmutableArray<FilePaneTransferSource> QueuedSources,
-    ImmutableArray<FilePaneTransferSource> FailedSources)
+    ImmutableArray<FilePaneTransferSource> FailedSources,
+    ImmutableArray<FilePaneTransferSource> UnconfirmedSources,
+    ImmutableArray<FilePaneTransferSource> ConfirmedTerminalSources = default)
 {
-    internal int RequestedCount => QueuedSources.Length + FailedSources.Length;
+    internal int RequestedCount => QueuedSources.Length + FailedSources.Length + UnconfirmedSources.Length + ConfirmedTerminalCount;
     internal int QueuedCount => QueuedSources.Length;
     internal int FailedCount => FailedSources.Length;
-    internal bool IsPartialSuccess => QueuedCount > 0 && FailedCount > 0;
+    internal int UnconfirmedCount => UnconfirmedSources.Length;
+    internal int ConfirmedTerminalCount => ConfirmedTerminalSources.IsDefault ? 0 : ConfirmedTerminalSources.Length;
+    internal int IssueCount => FailedCount + UnconfirmedCount + ConfirmedTerminalCount;
+    internal bool HasUnknownOutcome => UnconfirmedCount > 0;
+    internal bool IsPartialSuccess => QueuedCount > 0 && IssueCount > 0;
 }
 
 internal sealed class TransferQueueException : Exception
@@ -36,11 +58,17 @@ internal sealed class TransferQueueException : Exception
         : base(TransferQueueAggregation.FormatFailureMessage(result, failures))
     {
         Result = result;
-        ActionableCause = TransferQueueAggregation.ActionableCause(failures);
+        HasUnknownOutcome = result.HasUnknownOutcome;
+        ActionableCause = HasUnknownOutcome
+            ? "Agent acceptance is unknown. Activity is refreshing."
+            : result.ConfirmedTerminalCount > 0
+                ? "Review the recorded job in Activity; use its Retry action only when offered."
+            : TransferQueueAggregation.ActionableCause(failures);
     }
 
     internal TransferQueueResult Result { get; }
     internal string? ActionableCause { get; }
+    internal bool HasUnknownOutcome { get; }
 }
 
 internal static class TransferQueueAggregation
@@ -81,13 +109,35 @@ internal static class TransferQueueAggregation
     internal static string FormatStatus(TransferQueueResult result, bool scheduled)
     {
         ArgumentNullException.ThrowIfNull(result);
+        if (result.ConfirmedTerminalCount > 0)
+        {
+            var lead = scheduled ? "Scheduled" : "Queued";
+            return $"{lead} {result.QueuedCount} of {result.RequestedCount}; " +
+                $"{result.ConfirmedTerminalCount} recorded terminal in Activity" +
+                (result.FailedCount > 0 ? $"; {result.FailedCount} failed" : string.Empty) +
+                (result.UnconfirmedCount > 0
+                    ? $"; {result.UnconfirmedCount} Agent acceptance unknown · Activity is refreshing"
+                    : string.Empty);
+        }
         if (result.FailedCount == 0)
         {
+            if (result.UnconfirmedCount > 0)
+            {
+                return $"{result.QueuedCount} of {result.RequestedCount} confirmed queued; " +
+                    $"{result.UnconfirmedCount} Agent acceptance unknown · Activity is refreshing";
+            }
+
             var verb = scheduled ? "Scheduled" : "Queued";
             return $"{verb} {result.QueuedCount} item{(result.QueuedCount == 1 ? string.Empty : "s")}";
         }
 
         var partialVerb = scheduled ? "Scheduled" : "Queued";
+        if (result.UnconfirmedCount > 0)
+        {
+            return $"{partialVerb} {result.QueuedCount} of {result.RequestedCount}; {result.FailedCount} failed; " +
+                $"{result.UnconfirmedCount} Agent acceptance unknown · Activity is refreshing";
+        }
+
         return $"{partialVerb} {result.QueuedCount} of {result.RequestedCount}; {result.FailedCount} failed";
     }
 
@@ -96,20 +146,40 @@ internal static class TransferQueueAggregation
         IReadOnlyList<TransferQueueFailure>? failures = null)
     {
         ArgumentNullException.ThrowIfNull(result);
-        if (result.FailedCount == 0) throw new ArgumentException("A queue failure message requires at least one failed source.", nameof(result));
+        if (result.IssueCount == 0) throw new ArgumentException("A queue failure message requires at least one failed or unconfirmed source.", nameof(result));
 
-        var listedNames = result.FailedSources
-            .Take(MaximumListedFailureNames)
-            .Select(static source => DisplayName(source.Path));
-        var remaining = result.FailedCount - MaximumListedFailureNames;
-        var omitted = remaining > 0 ? $", and {remaining} more" : string.Empty;
+        if (result.HasUnknownOutcome)
+        {
+            var unconfirmedNames = DescribeSources(result.UnconfirmedSources);
+            var rejected = result.FailedCount == 0
+                ? string.Empty
+                : $" {result.FailedCount} other item{(result.FailedCount == 1 ? string.Empty : "s")} failed before acceptance could be confirmed.";
+            var terminal = result.ConfirmedTerminalCount == 0
+                ? string.Empty
+                : $" The Agent also recorded {result.ConfirmedTerminalCount} terminal job{(result.ConfirmedTerminalCount == 1 ? string.Empty : "s")}; review Activity and do not create fresh plans for them.";
+            return $"confirmed queued {result.QueuedCount} of {result.RequestedCount}. " +
+                $"Agent acceptance is unknown for: {unconfirmedNames}.{rejected} " +
+                $"Activity is refreshing; do not retry any item until the current job list is shown.{terminal}";
+        }
+
+        if (result.ConfirmedTerminalCount > 0)
+        {
+            var terminalNames = DescribeSources(result.ConfirmedTerminalSources);
+            var rejected = result.FailedCount == 0
+                ? string.Empty
+                : $" {result.FailedCount} other item{(result.FailedCount == 1 ? string.Empty : "s")} failed before Agent acceptance.";
+            return $"confirmed queued {result.QueuedCount} of {result.RequestedCount}. " +
+                $"The Agent recorded terminal jobs for: {terminalNames}.{rejected} " +
+                "Review those jobs in Activity; retry them only through Activity when a Retry action is offered.";
+        }
+
         var cause = failures is null ? null : ActionableCause(failures);
         var recovery = cause is null
             ? " Retry only the failed items."
             : cause.Contains("reviewed Mirror workflow", StringComparison.Ordinal)
                 ? $" Cause: {cause}"
                 : $" Cause: {cause} Retry only the failed items.";
-        return $"queued {result.QueuedCount} of {result.RequestedCount}. Failed: {string.Join(", ", listedNames)}{omitted}.{recovery}";
+        return $"queued {result.QueuedCount} of {result.RequestedCount}. Failed: {DescribeSources(result.FailedSources)}.{recovery}";
     }
 
     internal static string? ActionableCause(IReadOnlyList<TransferQueueFailure> failures)
@@ -156,6 +226,16 @@ internal static class TransferQueueAggregation
         return name.Length <= MaximumFailureNameLength
             ? name
             : name[..(MaximumFailureNameLength - 1)] + "\u2026";
+    }
+
+    private static string DescribeSources(ImmutableArray<FilePaneTransferSource> sources)
+    {
+        var listedNames = sources
+            .Take(MaximumListedFailureNames)
+            .Select(static source => DisplayName(source.Path));
+        var remaining = sources.Length - MaximumListedFailureNames;
+        var omitted = remaining > 0 ? $", and {remaining} more" : string.Empty;
+        return $"{string.Join(", ", listedNames)}{omitted}";
     }
 
     private static string? SanitizedActionableCause(Exception exception)

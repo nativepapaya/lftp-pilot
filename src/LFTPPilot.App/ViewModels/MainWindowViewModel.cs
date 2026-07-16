@@ -17,6 +17,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly SynchronizationContext? _uiContext;
     private readonly SemaphoreSlim _initializationGate = new(1, 1);
     private readonly SemaphoreSlim _resyncGate = new(1, 1);
+    private readonly Dictionary<Guid, UnconfirmedTransferState> _unconfirmedTransfers = [];
     private RemoteEditItemViewModel? _selectedActiveRemoteEdit;
     private int _stateInvalidated;
 
@@ -32,6 +33,9 @@ public sealed class MainWindowViewModel : ObservableObject
         Settings = new SettingsViewModel(agent);
         InitializeCommand = new AsyncRelayCommand(_ => InitializeAsync(), null, ReportError);
         Connections.SessionConnected += (_, seed) => AddSession(seed);
+        Connections.StateRefreshRequested += (_, _) => RequestStateRefresh();
+        Mirror.StateRefreshRequested += (_, _) => RequestStateRefresh();
+        RemoteTransfer.StateRefreshRequested += (_, _) => RequestStateRefresh();
         Connections.Profiles.CollectionChanged += (_, _) =>
         {
             Mirror.LoadProfiles(Connections.Profiles);
@@ -71,6 +75,7 @@ public sealed class MainWindowViewModel : ObservableObject
     public string AgentStatus { get => _agentStatus; private set => SetProperty(ref _agentStatus, value); }
     public bool HasAgentError { get => _hasAgentError; private set => SetProperty(ref _hasAgentError, value); }
     public int ActiveRemoteEditCount => ActiveRemoteEdits.Count;
+    public int UnconfirmedTransferCount => _unconfirmedTransfers.Count;
 
     public async Task InitializeAsync(Guid? requestedProfileId = null)
     {
@@ -83,10 +88,13 @@ public sealed class MainWindowViewModel : ObservableObject
             IsDemoMode = bootstrap.IsDemoMode;
             AgentStatus = bootstrap.AgentStatus;
             Activity.Load(bootstrap);
+            await ReconcileUnconfirmedTransfersAsync(bootstrap.Jobs).ConfigureAwait(true);
             LoadRemoteEdits(bootstrap.RemoteEdits);
             Connections.Load(bootstrap.Profiles);
             Mirror.LoadProfiles(bootstrap.Profiles);
             RemoteTransfer.LoadProfiles(bootstrap.Profiles);
+            await Mirror.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);
+            await RemoteTransfer.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);
             Sessions.Clear();
             foreach (var seed in bootstrap.Sessions) AddSession(seed);
             Console.LoadSessions(Sessions);
@@ -96,7 +104,14 @@ public sealed class MainWindowViewModel : ObservableObject
                 var profile = bootstrap.Profiles.FirstOrDefault(candidate => candidate.Id == id);
                 if (profile is not null)
                 {
-                    AddSession(await _agent.ConnectAsync(profile).ConfigureAwait(true));
+                    try
+                    {
+                        AddSession(await _agent.ConnectAsync(profile).ConfigureAwait(true));
+                    }
+                    catch (Exception exception)
+                    {
+                        ReportUnconfirmedSessionConnect("Requested connection", exception);
+                    }
                 }
             }
         }
@@ -141,7 +156,8 @@ public sealed class MainWindowViewModel : ObservableObject
         }
         catch (Exception exception)
         {
-            AgentStatus = $"Disconnect blocked · {exception.Message}";
+            AgentStatus = $"Disconnect could not be confirmed · Session state may have changed. {exception.Message} Refreshing workspace state.";
+            RequestStateRefresh();
             throw;
         }
 
@@ -152,17 +168,37 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         var profile = Connections.SelectedProfile ?? Connections.Profiles.FirstOrDefault();
         if (profile is null) return;
-        AddSession(await _agent.ConnectAsync(profile).ConfigureAwait(true));
+        try
+        {
+            AddSession(await _agent.ConnectAsync(profile).ConfigureAwait(true));
+        }
+        catch (Exception exception)
+        {
+            ReportUnconfirmedSessionConnect("New session", exception);
+        }
     }
 
     public Task<RemoteEditReview> ReviewRemoteEditAsync(string editId) => _agent.ReviewRemoteEditAsync(editId);
 
     public async Task<RemoteEditActionResult> ResolveRemoteEditAsync(string editId, string reviewToken, RemoteEditResolution resolution)
     {
-        var result = await _agent.ResolveRemoteEditAsync(editId, reviewToken, resolution).ConfigureAwait(true);
-        UpsertRemoteEdit(result.Session);
-        return result;
+        try
+        {
+            var result = await _agent.ResolveRemoteEditAsync(editId, reviewToken, resolution).ConfigureAwait(true);
+            UpsertRemoteEdit(result.Session);
+            return result;
+        }
+        catch (Exception exception)
+        {
+            HasAgentError = false;
+            AgentStatus = $"Remote edit action could not be confirmed · The remote file or managed copy may have changed. {exception.Message} Refreshing workspace state.";
+            Activity.Log.Insert(0, new(DateTimeOffset.Now, "Warning", "Remote edit", AgentStatus));
+            RequestStateRefresh();
+            throw;
+        }
     }
+
+    public void RequestWorkspaceRefresh() => RequestStateRefresh();
 
     public async Task<bool> CompleteRemoteEditAsync(string editId)
     {
@@ -173,7 +209,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private void AddSession(Models.WorkspaceSessionSeed seed)
     {
-        var existing = Sessions.FirstOrDefault(session => session.ProfileId == seed.Snapshot.ProfileId && session.DisplayName == seed.Snapshot.DisplayName);
+        var existing = Sessions.FirstOrDefault(session => session.SessionId == seed.Snapshot.SessionId);
         if (existing is not null)
         {
             SelectedSession = existing;
@@ -184,7 +220,9 @@ public sealed class MainWindowViewModel : ObservableObject
         if (profile is null) return;
         var session = new SessionViewModel(_agent, seed, profile);
         session.JobQueued += (_, job) => Activity.Add(job);
+        session.TransferOutcomeUnconfirmed += (_, submission) => RememberUnconfirmedTransfer(submission);
         Sessions.Add(session);
+        ApplyTransferSubmissionGuard(session);
         SelectedSession = session;
         Console.LoadSessions(Sessions);
     }
@@ -195,6 +233,14 @@ public sealed class MainWindowViewModel : ObservableObject
         IsLoading = false;
     }
 
+    private void ReportUnconfirmedSessionConnect(string operation, Exception exception)
+    {
+        HasAgentError = false;
+        AgentStatus = $"{operation} could not be confirmed · Session state may have changed. {exception.Message} Refreshing workspace state.";
+        Activity.Log.Insert(0, new(DateTimeOffset.Now, "Warning", "Agent", AgentStatus));
+        RequestStateRefresh();
+    }
+
     private void Agent_EventReceived(object? sender, EngineEvent engineEvent)
     {
         if (_uiContext is null) return;
@@ -202,6 +248,11 @@ public sealed class MainWindowViewModel : ObservableObject
     }
 
     private void Agent_StateInvalidated(object? sender, EventArgs e)
+    {
+        RequestStateRefresh();
+    }
+
+    private void RequestStateRefresh()
     {
         Interlocked.Exchange(ref _stateInvalidated, 1);
         _uiContext?.Post(_ => _ = EnsureStateCurrentAsync(), null);
@@ -212,11 +263,20 @@ public sealed class MainWindowViewModel : ObservableObject
         if (engineEvent.Name == "job.changed" && DeserializePayload<JobSnapshot>(engineEvent.Payload) is { } job)
         {
             Activity.Add(job);
+            ResolveUnconfirmedTransfer(job, $"The Agent confirmed transfer job {job.Id}.");
+            Mirror.ObserveJob(job);
+            RemoteTransfer.ObserveJob(job);
         }
         else if (engineEvent.Name == "profile.saved" && DeserializePayload<ConnectionProfile>(engineEvent.Payload) is { } profile)
         {
             Connections.Upsert(profile);
             foreach (var session in Sessions.Where(candidate => candidate.ProfileId == profile.Id)) session.UpdateProfile(profile);
+        }
+        else if (engineEvent.Name is "profile.deleted" or "session.connected")
+        {
+            // These events are post-commit signals. Always load an authoritative
+            // bootstrap so a prior lost-reply refresh cannot win a race with the commit.
+            RequestStateRefresh();
         }
         else if (engineEvent.Name == "session.disconnected" && PayloadGuid(engineEvent.Payload) is { } sessionId)
         {
@@ -305,5 +365,119 @@ public sealed class MainWindowViewModel : ObservableObject
             SelectedSession = Sessions.ElementAtOrDefault(Math.Clamp(index - 1, 0, Math.Max(0, Sessions.Count - 1)));
         }
         Console.LoadSessions(Sessions);
+    }
+
+    private void RememberUnconfirmedTransfer(UnconfirmedTransferSubmission submission)
+    {
+        if (_unconfirmedTransfers.TryGetValue(submission.Plan.Id, out var existing))
+        {
+            if (existing.Submission != submission)
+            {
+                AgentStatus = $"Transfer plan {submission.Plan.Id} has conflicting unconfirmed details. Queueing remains blocked while workspace state is refreshed.";
+            }
+        }
+        else
+        {
+            _unconfirmedTransfers.Add(submission.Plan.Id, new(submission));
+            OnPropertyChanged(nameof(UnconfirmedTransferCount));
+        }
+        UpdateTransferSubmissionGuards();
+        RequestStateRefresh();
+    }
+
+    private async Task ReconcileUnconfirmedTransfersAsync(IReadOnlyList<JobSnapshot> jobs)
+    {
+        ArgumentNullException.ThrowIfNull(jobs);
+        foreach (var state in _unconfirmedTransfers.Values.ToArray())
+        {
+            var matchingJob = jobs.FirstOrDefault(job => job.Id == state.Submission.Plan.Id);
+            if (matchingJob is not null)
+            {
+                if (!MatchesUnconfirmedTransfer(state, matchingJob))
+                {
+                    state.ReconciliationAttempted = true;
+                    ReportUnconfirmedTransferIdentityMismatch(state, matchingJob);
+                    continue;
+                }
+                ResolveUnconfirmedTransfer(matchingJob, $"The refreshed workspace confirms transfer job {matchingJob.Id}.");
+                continue;
+            }
+            if (state.ReconciliationAttempted)
+            {
+                AgentStatus = "A transfer submission remains unconfirmed after its one same-ID reconciliation attempt. New transfer plans stay blocked until the Agent reports the original job or rejects it authoritatively.";
+                continue;
+            }
+
+            state.ReconciliationAttempted = true;
+            try
+            {
+                var job = await _agent.EnqueueTransferAsync(
+                    state.Submission.SessionId,
+                    state.Submission.Plan).ConfigureAwait(true);
+                ResolveUnconfirmedTransfer(job, job.State == JobState.Failed
+                    ? $"The Agent reconciled transfer {job.Id} as failed: {job.Error?.Message ?? job.Status ?? "The transfer could not start."}"
+                    : $"The Agent reconciled the original transfer plan as job {job.Id}.");
+            }
+            catch (AgentRequestOutcomeUnknownException exception)
+            {
+                AgentStatus = $"The original transfer remains unconfirmed after its one same-ID reconciliation attempt. {exception.Message} No new plan ID will be created.";
+            }
+            catch (AgentRequestRejectedException exception)
+            {
+                _unconfirmedTransfers.Remove(state.Submission.Plan.Id);
+                OnPropertyChanged(nameof(UnconfirmedTransferCount));
+                AgentStatus = $"The Agent authoritatively rejected the original transfer plan. {exception.Message} Refreshed Activity has no matching job; a fresh transfer may now be created.";
+            }
+            catch (Exception exception)
+            {
+                AgentStatus = $"The original transfer remains unconfirmed because reconciliation was interrupted or invalid. {exception.Message} No new plan ID will be created.";
+            }
+        }
+        UpdateTransferSubmissionGuards();
+    }
+
+    private void ResolveUnconfirmedTransfer(JobSnapshot job, string status)
+    {
+        if (!_unconfirmedTransfers.TryGetValue(job.Id, out var state)) return;
+        if (!MatchesUnconfirmedTransfer(state, job))
+        {
+            ReportUnconfirmedTransferIdentityMismatch(state, job);
+            return;
+        }
+        _unconfirmedTransfers.Remove(job.Id);
+        Activity.Add(job);
+        OnPropertyChanged(nameof(UnconfirmedTransferCount));
+        AgentStatus = status;
+        UpdateTransferSubmissionGuards();
+    }
+
+    private void UpdateTransferSubmissionGuards()
+    {
+        foreach (var session in Sessions) ApplyTransferSubmissionGuard(session);
+    }
+
+    private void ApplyTransferSubmissionGuard(SessionViewModel session) =>
+        session.SetUnconfirmedTransferIds(_unconfirmedTransfers.Keys);
+
+    private static bool MatchesUnconfirmedTransfer(UnconfirmedTransferState state, JobSnapshot job) =>
+        job.Kind == JobKind.Transfer && job.ProfileId == state.Submission.Plan.ProfileId;
+
+    private void ReportUnconfirmedTransferIdentityMismatch(UnconfirmedTransferState state, JobSnapshot job)
+    {
+        AgentStatus = $"Job {job.Id} does not match the unconfirmed transfer kind and profile. " +
+            "The original plan remains blocked; no fresh transfer ID will be created.";
+        Activity.Log.Insert(0, new(
+            DateTimeOffset.Now,
+            "Warning",
+            "Transfer reconciliation",
+            $"Plan {state.Submission.Plan.Id} expected Transfer/{state.Submission.Plan.ProfileId}, " +
+                $"but Activity reported {job.Kind}/{job.ProfileId}."));
+        UpdateTransferSubmissionGuards();
+    }
+
+    private sealed class UnconfirmedTransferState(UnconfirmedTransferSubmission submission)
+    {
+        public UnconfirmedTransferSubmission Submission { get; } = submission;
+        public bool ReconciliationAttempted { get; set; }
     }
 }

@@ -5,6 +5,9 @@ namespace LFTPPilot.Tests;
 
 public sealed class CommandBuilderTests
 {
+    private const string KnownHostsPath = @"C:\LFTP Pilot\known_hosts";
+    private const string HostKeyAlias = "lftp-pilot-test-alias";
+
     [Fact]
     public void QuoteEscapesLftpSyntaxAndRejectsNewlines()
     {
@@ -28,9 +31,11 @@ public sealed class CommandBuilderTests
     [Fact]
     public void OpenQuotesCredentialsAndRejectsSecretInjection()
     {
-        var command = LftpCommandBuilder.BuildOpen(Profile(ConnectionProtocol.Sftp, 22), "p,a\\\"ss");
+        var command = LftpCommandBuilder.BuildOpen(
+            Profile(ConnectionProtocol.Sftp, 22), "p,a\\\"ss", KnownHostsPath, HostKeyAlias);
         Assert.Contains("open --user \"alice\" --password \"p,a\\\\\\\"ss\"", command, StringComparison.Ordinal);
-        Assert.Throws<ArgumentException>(() => LftpCommandBuilder.BuildOpen(Profile(ConnectionProtocol.Sftp, 22), "password\n! calc"));
+        Assert.Throws<ArgumentException>(() => LftpCommandBuilder.BuildOpen(
+            Profile(ConnectionProtocol.Sftp, 22), "password\n! calc", KnownHostsPath, HostKeyAlias));
     }
 
     [Fact]
@@ -40,9 +45,48 @@ public sealed class CommandBuilderTests
             Guid.NewGuid(), "Key", ConnectionProtocol.Sftp, "example.test", 22, "alice", AuthenticationKind.SshKey,
             SshKeyPath: @"C:\Keys\id_ed25519");
 
-        var command = LftpCommandBuilder.BuildOpen(profile);
+        var command = LftpCommandBuilder.BuildOpen(profile, trustedKnownHostsPath: KnownHostsPath, hostKeyAlias: HostKeyAlias);
         Assert.Contains("open --user \"alice\" \"sftp://example.test:22\"", command, StringComparison.Ordinal);
         Assert.DoesNotContain("--password", command, StringComparison.Ordinal);
+        Assert.Contains("-o IdentitiesOnly=yes -i '/c/Keys/id_ed25519'", command, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SftpOpenRequiresPinnedHostKeyInputsAndForcesStrictOpenSshOptions()
+    {
+        var profile = Profile(ConnectionProtocol.Sftp, 22);
+
+        Assert.Throws<ArgumentException>(() => LftpCommandBuilder.BuildOpen(profile, "secret"));
+        Assert.Throws<ArgumentException>(() => LftpCommandBuilder.BuildOpen(profile, "secret", KnownHostsPath));
+        Assert.Throws<ArgumentException>(() => LftpCommandBuilder.BuildOpen(profile, "secret", KnownHostsPath, "bad;alias"));
+
+        var command = LftpCommandBuilder.BuildOpen(profile, "secret", KnownHostsPath, HostKeyAlias);
+
+        Assert.Contains("ssh -F none -a -x", command, StringComparison.Ordinal);
+        Assert.Contains("-o StrictHostKeyChecking=yes", command, StringComparison.Ordinal);
+        Assert.Contains("-o 'UserKnownHostsFile=\\\"/c/LFTP Pilot/known_hosts\\\"'", command, StringComparison.Ordinal);
+        Assert.Contains("-o GlobalKnownHostsFile=none", command, StringComparison.Ordinal);
+        Assert.Contains("-o UpdateHostKeys=no", command, StringComparison.Ordinal);
+        Assert.Contains("-o VerifyHostKeyDNS=no", command, StringComparison.Ordinal);
+        Assert.Contains("-o CheckHostIP=no", command, StringComparison.Ordinal);
+        Assert.Contains("-o IdentityAgent=none", command, StringComparison.Ordinal);
+        Assert.Contains($"-o 'HostKeyAlias={HostKeyAlias}'", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("StrictHostKeyChecking=no", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("StrictHostKeyChecking=accept-new", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("BatchMode=yes", command, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FtpOpenPreservesExistingBehaviorAndRejectsSshTrustInputs()
+    {
+        var profile = Profile(ConnectionProtocol.Ftp, 21);
+
+        var command = LftpCommandBuilder.BuildOpen(profile, "secret");
+
+        Assert.Contains("set ftp:ssl-allow false", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("sftp:connect-program", command, StringComparison.Ordinal);
+        Assert.Throws<ArgumentException>(() => LftpCommandBuilder.BuildOpen(
+            profile, "secret", KnownHostsPath, HostKeyAlias));
     }
 
     [Fact]

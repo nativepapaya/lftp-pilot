@@ -27,12 +27,24 @@ public static class ProfileValidator
         if (!Enum.IsDefined(profile.Authentication)) issues.Add(new("authentication", "unsupported", "The authentication mode is not supported."));
         if (profile.Port is < 1 or > 65_535)
             issues.Add(new("port", "range", "The port must be between 1 and 65535."));
-        if (profile.Host is not null && (profile.Host.Contains("://", StringComparison.Ordinal) || profile.Host.Any(char.IsWhiteSpace) || profile.Host.Contains('/') || profile.Host.Contains('\\')))
-            issues.Add(new("host", "format", "The host must not contain a scheme, path, or whitespace."));
+        if (profile.Host is not null && (profile.Host.Contains("://", StringComparison.Ordinal) ||
+            profile.Host.Any(char.IsWhiteSpace) || profile.Host.Contains('/') || profile.Host.Contains('\\') ||
+            !IsDnsOrIpHost(profile.Host)))
+            issues.Add(new("host", "format", "The host must be a DNS name or IP address without a scheme, path, or whitespace."));
         if (profile.Authentication == AuthenticationKind.SshKey && profile.Protocol != ConnectionProtocol.Sftp)
             issues.Add(new("authentication", "unsupported", "SSH key authentication is available only for SFTP."));
         if (profile.Authentication == AuthenticationKind.SshKey && string.IsNullOrWhiteSpace(profile.SshKeyPath))
             issues.Add(new("sshKeyPath", "required", "An SSH key path is required for key authentication."));
+        if (profile.SshKeyPath is { Length: > 32_767 })
+            issues.Add(new("sshKeyPath", "length", "The SSH key path cannot exceed 32767 characters."));
+        if (profile.Authentication == AuthenticationKind.SshKey &&
+            !string.IsNullOrWhiteSpace(profile.SshKeyPath) &&
+            !Path.IsPathFullyQualified(profile.SshKeyPath))
+            issues.Add(new("sshKeyPath", "absolute", "The SSH key path must be fully qualified."));
+        if (profile.Authentication == AuthenticationKind.SshKey &&
+            !string.IsNullOrWhiteSpace(profile.SshKeyPath) &&
+            IsWindowsDevicePath(profile.SshKeyPath))
+            issues.Add(new("sshKeyPath", "device-path", "Windows device-namespace SSH key paths are not supported."));
         if (profile.SshKeyPath is not null && ContainsProtocolControl(profile.SshKeyPath))
             issues.Add(new("sshKeyPath", "control-character", "The SSH key path contains a prohibited control character."));
         if (profile.InitialRemotePath is not null && !IsRemoteAbsolute(profile.InitialRemotePath))
@@ -65,6 +77,26 @@ public static class ProfileValidator
     internal static bool ContainsProtocolControl(string value) => value.IndexOfAny(['\0', '\r', '\n']) >= 0;
 
     internal static bool IsRemoteAbsolute(string value) => value.StartsWith("/", StringComparison.Ordinal) && !ContainsProtocolControl(value);
+
+    private static bool IsWindowsDevicePath(string value)
+    {
+        var normalized = value.Replace('/', '\\');
+        return normalized.StartsWith(@"\\?\", StringComparison.Ordinal) ||
+            normalized.StartsWith(@"\\.\", StringComparison.Ordinal) ||
+            normalized.StartsWith(@"\??\", StringComparison.Ordinal) ||
+            normalized.StartsWith(@"\\??\", StringComparison.Ordinal);
+    }
+
+    private static bool IsDnsOrIpHost(string value)
+    {
+        if (value.Length == 0 || value[0] == '-') return false;
+        var bracketed = value.Length >= 2 && value[0] == '[' && value[^1] == ']';
+        var host = bracketed ? value[1..^1] : value;
+        if (host.Length == 0 || host.Contains('[') || host.Contains(']')) return false;
+        var hostNameType = Uri.CheckHostName(host);
+        if (bracketed) return hostNameType == UriHostNameType.IPv6;
+        return hostNameType is UriHostNameType.Dns or UriHostNameType.IPv4 or UriHostNameType.IPv6;
+    }
 
     private static void ValidateText(string? value, string field, int minimum, int maximum, ImmutableArray<ValidationIssue>.Builder issues)
     {

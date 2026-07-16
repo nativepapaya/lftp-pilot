@@ -14,6 +14,48 @@ public sealed class CoreValidationTests
         Assert.Equal(990, ProfileValidator.DefaultPort(ConnectionProtocol.FtpsImplicit));
     }
 
+    [Theory]
+    [InlineData(@"\\?\C:\Keys\id_ed25519")]
+    [InlineData(@"\\.\C:\Keys\id_ed25519")]
+    [InlineData(@"\??\C:\Keys\id_ed25519")]
+    [InlineData(@"\\??\C:\Keys\id_ed25519")]
+    public void ProfileRejectsDeviceNamespaceSshKeyPaths(string sshKeyPath)
+    {
+        var issues = ProfileValidator.Validate(
+            Profile(ConnectionProtocol.Sftp, AuthenticationKind.SshKey) with { SshKeyPath = sshKeyPath });
+
+        Assert.Contains(issues, issue => issue.Field == "sshKeyPath" && issue.Code == "device-path");
+    }
+
+    [Fact]
+    public void ConnectionIdentityPreservesCaseSensitiveSshKeyPathDistinctions()
+    {
+        var profile = Profile(ConnectionProtocol.Sftp, AuthenticationKind.SshKey) with
+        {
+            SshKeyPath = @"C:\Keys\CaseSensitive\id_ed25519",
+        };
+
+        var original = ConnectionIdentity.FromProfile(profile);
+        var caseOnlyChange = ConnectionIdentity.FromProfile(profile with
+        {
+            SshKeyPath = @"C:\Keys\casesensitive\id_ed25519",
+        });
+
+        Assert.NotEqual(original, caseOnlyChange);
+    }
+
+    [Fact]
+    public void ProfileRejectsOversizedSshKeyPathBeforeIdentityCanonicalization()
+    {
+        var oversized = @"C:\" + new string('a', 32_765);
+        var profile = Profile(ConnectionProtocol.Sftp, AuthenticationKind.SshKey) with { SshKeyPath = oversized };
+
+        var issues = ProfileValidator.Validate(profile);
+
+        Assert.Contains(issues, issue => issue.Field == "sshKeyPath" && issue.Code == "length");
+        Assert.Throws<ModelValidationException>(() => ConnectionIdentity.FromProfile(profile));
+    }
+
     [Fact]
     public void ProfileRejectsSchemeControlCharactersAndInvalidKeyProtocol()
     {
@@ -26,6 +68,27 @@ public sealed class CoreValidationTests
         Assert.Contains(issues, issue => issue.Field == "host" && issue.Code == "control-character");
         Assert.Contains(issues, issue => issue.Field == "host" && issue.Code == "format");
         Assert.Contains(issues, issue => issue.Field == "authentication" && issue.Code == "unsupported");
+    }
+
+    [Theory]
+    [InlineData("-oProxyCommand=calc.exe")]
+    [InlineData("[example.test]")]
+    [InlineData("bad;host")]
+    [InlineData("broken[host")]
+    public void ProfileRejectsHostsThatAreNotDnsNamesOrIpAddresses(string host)
+    {
+        var issues = ProfileValidator.Validate(Profile(ConnectionProtocol.Sftp, AuthenticationKind.AskOnConnect) with { Host = host });
+        Assert.Contains(issues, issue => issue.Field == "host" && issue.Code == "format");
+    }
+
+    [Theory]
+    [InlineData("localhost")]
+    [InlineData("192.0.2.10")]
+    [InlineData("2001:db8::10")]
+    [InlineData("[2001:db8::10]")]
+    public void ProfileAcceptsDnsAndIpHostForms(string host)
+    {
+        Assert.Empty(ProfileValidator.Validate(Profile(ConnectionProtocol.Sftp, AuthenticationKind.AskOnConnect) with { Host = host }));
     }
 
     [Fact]

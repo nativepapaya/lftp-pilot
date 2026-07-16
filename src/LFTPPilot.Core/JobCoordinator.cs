@@ -5,8 +5,8 @@ public sealed class JobCoordinator : IJobCoordinator
     private static readonly IReadOnlyDictionary<JobState, HashSet<JobState>> AllowedTransitions =
         new Dictionary<JobState, HashSet<JobState>>
         {
-            [JobState.Scheduled] = [JobState.Queued, JobState.Cancelled, JobState.Missed],
-            [JobState.Queued] = [JobState.Running, JobState.Cancelled],
+            [JobState.Scheduled] = [JobState.Queued, JobState.Failed, JobState.Cancelled, JobState.Missed],
+            [JobState.Queued] = [JobState.Running, JobState.Failed, JobState.Cancelled],
             [JobState.Running] = [JobState.Paused, JobState.Completed, JobState.Failed, JobState.Cancelled],
             [JobState.Paused] = [JobState.Queued, JobState.Cancelled],
             [JobState.Completed] = [],
@@ -37,7 +37,7 @@ public sealed class JobCoordinator : IJobCoordinator
         {
             if (!_jobs.TryAdd(job.Id, job)) throw new InvalidOperationException($"Job {job.Id} already exists.");
         }
-        JobChanged?.Invoke(this, job);
+        PublishJobChanged(job);
         return job;
     }
 
@@ -54,17 +54,26 @@ public sealed class JobCoordinator : IJobCoordinator
             updated = current with { State = state, Status = status ?? current.Status, Error = error, UpdatedAt = DateTimeOffset.UtcNow };
             _jobs[jobId] = updated;
         }
-        JobChanged?.Invoke(this, updated);
+        PublishJobChanged(updated);
         return updated;
     }
 
     public bool TryCancel(Guid jobId, string? reason = null)
     {
+        JobSnapshot updated;
         lock (_gate)
         {
             if (!_jobs.TryGetValue(jobId, out var job) || !AllowedTransitions[job.State].Contains(JobState.Cancelled)) return false;
+            updated = job with
+            {
+                State = JobState.Cancelled,
+                Status = reason ?? "Cancelled",
+                Error = null,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            };
+            _jobs[jobId] = updated;
         }
-        Transition(jobId, JobState.Cancelled, reason ?? "Cancelled");
+        PublishJobChanged(updated);
         return true;
     }
 
@@ -87,7 +96,7 @@ public sealed class JobCoordinator : IJobCoordinator
             };
             _jobs[jobId] = updated;
         }
-        JobChanged?.Invoke(this, updated);
+        PublishJobChanged(updated);
         return updated;
     }
 
@@ -99,4 +108,26 @@ public sealed class JobCoordinator : IJobCoordinator
             foreach (var job in jobs) _jobs[job.Id] = job;
         }
     }
+
+    private void PublishJobChanged(JobSnapshot job)
+    {
+        var handlers = JobChanged;
+        if (handlers is null) return;
+        foreach (EventHandler<JobSnapshot> handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(this, job);
+            }
+            catch (Exception exception) when (!IsFatalRuntimeException(exception))
+            {
+                // Observers must not unwind a committed state mutation or
+                // prevent lifecycle work, such as process cancellation, that
+                // the coordinator's caller performs after publication.
+            }
+        }
+    }
+
+    private static bool IsFatalRuntimeException(Exception exception) => exception is
+        OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException;
 }

@@ -15,6 +15,8 @@ public interface IAgentWorkspaceClient : IAsyncDisposable
     Task<UiWorkspaceBootstrap> LoadAsync(CancellationToken cancellationToken = default);
     Task<ConnectionProfile> SaveProfileAsync(ConnectionProfile profile, string? credential = null, CancellationToken cancellationToken = default);
     Task<bool> DeleteProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
+    Task<SftpHostKeyInspection> InspectSftpHostKeyAsync(ConnectionProfile profile, CancellationToken cancellationToken = default);
+    Task<SftpHostKeyApproveResult> ApproveSftpHostKeyAsync(SftpHostKeyReview review, bool replaceExisting, CancellationToken cancellationToken = default);
     Task<WorkspaceSessionSeed> ConnectAsync(ConnectionProfile profile, string? ephemeralCredential = null, CancellationToken cancellationToken = default);
     Task<bool> DisconnectAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<FileEntry>> BrowseAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default);
@@ -36,4 +38,181 @@ public interface IAgentWorkspaceClient : IAsyncDisposable
     Task StopAgentAsync(CancellationToken cancellationToken = default);
     Task<AppUpdateStatus> CheckForUpdatesAsync(CancellationToken cancellationToken = default);
     Task OpenUpdateInstallerAsync(CancellationToken cancellationToken = default);
+}
+
+internal static class SftpHostKeyWireValidation
+{
+    private const string FingerprintPrefix = "SHA256:";
+
+    public static void ValidateInspection(SftpHostKeyInspection inspection, ConnectionIdentity expectedIdentity)
+    {
+        ArgumentNullException.ThrowIfNull(inspection);
+        ArgumentNullException.ThrowIfNull(expectedIdentity);
+        if (expectedIdentity.Protocol != ConnectionProtocol.Sftp)
+            throw new ArgumentException("An SFTP connection identity is required.", nameof(expectedIdentity));
+        if (!Enum.IsDefined(inspection.State))
+            throw new InvalidDataException("The Agent returned an unsupported SFTP host-key state.");
+        if (inspection.State == SftpHostKeyState.Trusted)
+        {
+            if (inspection.Review is not null)
+                throw new InvalidDataException("A trusted SFTP host key cannot require review.");
+            return;
+        }
+
+        var review = inspection.Review ??
+            throw new InvalidDataException("The Agent omitted the required SFTP host-key review.");
+        if (review.State != inspection.State)
+            throw new InvalidDataException("The Agent returned inconsistent SFTP host-key review state.");
+        ValidateReview(review, expectedIdentity);
+    }
+
+    public static void ValidateReview(SftpHostKeyReview review, ConnectionIdentity expectedIdentity)
+    {
+        ArgumentNullException.ThrowIfNull(expectedIdentity);
+        ValidateReview(review, expectedIdentity.ProfileId);
+        if (expectedIdentity.Protocol != ConnectionProtocol.Sftp ||
+            !string.Equals(review.Endpoint, expectedIdentity.SftpHostKeyEndpoint, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The Agent returned an SFTP host-key review for a different endpoint.");
+        }
+    }
+
+    public static void ValidateReview(SftpHostKeyReview review, Guid expectedProfileId)
+    {
+        ArgumentNullException.ThrowIfNull(review);
+        if (expectedProfileId == Guid.Empty || review.ProfileId != expectedProfileId || review.ReviewId == Guid.Empty)
+            throw new InvalidDataException("The Agent returned an SFTP host-key review for a different profile.");
+        if (review.State is not SftpHostKeyState.EnrollmentRequired and not SftpHostKeyState.Changed)
+            throw new InvalidDataException("The Agent returned an SFTP host-key review in an unsupported state.");
+
+        ValidateEndpoint(review.Endpoint);
+        ValidateAlgorithm(review.PresentedAlgorithm, "presented algorithm");
+        ValidateFingerprint(review.PresentedFingerprintSha256, "presented fingerprint");
+        ValidateApprovalToken(review.ApprovalToken);
+        if (review.ExpiresAt <= DateTimeOffset.UtcNow)
+            throw new InvalidDataException("The Agent returned an expired SFTP host-key review.");
+
+        if (review.State == SftpHostKeyState.EnrollmentRequired)
+        {
+            if (review.TrustedAlgorithm is not null || review.TrustedFingerprintSha256 is not null)
+                throw new InvalidDataException("A new SFTP host-key enrollment cannot include an existing trusted key.");
+            return;
+        }
+
+        ValidateAlgorithm(review.TrustedAlgorithm, "trusted algorithm");
+        ValidateFingerprint(review.TrustedFingerprintSha256, "trusted fingerprint");
+        if (string.Equals(review.PresentedAlgorithm, review.TrustedAlgorithm, StringComparison.Ordinal) &&
+            string.Equals(review.PresentedFingerprintSha256, review.TrustedFingerprintSha256, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("A changed SFTP host-key review did not identify a different key.");
+        }
+    }
+
+    private static void ValidateEndpoint(string? endpoint)
+    {
+        const string prefix = "sftp://";
+        if (string.IsNullOrEmpty(endpoint) || endpoint.Length > 512 ||
+            !endpoint.StartsWith(prefix, StringComparison.Ordinal) ||
+            endpoint.Any(static character => char.IsWhiteSpace(character) || char.IsControl(character)) ||
+            !Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) ||
+            !string.Equals(uri.Scheme, "sftp", StringComparison.Ordinal) ||
+            uri.HostNameType == UriHostNameType.Unknown ||
+            uri.Port is < 1 or > 65_535 ||
+            uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0 ||
+            !string.Equals(uri.AbsolutePath, "/", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The Agent returned an invalid SFTP host-key endpoint.");
+        }
+
+        var authority = endpoint[prefix.Length..];
+        if (authority.IndexOfAny(['/', '\\', '?', '#', '@']) >= 0)
+            throw new InvalidDataException("The Agent returned an invalid SFTP host-key endpoint.");
+
+        string host;
+        string portText;
+        if (authority.StartsWith("[", StringComparison.Ordinal))
+        {
+            var closingBracket = authority.IndexOf(']');
+            if (closingBracket <= 1 || closingBracket + 2 > authority.Length ||
+                authority[closingBracket + 1] != ':' ||
+                authority.IndexOf('[', 1) >= 0 || authority.IndexOf(']', closingBracket + 1) >= 0)
+            {
+                throw new InvalidDataException("The Agent returned an invalid SFTP host-key endpoint.");
+            }
+
+            host = authority[1..closingBracket];
+            portText = authority[(closingBracket + 2)..];
+            if (Uri.CheckHostName(host) != UriHostNameType.IPv6)
+                throw new InvalidDataException("The Agent returned an invalid SFTP host-key endpoint.");
+        }
+        else
+        {
+            var separator = authority.LastIndexOf(':');
+            if (separator <= 0 || authority[..separator].Contains(':') ||
+                authority.Contains('[') || authority.Contains(']'))
+            {
+                throw new InvalidDataException("The Agent returned an invalid SFTP host-key endpoint.");
+            }
+
+            host = authority[..separator];
+            portText = authority[(separator + 1)..];
+            if (Uri.CheckHostName(host) is not UriHostNameType.Dns and not UriHostNameType.IPv4)
+                throw new InvalidDataException("The Agent returned an invalid SFTP host-key endpoint.");
+        }
+
+        if (host.Length > 253 || !string.Equals(host, host.ToLowerInvariant(), StringComparison.Ordinal) ||
+            !int.TryParse(portText, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var port) ||
+            port is < 1 or > 65_535 ||
+            !string.Equals(portText, port.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The Agent returned a non-canonical SFTP host-key endpoint.");
+        }
+    }
+
+    private static void ValidateAlgorithm(string? algorithm, string field)
+    {
+        // RFC 4251 name-lists use non-empty printable US-ASCII names with comma reserved as the separator.
+        if (algorithm is not { Length: >= 1 and <= 128 } ||
+            algorithm.Any(static character => character is < '\x21' or > '\x7e' or ','))
+        {
+            throw new InvalidDataException($"The Agent returned an invalid SFTP host-key {field}.");
+        }
+    }
+
+    private static void ValidateFingerprint(string? fingerprint, string field)
+    {
+        if (fingerprint is not { Length: 50 } ||
+            !fingerprint.StartsWith(FingerprintPrefix, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"The Agent returned an invalid SFTP host-key {field}.");
+        }
+
+        var payload = fingerprint[FingerprintPrefix.Length..];
+        if (payload.Any(static character =>
+                !char.IsAsciiLetterOrDigit(character) && character is not '+' and not '/'))
+        {
+            throw new InvalidDataException($"The Agent returned an invalid SFTP host-key {field}.");
+        }
+
+        try
+        {
+            var digest = Convert.FromBase64String(payload + "=");
+            if (digest.Length != 32 ||
+                !string.Equals(Convert.ToBase64String(digest).TrimEnd('='), payload, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException($"The Agent returned an invalid SFTP host-key {field}.");
+            }
+        }
+        catch (FormatException exception)
+        {
+            throw new InvalidDataException($"The Agent returned an invalid SFTP host-key {field}.", exception);
+        }
+    }
+
+    private static void ValidateApprovalToken(string? approvalToken)
+    {
+        if (approvalToken is not { Length: 64 } || approvalToken.Any(static character => !char.IsAsciiHexDigit(character)))
+            throw new InvalidDataException("The Agent returned an invalid SFTP host-key approval token.");
+    }
 }

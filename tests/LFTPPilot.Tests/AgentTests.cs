@@ -168,13 +168,76 @@ public sealed class AgentTests
         Assert.True(cancel.GetProperty("cancelled").GetBoolean());
 
         var scheduled = JobCoordinatorTests.Job(JobState.Scheduled, DateTimeOffset.UtcNow.AddHours(1));
-        var unsupported = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var unsupported = await Assert.ThrowsAsync<EngineRequestRejectedException>(() =>
             client.RequestAsync("jobs.enqueue", scheduled, TestContext.Current.CancellationToken));
+        Assert.Equal("jobs.enqueue", unsupported.Method);
         Assert.Contains("executable transfer payload", unsupported.Message, StringComparison.Ordinal);
 
         var stopping = await client.RequestAsync(AgentProtocol.StopMethod, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(stopping.GetProperty("stopping").GetBoolean());
         await run.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task StopStillShutsDownWhenItsReplyWriteFails()
+    {
+        using var directory = new TemporaryDirectory();
+        var responseWriteAttempted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var host = new AgentHost(
+            Path.Combine(directory.Path, "jobs.json"),
+            (_, _, _) =>
+            {
+                responseWriteAttempted.TrySetResult(true);
+                return ValueTask.FromException(new IOException("The stop reply pipe was deliberately broken."));
+            });
+        var run = host.RunAsync(TestContext.Current.CancellationToken);
+        await using var client = new NamedPipeEngineClient(Environment.ProcessId);
+
+        await Assert.ThrowsAnyAsync<IOException>(() =>
+            client.RequestAsync(AgentProtocol.StopMethod, cancellationToken: TestContext.Current.CancellationToken));
+        await responseWriteAttempted.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        await run.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        Assert.True(run.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public async Task ShutdownAwaitsInFlightWorkspaceRequestBeforeDisposingItsLifecycleGates()
+    {
+        using var directory = new TemporaryDirectory();
+        var profiles = new BlockingProfileStore();
+        var hostKeys = new SftpHostKeyManager(new NoopHostKeyStore(), new NoopHostKeyProbe());
+        var options = AgentWorkspaceOptions.CreateDefault(Path.Combine(directory.Path, "runtime"));
+        var host = new AgentHost(
+            Path.Combine(directory.Path, "jobs.json"),
+            profileStore: profiles,
+            secretStore: new NoopSecretStore(),
+            hostKeyManager: hostKeys,
+            processHost: new NoopProcessHost(),
+            runtimeProvider: new NoopRuntimeProvider(),
+            mirrorPlanner: new MirrorPlanner(),
+            workspaceOptions: options);
+        var run = host.RunAsync(TestContext.Current.CancellationToken);
+        await using var client = new NamedPipeEngineClient(Environment.ProcessId);
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), "Blocking", ConnectionProtocol.Ftp, "files.example", 21,
+            "anonymous", AuthenticationKind.Anonymous);
+
+        var save = client.RequestAsync(
+            WorkspaceMethods.ProfileSave,
+            new ProfileSaveRequest(profile),
+            TestContext.Current.CancellationToken);
+        await profiles.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        var dispose = host.DisposeAsync().AsTask();
+        await profiles.CancellationObserved.Task.WaitAsync(
+            TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        Assert.False(dispose.IsCompleted);
+
+        profiles.Release.TrySetResult(true);
+        await dispose.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        await run.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        try { _ = await save; }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or OperationCanceledException) { }
     }
 
     [Fact]
@@ -239,6 +302,72 @@ public sealed class AgentTests
             if (DateTimeOffset.UtcNow >= deadline) throw new TimeoutException("The condition was not reached.");
             await Task.Delay(20, cancellationToken);
         }
+    }
+
+    private sealed class BlockingProfileStore : IProfileStore
+    {
+        public TaskCompletionSource<bool> Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<IReadOnlyList<ConnectionProfile>> GetAllAsync(CancellationToken cancellationToken = default)
+        {
+            Entered.TrySetResult(true);
+            // Deliberately model an in-flight store operation that cannot be
+            // interrupted until its underlying I/O completes.
+            using var registration = cancellationToken.Register(() => CancellationObserved.TrySetResult(true));
+            await Release.Task;
+            return [];
+        }
+
+        public Task SaveAsync(ConnectionProfile profile, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class NoopSecretStore : ISecretStore
+    {
+        public Task SaveAsync(SecretValue secret, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<string?> GetAsync(SecretBinding binding, CancellationToken cancellationToken = default) => Task.FromResult<string?>(null);
+        public Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class NoopHostKeyStore : IHostKeyStore
+    {
+        public Task<TrustedSftpHostKey?> GetAsync(HostKeyBinding binding, CancellationToken cancellationToken = default) =>
+            Task.FromResult<TrustedSftpHostKey?>(null);
+
+        public Task SaveAsync(TrustedSftpHostKey key, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task DeleteAsync(Guid profileId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class NoopHostKeyProbe : ISshHostKeyProbe
+    {
+        public Task<TrustedSftpHostKey> ProbeAsync(
+            ConnectionProfile profile,
+            string hostKeyAlias,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<TrustedSftpHostKey>(new NotSupportedException("The shutdown test does not probe SSH hosts."));
+    }
+
+    private sealed class NoopProcessHost : ILftpProcessHost
+    {
+        public Task<ILftpSession> StartAsync(LftpProcessStartOptions options, CancellationToken cancellationToken = default) =>
+            Task.FromException<ILftpSession>(new NotSupportedException("The shutdown test does not start LFTP."));
+    }
+
+    private sealed class NoopRuntimeProvider : ILftpRuntimeProvider
+    {
+        public Task<LftpRuntimeDescriptor> ResolveAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException<LftpRuntimeDescriptor>(new NotSupportedException("The shutdown test does not resolve LFTP."));
     }
 
     private sealed class TemporaryDirectory : IDisposable

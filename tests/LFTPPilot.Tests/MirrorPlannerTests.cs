@@ -28,6 +28,46 @@ public sealed class MirrorPlannerTests
     }
 
     [Fact]
+    public void ReviewFingerprintBindsEveryReviewedFieldButNotApprovalToken()
+    {
+        using var planner = new MirrorPlanner(approvalKey: Enumerable.Repeat((byte)7, 32).ToArray());
+        var preview = planner.CreatePreview(
+            CoreValidationTests.Mirror(delete: true),
+            ["Transferring file `file.txt'", "Removing old file `stale.txt'"],
+            Now);
+        var fingerprint = MirrorPlanner.ReviewFingerprint(preview);
+
+        Assert.Equal(fingerprint, MirrorPlanner.ReviewFingerprint(preview with { ApprovalToken = "different-token" }));
+        Assert.NotEqual(fingerprint, MirrorPlanner.ReviewFingerprint(preview with { Id = Guid.NewGuid() }));
+        Assert.NotEqual(fingerprint, MirrorPlanner.ReviewFingerprint(preview with { DefinitionId = Guid.NewGuid() }));
+        Assert.NotEqual(fingerprint, MirrorPlanner.ReviewFingerprint(preview with { GeneratedAt = preview.GeneratedAt.AddTicks(1) }));
+        Assert.NotEqual(fingerprint, MirrorPlanner.ReviewFingerprint(preview with { ExpiresAt = preview.ExpiresAt.AddTicks(1) }));
+        Assert.NotEqual(fingerprint, MirrorPlanner.ReviewFingerprint(preview with { DefinitionFingerprint = "different" }));
+        Assert.NotEqual(fingerprint, MirrorPlanner.ReviewFingerprint(preview with
+        {
+            Actions = preview.Actions.Add(new(MirrorActionKind.Download, "another.txt")),
+        }));
+    }
+
+    [Fact]
+    public void DefinitionFingerprintSeparatesEmbeddedDelimitersFromArrayBoundaries()
+    {
+        var embeddedDelimiter = CoreValidationTests.Mirror(delete: true) with
+        {
+            Includes = ["a\u001eb"],
+            Excludes = ["same"],
+        };
+        var separateItems = embeddedDelimiter with { Includes = ["a", "b"] };
+
+        Assert.NotEqual(
+            MirrorPlanner.Fingerprint(embeddedDelimiter),
+            MirrorPlanner.Fingerprint(separateItems));
+        Assert.NotEqual(
+            LftpCommandBuilder.BuildMirror(embeddedDelimiter, dryRun: false),
+            LftpCommandBuilder.BuildMirror(separateItems, dryRun: false));
+    }
+
+    [Fact]
     public void ReversePreviewClassifiesTransfersAsUploads()
     {
         using var planner = new MirrorPlanner();

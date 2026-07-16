@@ -11,12 +11,27 @@ the App while keeping both package trees read-only.
 
 - Control and event channels use distinct byte-mode named pipes created with
   `PipeOptions.CurrentUserOnly`. Both sides validate the peer PID against the
-  process they launched or connected to before exchanging frames.
+  process they launched or connected to before exchanging frames. Cancellation
+  after request I/O begins, malformed framing, or a mismatched correlation ID
+  discards the control connection before another request. Agent shutdown first
+  closes client admission and drains a stable handler set, then disposes the
+  scheduler and workspace.
 - Every Agent/runtime process is assigned to a kill-on-close Job Object. A
   disposed Agent job cannot leave `lftp`, `ssh`, or shell descendants behind.
 - Credentials are stored separately from profiles with DPAPI CurrentUser. DPAPI
   entropy contains profile ID, normalized endpoint, user name, and purpose;
   changing identity invalidates the previous credential.
+- SFTP host trust is public metadata, stored separately from credentials and
+  bound to a profile plus canonical endpoint. A credential-free OpenSSH
+  process may write exactly one proposed key to an isolated temporary
+  `known_hosts` file. The App receives the endpoint identity, algorithm,
+  fingerprints, review identifiers, and an opaque approval token, but never the
+  raw public key. Approved sessions use an Agent-materialized one-key file, an
+  opaque `HostKeyAlias`, `StrictHostKeyChecking=yes`, no global host files, no
+  automatic key updates, and `sftp:auto-confirm=false`. Profile,
+  trust, session-removal, and job-admission transitions are serialized through
+  complete LFTP process cleanup, so a changed key cannot replace trust while an
+  old-key process is still exiting.
 - Packaged state lives under the package family LocalState/LocalCache roots.
   Unpackaged development runs use a separate `%LOCALAPPDATA%\LFTP Pilot\Development`
   root and never probe LFTP Commander locations.
@@ -25,6 +40,16 @@ the App while keeping both package trees read-only.
   Exact success/failure markers retire that alias; cancelling one unaddressable
   native queue item retires the owned queue process and fails neighboring jobs
   closed rather than risking an ambiguous transfer state.
+- Ordinary transfer plan IDs and approved mirror preview IDs become their
+  durable job IDs. The Agent serializes first submission, caches the terminal
+  result, and leaves a failed or missed job tombstone when validation,
+  scheduling, or process admission cannot complete. The App keeps an uncertain
+  request private across bootstrap rebuilds and may reconcile it only once with
+  that same ID; a new plan or preview cannot substitute for an unresolved one.
+  Mirror approvals additionally carry a deterministic fingerprint of the exact
+  preview envelope and ordered action list the App displayed. The Agent compares
+  it to the stored preview before consumption, while its HMAC and fresh second
+  dry run remain the execution-side authority.
 - Remote editing accepts only a session and canonical remote file path; the
   Agent chooses the package-scoped cache path. Reviews bind strong local and
   remote identities, while dirty/watcher-failure state is returned in bootstrap
@@ -35,6 +60,17 @@ the App while keeping both package trees read-only.
   before backup and rename-based promotion. Rollback preserves a backup or
   quarantined concurrent version rather than deleting ambiguous remote data;
   the live path is never overwritten with `put -e`.
+- Remote-to-remote transfers currently execute only for FTP-family pairs, where
+  one LFTP process can prefer FXP and fall back to relay. SFTP/mixed pairs are
+  rejected until client relay uses distinct processes; a process-global
+  `sftp:connect-program` must never be reused for two endpoint-bound host-key
+  files. Route plans are bounded, expiring Agent-issued capabilities whose plan
+  ID becomes the durable job ID. The Agent serializes first consumption and
+  caches its result, while the App privately reconciles an uncertain submission
+  with the same ID; duplicate control-pipe deliveries therefore cannot start a
+  second process. Issuance also captures both complete `ConnectionIdentity`
+  values, which must still match the active sessions before any path validation
+  or transfer process can begin.
 - `lftp-pilot://` accepts only `open-profile?id=<guid>`, `transfers`, and
   `settings`. Credentials, commands, paths, and arbitrary mutations are rejected.
 

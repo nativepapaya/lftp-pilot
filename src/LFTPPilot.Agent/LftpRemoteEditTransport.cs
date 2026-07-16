@@ -62,127 +62,132 @@ internal sealed class LftpRemoteEditTransport : IRemoteEditTransport
         var remoteBackupPath = BuildAuxiliaryPath(remotePath, "backup");
         var remoteFailedPath = BuildAuxiliaryPath(remotePath, "failed");
         var session = _sessions.Get(sessionId);
-        await using var process = await session.CreateEphemeralAsync("remote-edit-commit", cancellationToken).ConfigureAwait(false);
-        var backupCreated = false;
-        var stagingPromoted = false;
-
-        try
+        return await session.WithEphemeralSessionAsync<RemoteEditCommitResult>("remote-edit-commit", async process =>
         {
-            if (await StatMetadataAsync(sessionId, remoteStagingPath, cancellationToken).ConfigureAwait(false) is not null ||
-                await StatMetadataAsync(sessionId, remoteBackupPath, cancellationToken).ConfigureAwait(false) is not null)
-                throw new IOException("A generated remote-edit staging path unexpectedly already exists.");
-
-            var upload = await process.ExecuteAsync(
-                LftpCommandBuilder.BuildRemoteEditUpload(managedLocalPath, remoteStagingPath),
-                _options.TransferTimeout,
-                cancellationToken).ConfigureAwait(false);
-            SessionRegistry.ThrowIfFailed(upload, "Remote edit staging upload");
-
-            var stagedIdentity = await StatAsync(sessionId, remoteStagingPath, cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidDataException("The staged remote upload could not be verified.");
-            if (stagedIdentity.Size != local.Size || !string.Equals(stagedIdentity.ContentSha256, local.Sha256, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("The staged remote upload did not match the reviewed local content.");
-
-            var current = await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false);
-            if (current != reviewedIdentity)
+            var backupCreated = false;
+            var stagingPromoted = false;
+            try
             {
-                await TryDeleteRemoteAsync(process, remoteStagingPath, cancellationToken).ConfigureAwait(false);
-                return new(false, current, "The remote target changed after staging. No staged content was promoted.");
-            }
+                if (await StatMetadataAsync(sessionId, remoteStagingPath, cancellationToken).ConfigureAwait(false) is not null ||
+                    await StatMetadataAsync(sessionId, remoteBackupPath, cancellationToken).ConfigureAwait(false) is not null)
+                    throw new IOException("A generated remote-edit staging path unexpectedly already exists.");
 
-            if (reviewedIdentity is not null)
-            {
-                await ExecuteRequiredAsync(process, LftpCommandBuilder.BuildMove(remotePath, remoteBackupPath),
-                    "Remote edit backup creation", cancellationToken).ConfigureAwait(false);
-                backupCreated = true;
+                var upload = await process.ExecuteAsync(
+                    LftpCommandBuilder.BuildRemoteEditUpload(managedLocalPath, remoteStagingPath),
+                    _options.TransferTimeout,
+                    cancellationToken).ConfigureAwait(false);
+                SessionRegistry.ThrowIfFailed(upload, "Remote edit staging upload");
 
-                var backupIdentity = await StatAsync(sessionId, remoteBackupPath, cancellationToken).ConfigureAwait(false);
-                if (!SameVersionAtDifferentPath(backupIdentity, reviewedIdentity))
+                var stagedIdentity = await StatAsync(sessionId, remoteStagingPath, cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidDataException("The staged remote upload could not be verified.");
+                if (stagedIdentity.Size != local.Size || !string.Equals(stagedIdentity.ContentSha256, local.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("The staged remote upload did not match the reviewed local content.");
+
+                var current = await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false);
+                if (current != reviewedIdentity)
                 {
-                    await RestoreBackupAsync(process, sessionId, remoteBackupPath, remotePath, remoteFailedPath, null, cancellationToken).ConfigureAwait(false);
+                    await TryDeleteRemoteAsync(process, remoteStagingPath, cancellationToken).ConfigureAwait(false);
+                    return new(false, current, "The remote target changed after staging. No staged content was promoted.");
+                }
+
+                if (reviewedIdentity is not null)
+                {
+                    await ExecuteRequiredAsync(process, LftpCommandBuilder.BuildMove(remotePath, remoteBackupPath),
+                        "Remote edit backup creation", cancellationToken).ConfigureAwait(false);
+                    backupCreated = true;
+
+                    var backupIdentity = await StatAsync(sessionId, remoteBackupPath, cancellationToken).ConfigureAwait(false);
+                    if (!SameVersionAtDifferentPath(backupIdentity, reviewedIdentity))
+                    {
+                        await RestoreBackupAsync(process, sessionId, remoteBackupPath, remotePath, remoteFailedPath, null, cancellationToken).ConfigureAwait(false);
+                        backupCreated = false;
+                        await TryDeleteRemoteAsync(process, remoteStagingPath, cancellationToken).ConfigureAwait(false);
+                        var restored = await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false);
+                        return new(false, restored, "The live target changed before backup. Its content was preserved and the staged upload was not promoted.");
+                    }
+
+                    if (await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false) is { } appeared)
+                    {
+                        await RestoreBackupAsync(process, sessionId, remoteBackupPath, remotePath, remoteFailedPath, appeared, cancellationToken).ConfigureAwait(false);
+                        backupCreated = false;
+                        await TryDeleteRemoteAsync(process, remoteStagingPath, cancellationToken).ConfigureAwait(false);
+                        return new(false, await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false),
+                            "A new remote target appeared during promotion. No staged content was promoted.");
+                    }
+                }
+                else
+                {
+                    // Missing-target overwrite is allowed only after one final fresh,
+                    // strong absence check. Any newly appearing target is preserved.
+                    var appeared = await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false);
+                    if (appeared is not null)
+                    {
+                        await TryDeleteRemoteAsync(process, remoteStagingPath, cancellationToken).ConfigureAwait(false);
+                        return new(false, appeared, "A remote target appeared after review. No staged content was promoted.");
+                    }
+                }
+
+                await ExecuteRequiredAsync(process, LftpCommandBuilder.BuildMove(remoteStagingPath, remotePath),
+                    "Remote edit staging promotion", cancellationToken).ConfigureAwait(false);
+                stagingPromoted = true;
+                var promoted = await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidDataException("The promoted remote edit could not be verified.");
+                if (!SameVersionAtDifferentPath(promoted, stagedIdentity))
+                    throw new InvalidDataException("The promoted remote edit did not match the verified staging content.");
+
+                if (backupCreated)
+                {
+                    await ExecuteRequiredAsync(process, LftpCommandBuilder.BuildDelete(remoteBackupPath, isDirectory: false, recursive: false),
+                        "Remote edit backup cleanup", cancellationToken).ConfigureAwait(false);
                     backupCreated = false;
-                    await TryDeleteRemoteAsync(process, remoteStagingPath, cancellationToken).ConfigureAwait(false);
-                    var restored = await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false);
-                    return new(false, restored, "The live target changed before backup. Its content was preserved and the staged upload was not promoted.");
                 }
-
-                if (await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false) is { } appeared)
-                {
-                    await RestoreBackupAsync(process, sessionId, remoteBackupPath, remotePath, remoteFailedPath, appeared, cancellationToken).ConfigureAwait(false);
-                    backupCreated = false;
-                    await TryDeleteRemoteAsync(process, remoteStagingPath, cancellationToken).ConfigureAwait(false);
-                    return new(false, await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false),
-                        "A new remote target appeared during promotion. No staged content was promoted.");
-                }
+                return new(true, promoted, "The verified staging upload was promoted and the prior remote version was safely retired.");
             }
-            else
+            catch
             {
-                // Missing-target overwrite is allowed only after one final fresh,
-                // strong absence check. Any newly appearing target is preserved.
-                var appeared = await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false);
-                if (appeared is not null)
+                if (backupCreated)
                 {
-                    await TryDeleteRemoteAsync(process, remoteStagingPath, cancellationToken).ConfigureAwait(false);
-                    return new(false, appeared, "A remote target appeared after review. No staged content was promoted.");
+                    try
+                    {
+                        var promotedIdentity = stagingPromoted
+                            ? await StatAsync(sessionId, remotePath, CancellationToken.None).ConfigureAwait(false)
+                            : null;
+                        await RestoreBackupAsync(process, sessionId, remoteBackupPath, remotePath, remoteFailedPath, promotedIdentity, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (Exception rollbackError)
+                    {
+                        throw new IOException($"Remote edit promotion failed and the prior version could not be restored automatically. The preserved backup is '{remoteBackupPath}'.", rollbackError);
+                    }
                 }
+                await TryDeleteRemoteAsync(process, remoteStagingPath, CancellationToken.None).ConfigureAwait(false);
+                throw;
             }
-
-            await ExecuteRequiredAsync(process, LftpCommandBuilder.BuildMove(remoteStagingPath, remotePath),
-                "Remote edit staging promotion", cancellationToken).ConfigureAwait(false);
-            stagingPromoted = true;
-            var promoted = await StatAsync(sessionId, remotePath, cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidDataException("The promoted remote edit could not be verified.");
-            if (!SameVersionAtDifferentPath(promoted, stagedIdentity))
-                throw new InvalidDataException("The promoted remote edit did not match the verified staging content.");
-
-            if (backupCreated)
-            {
-                await ExecuteRequiredAsync(process, LftpCommandBuilder.BuildDelete(remoteBackupPath, isDirectory: false, recursive: false),
-                    "Remote edit backup cleanup", cancellationToken).ConfigureAwait(false);
-                backupCreated = false;
-            }
-            return new(true, promoted, "The verified staging upload was promoted and the prior remote version was safely retired.");
-        }
-        catch
-        {
-            if (backupCreated)
-            {
-                try
-                {
-                    var promotedIdentity = stagingPromoted
-                        ? await StatAsync(sessionId, remotePath, CancellationToken.None).ConfigureAwait(false)
-                        : null;
-                    await RestoreBackupAsync(process, sessionId, remoteBackupPath, remotePath, remoteFailedPath, promotedIdentity, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (Exception rollbackError)
-                {
-                    throw new IOException($"Remote edit promotion failed and the prior version could not be restored automatically. The preserved backup is '{remoteBackupPath}'.", rollbackError);
-                }
-            }
-            await TryDeleteRemoteAsync(process, remoteStagingPath, CancellationToken.None).ConfigureAwait(false);
-            throw;
-        }
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task DownloadCoreAsync(Guid sessionId, string remotePath, string managedLocalPath, CancellationToken cancellationToken)
     {
         var session = _sessions.Get(sessionId);
-        await using var process = await session.CreateEphemeralAsync("remote-edit-download", cancellationToken).ConfigureAwait(false);
-        var result = await process.ExecuteAsync(
-            LftpCommandBuilder.BuildRemoteEditDownload(remotePath, managedLocalPath),
-            _options.TransferTimeout,
-            cancellationToken).ConfigureAwait(false);
-        SessionRegistry.ThrowIfFailed(result, "Remote edit download");
+        await session.WithEphemeralSessionAsync("remote-edit-download", async process =>
+        {
+            var result = await process.ExecuteAsync(
+                LftpCommandBuilder.BuildRemoteEditDownload(remotePath, managedLocalPath),
+                _options.TransferTimeout,
+                cancellationToken).ConfigureAwait(false);
+            SessionRegistry.ThrowIfFailed(result, "Remote edit download");
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<RemoteMetadata?> StatMetadataAsync(Guid sessionId, string remotePath, CancellationToken cancellationToken)
     {
         remotePath = FreshRemoteStatParser.ValidateRemotePath(remotePath, nameof(remotePath));
         var session = _sessions.Get(sessionId);
-        var result = await session.Browse.ExecuteAsync(
-            LftpCommandBuilder.BuildStat(remotePath, fresh: true),
-            _options.BrowseTimeout,
-            cancellationToken).ConfigureAwait(false);
+        var result = await session.WithBrowseSessionAsync(browse => browse.ExecuteAsync(
+                LftpCommandBuilder.BuildStat(remotePath, fresh: true),
+                _options.BrowseTimeout,
+                cancellationToken))
+            .ConfigureAwait(false);
         var entry = FreshRemoteStatParser.Parse(result, remotePath, "The fresh remote edit identity check");
         if (entry is null) return null;
         if (entry.Kind != EntryKind.File) throw new NotSupportedException("Remote editing supports regular files only; links and special entries are not followed.");

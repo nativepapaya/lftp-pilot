@@ -19,12 +19,26 @@ public static class LftpCommandBuilder
         return $"'{value.Replace("'", "'\"'\"'", StringComparison.Ordinal)}'";
     }
 
-    public static string BuildOpen(ConnectionProfile profile, string? secret = null)
+    public static string BuildOpen(
+        ConnectionProfile profile,
+        string? secret = null,
+        string? trustedKnownHostsPath = null,
+        string? hostKeyAlias = null)
     {
         ProfileValidator.ThrowIfInvalid(profile);
         if (profile.Authentication is AuthenticationKind.Password or AuthenticationKind.AskOnConnect && string.IsNullOrEmpty(secret))
             throw new ArgumentException("This profile requires a password or passphrase.", nameof(secret));
         if (secret is not null) RejectProtocolControls(secret, nameof(secret));
+
+        if (profile.Protocol == ConnectionProtocol.Sftp)
+        {
+            EnsureFullyQualifiedLocalPath(trustedKnownHostsPath ?? string.Empty, nameof(trustedKnownHostsPath));
+            SftpHostKeyIdentity.ValidateAlias(hostKeyAlias, nameof(hostKeyAlias));
+        }
+        else if (trustedKnownHostsPath is not null || hostKeyAlias is not null)
+        {
+            throw new ArgumentException("SSH host-key trust inputs are valid only for SFTP profiles.");
+        }
 
         var commands = new List<string>();
         switch (profile.Protocol)
@@ -44,9 +58,16 @@ public static class LftpCommandBuilder
                 break;
         }
 
-        if (profile.Authentication == AuthenticationKind.SshKey)
+        if (profile.Protocol == ConnectionProtocol.Sftp)
         {
-            var connectProgram = $"ssh -a -x -i {ShellQuote(ToMsysPath(profile.SshKeyPath!))}";
+            var knownHostsOption = ShellQuote(SftpHostKeyIdentity.CreateUserKnownHostsOption(
+                ToMsysPath(trustedKnownHostsPath!)));
+            var aliasOption = ShellQuote($"HostKeyAlias={hostKeyAlias}");
+            var connectProgram = $"ssh -F none -a -x -o StrictHostKeyChecking=yes -o {knownHostsOption} " +
+                $"-o GlobalKnownHostsFile=none -o UpdateHostKeys=no -o VerifyHostKeyDNS=no -o CheckHostIP=no " +
+                $"-o IdentityAgent=none -o {aliasOption}";
+            if (profile.Authentication == AuthenticationKind.SshKey)
+                connectProgram += $" -o IdentitiesOnly=yes -i {ShellQuote(ToMsysPath(profile.SshKeyPath!))}";
             commands.Add($"set sftp:connect-program {Quote(connectProgram)}");
         }
 
@@ -304,7 +325,7 @@ public static class LftpCommandBuilder
             throw new ArgumentException("A queue marker may contain only 1-128 ASCII letters, digits, underscores, or hyphens.", parameterName);
     }
 
-    private static string FormatHost(string host) => host.Contains(':', StringComparison.Ordinal) && !host.StartsWith("[", StringComparison.Ordinal)
+    private static string FormatHost(string host) => host.Contains(':') && !host.StartsWith("[", StringComparison.Ordinal)
         ? $"[{host}]"
         : host;
 

@@ -29,17 +29,27 @@ public sealed record AgentWorkspaceOptions(
 
 public sealed class SessionRegistry : IAsyncDisposable
 {
-    private const string CommonSettings = "set cmd:fail-exit no; set file:charset UTF-8; set cmd:cls-exact-time no; set cache:expire 2m; set net:idle 10m; set xfer:make-backup no; set xfer:use-temp-file yes";
+    private const string CommonSettings = "set cmd:fail-exit no; set file:charset UTF-8; set cmd:cls-exact-time no; set cache:expire 2m; set net:idle 10m; set xfer:make-backup no; set xfer:use-temp-file yes; set sftp:auto-confirm false";
     private readonly ILftpProcessHost _processHost;
     private readonly ILftpRuntimeProvider _runtimeProvider;
+    private readonly SftpHostKeyManager _hostKeys;
     private readonly AgentWorkspaceOptions _options;
     private readonly ConcurrentDictionary<Guid, WorkspaceSession> _sessions = [];
-    private bool _disposed;
+    private readonly object _lifecycleGate = new();
+    private TaskCompletionSource? _connectsDrained;
+    private TaskCompletionSource? _disposeCompletion;
+    private int _connectsInFlight;
+    private volatile bool _closing;
 
-    public SessionRegistry(ILftpProcessHost processHost, ILftpRuntimeProvider runtimeProvider, AgentWorkspaceOptions options)
+    public SessionRegistry(
+        ILftpProcessHost processHost,
+        ILftpRuntimeProvider runtimeProvider,
+        SftpHostKeyManager hostKeys,
+        AgentWorkspaceOptions options)
     {
         _processHost = processHost;
         _runtimeProvider = runtimeProvider;
+        _hostKeys = hostKeys;
         _options = options;
         if (!Path.IsPathFullyQualified(options.RuntimeHomeRoot) || !Path.IsPathFullyQualified(options.CacheRoot) || !Path.IsPathFullyQualified(options.TemporaryRoot))
             throw new ArgumentException("The Agent runtime, cache, and temporary roots must be fully qualified.", nameof(options));
@@ -57,7 +67,7 @@ public sealed class SessionRegistry : IAsyncDisposable
 
     internal WorkspaceSession Get(Guid sessionId)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(_closing, this);
         return _sessions.TryGetValue(sessionId, out var session)
             ? session
             : throw new KeyNotFoundException($"Session {sessionId} was not found.");
@@ -66,21 +76,21 @@ public sealed class SessionRegistry : IAsyncDisposable
     internal WorkspaceSession GetActive(Guid sessionId)
     {
         var session = Get(sessionId);
-        if (!session.Snapshot.IsConnected || !session.Browse.IsRunning)
+        if (!session.IsActive)
             throw new InvalidOperationException($"Session {sessionId} is no longer actively connected.");
         return session;
     }
 
     internal WorkspaceSession GetActiveProfile(Guid profileId) => _sessions.Values
-        .Where(session => session.Profile.Id == profileId && session.Snapshot.IsConnected && session.Browse.IsRunning)
+        .Where(session => session.Profile.Id == profileId && session.IsActive)
         .OrderByDescending(session => session.Snapshot.UpdatedAt)
         .FirstOrDefault()
         ?? throw new InvalidOperationException($"Profile {profileId} must be actively connected before starting a remote-to-remote transfer.");
 
     public async Task<SessionSnapshot> ConnectAsync(ConnectionProfile profile, string? credential, CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
         ProfileValidator.ThrowIfInvalid(profile);
+        using var reservation = AcquireConnectReservation();
         var id = Guid.NewGuid();
         var browse = await StartConnectedProcessAsync(id, profile, credential, "browse", cancellationToken).ConfigureAwait(false);
         var localPath = !string.IsNullOrWhiteSpace(profile.InitialLocalPath) && Directory.Exists(profile.InitialLocalPath)
@@ -89,9 +99,33 @@ public sealed class SessionRegistry : IAsyncDisposable
         var remotePath = string.IsNullOrWhiteSpace(profile.InitialRemotePath) ? "/" : profile.InitialRemotePath;
         var snapshot = new SessionSnapshot(id, profile.Id, profile.Name, true, new(PaneKind.Local, localPath), new(PaneKind.Remote, remotePath), DateTimeOffset.UtcNow);
         var session = new WorkspaceSession(this, profile, credential, browse, snapshot);
-        if (!_sessions.TryAdd(id, session))
+        bool accepted;
+        lock (_lifecycleGate)
         {
-            await session.DisposeAsync().ConfigureAwait(false);
+            accepted = !_closing;
+            if (!_sessions.TryAdd(id, session))
+                accepted = false;
+        }
+        if (!accepted)
+        {
+            Exception? disposalError = null;
+            try
+            {
+                await session.DisposeAsync().ConfigureAwait(false);
+                TryRemoveSession(id, session);
+            }
+            catch (Exception exception)
+            {
+                disposalError = exception;
+            }
+            if (_closing)
+            {
+                var closed = new ObjectDisposedException(nameof(SessionRegistry), "The session registry closed before the connection could be registered.");
+                if (disposalError is not null)
+                    throw new AggregateException(closed.Message, closed, disposalError);
+                throw closed;
+            }
+            if (disposalError is not null) throw disposalError;
             throw new InvalidOperationException("Could not register the connected session.");
         }
         return snapshot;
@@ -99,15 +133,28 @@ public sealed class SessionRegistry : IAsyncDisposable
 
     public async Task<bool> DisconnectAsync(Guid sessionId)
     {
-        if (!_sessions.TryRemove(sessionId, out var session)) return false;
+        if (!_sessions.TryGetValue(sessionId, out var session)) return false;
         await session.DisposeAsync().ConfigureAwait(false);
-        return true;
+        return TryRemoveSession(sessionId, session);
     }
 
     public async Task DisconnectProfileAsync(Guid profileId)
     {
         var ids = _sessions.Where(pair => pair.Value.Profile.Id == profileId).Select(static pair => pair.Key).ToArray();
-        foreach (var id in ids) await DisconnectAsync(id).ConfigureAwait(false);
+        var errors = new List<Exception>();
+        foreach (var id in ids)
+        {
+            try
+            {
+                await DisconnectAsync(id).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException))
+            {
+                errors.Add(exception);
+            }
+        }
+        if (errors.Count == 1) throw errors[0];
+        if (errors.Count > 1) throw new AggregateException("Multiple profile sessions failed to stop cleanly.", errors);
     }
 
     internal Task<ILftpSession> StartAuxiliaryAsync(WorkspaceSession session, string role, CancellationToken cancellationToken) =>
@@ -169,49 +216,136 @@ public sealed class SessionRegistry : IAsyncDisposable
         }
     }
 
-    internal async Task<ILftpSession> StartRemoteTransferAsync(
+    internal async Task<T> WithRemoteTransferAsync<T>(
         WorkspaceSession source,
         WorkspaceSession destination,
         Guid operationId,
+        Func<ILftpSession, Task<T>> operation,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(operation);
         if (source.Profile.Id == destination.Profile.Id) throw new ArgumentException("Remote transfer profiles must be distinct.");
+        if (source.Profile.Protocol == ConnectionProtocol.Sftp || destination.Profile.Protocol == ConnectionProtocol.Sftp)
+            throw new NotSupportedException("One LFTP process cannot safely bind two SFTP endpoints to distinct pinned host-key files.");
+        using var sourceLease = source.AcquireOperationLease();
+        using var destinationLease = destination.AcquireOperationLease();
         var secrets = new[] { source.Credential, destination.Credential }
             .Where(static secret => !string.IsNullOrEmpty(secret)).Cast<string>().Distinct(StringComparer.Ordinal).ToArray();
-        var process = await StartProcessAsync(
+        await using var process = await StartProcessAsync(
             operationId,
             Path.Combine("remote-transfers", operationId.ToString("N")),
             "remote-transfer",
             secrets,
             cancellationToken).ConfigureAwait(false);
-        try
+        var settings = await process.ExecuteAsync(CommonSettings, _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
+        ThrowIfFailed(settings, "Remote transfer session initialization");
+        await InitializeSlotAsync(process, operationId, "source", source.Profile, source.Credential, cancellationToken).ConfigureAwait(false);
+        await InitializeSlotAsync(process, operationId, "destination", destination.Profile, destination.Credential, cancellationToken).ConfigureAwait(false);
+        var selected = await process.ExecuteAsync("slot source", _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
+        ThrowIfFailed(selected, "Remote transfer source selection");
+        return await operation(process).ConfigureAwait(false);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Task drain;
+        TaskCompletionSource completion;
+        lock (_lifecycleGate)
         {
-            var settings = await process.ExecuteAsync(CommonSettings, _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
-            ThrowIfFailed(settings, "Remote transfer session initialization");
-            await InitializeSlotAsync(process, "source", source.Profile, source.Credential, cancellationToken).ConfigureAwait(false);
-            await InitializeSlotAsync(process, "destination", destination.Profile, destination.Credential, cancellationToken).ConfigureAwait(false);
-            var selected = await process.ExecuteAsync("slot source", _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
-            ThrowIfFailed(selected, "Remote transfer source selection");
-            return process;
+            if (_disposeCompletion is not null) return new(_disposeCompletion.Task);
+            _closing = true;
+            completion = _disposeCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (_connectsInFlight == 0)
+            {
+                drain = Task.CompletedTask;
+            }
+            else
+            {
+                _connectsDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                drain = _connectsDrained.Task;
+            }
         }
-        catch
+        _ = CompleteDisposeAsync(drain, completion);
+        return new(completion.Task);
+    }
+
+    private IDisposable AcquireConnectReservation()
+    {
+        lock (_lifecycleGate)
         {
-            await process.DisposeAsync().ConfigureAwait(false);
-            throw;
+            ObjectDisposedException.ThrowIf(_closing, this);
+            _connectsInFlight++;
+            return new ConnectReservation(this);
         }
     }
 
-    public async ValueTask DisposeAsync()
+    private async Task CompleteDisposeAsync(Task drain, TaskCompletionSource completion)
     {
-        if (_disposed) return;
-        _disposed = true;
-        var sessions = _sessions.Values.ToArray();
-        _sessions.Clear();
-        foreach (var session in sessions) await session.DisposeAsync().ConfigureAwait(false);
+        try
+        {
+            await drain.ConfigureAwait(false);
+            var errors = new List<Exception>();
+            foreach (var pair in _sessions.ToArray())
+            {
+                try
+                {
+                    await pair.Value.DisposeAsync().ConfigureAwait(false);
+                    TryRemoveSession(pair.Key, pair.Value);
+                }
+                catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException))
+                {
+                    errors.Add(exception);
+                }
+            }
+            if (errors.Count == 1) throw errors[0];
+            if (errors.Count > 1) throw new AggregateException("Multiple workspace sessions failed to stop cleanly.", errors);
+            completion.TrySetResult();
+        }
+        catch (Exception exception)
+        {
+            lock (_lifecycleGate)
+            {
+                completion.TrySetException(exception);
+                if (ReferenceEquals(_disposeCompletion, completion)) _disposeCompletion = null;
+            }
+        }
+    }
+
+    private void ReleaseConnectReservation()
+    {
+        TaskCompletionSource? drained = null;
+        lock (_lifecycleGate)
+        {
+            if (_connectsInFlight <= 0) throw new InvalidOperationException("The session registry connection reservation count is inconsistent.");
+            _connectsInFlight--;
+            if (_closing && _connectsInFlight == 0) drained = _connectsDrained;
+        }
+        drained?.TrySetResult();
+    }
+
+    private bool TryRemoveSession(Guid sessionId, WorkspaceSession session)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var current) || !ReferenceEquals(current, session)) return false;
+        return _sessions.TryRemove(sessionId, out _);
+    }
+
+    private sealed class ConnectReservation(SessionRegistry owner) : IDisposable
+    {
+        private SessionRegistry? _owner = owner;
+
+        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseConnectReservation();
     }
 
     private async Task<ILftpSession> StartConnectedProcessAsync(Guid sessionId, ConnectionProfile profile, string? credential, string role, CancellationToken cancellationToken)
     {
+        SftpKnownHostsMaterialization? trustedHost = null;
+        if (profile.Protocol == ConnectionProtocol.Sftp)
+        {
+            trustedHost = await _hostKeys.MaterializeAsync(
+                profile,
+                GetTemporaryRoot(sessionId, role),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
         var process = await StartProcessAsync(
             sessionId,
             profile.Id.ToString("N"),
@@ -220,7 +354,11 @@ public sealed class SessionRegistry : IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
         try
         {
-            var open = LftpCommandBuilder.BuildOpen(profile, profile.Authentication == AuthenticationKind.SshKey ? null : credential);
+            var open = LftpCommandBuilder.BuildOpen(
+                profile,
+                profile.Authentication == AuthenticationKind.SshKey ? null : credential,
+                trustedHost?.KnownHostsPath,
+                trustedHost?.HostKeyAlias);
             var initialized = await process.ExecuteAsync($"{CommonSettings}; {open}", _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
             ThrowIfFailed(initialized, "Connection initialization");
             var verified = await process.ExecuteAsync("cls -lad .", _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
@@ -248,7 +386,7 @@ public sealed class SessionRegistry : IAsyncDisposable
         var profileRoot = Path.Combine(_options.RuntimeHomeRoot, storageScope);
         var home = Path.Combine(profileRoot, "home");
         var cache = Path.Combine(_options.CacheRoot, "lftp", storageScope);
-        var temporary = Path.Combine(_options.TemporaryRoot, "sessions", sessionId.ToString("N"), role);
+        var temporary = GetTemporaryRoot(sessionId, role);
         Directory.CreateDirectory(home);
         Directory.CreateDirectory(cache);
         Directory.CreateDirectory(temporary);
@@ -280,6 +418,7 @@ public sealed class SessionRegistry : IAsyncDisposable
 
     private async Task InitializeSlotAsync(
         ILftpSession process,
+        Guid operationId,
         string slot,
         ConnectionProfile profile,
         string? credential,
@@ -287,12 +426,28 @@ public sealed class SessionRegistry : IAsyncDisposable
     {
         var selected = await process.ExecuteAsync($"slot {slot}", _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
         ThrowIfFailed(selected, $"Remote transfer {slot} slot selection");
-        var open = LftpCommandBuilder.BuildOpen(profile, profile.Authentication == AuthenticationKind.SshKey ? null : credential);
+        SftpKnownHostsMaterialization? trustedHost = null;
+        if (profile.Protocol == ConnectionProtocol.Sftp)
+        {
+            trustedHost = await _hostKeys.MaterializeAsync(
+                profile,
+                GetTemporaryRoot(operationId, "remote-transfer"),
+                $"known_hosts-{slot}",
+                cancellationToken).ConfigureAwait(false);
+        }
+        var open = LftpCommandBuilder.BuildOpen(
+            profile,
+            profile.Authentication == AuthenticationKind.SshKey ? null : credential,
+            trustedHost?.KnownHostsPath,
+            trustedHost?.HostKeyAlias);
         var initialized = await process.ExecuteAsync(open, _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
         ThrowIfFailed(initialized, $"Remote transfer {slot} connection initialization");
         var verified = await process.ExecuteAsync("cls -lad .", _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
         ThrowIfFailed(verified, $"Remote transfer {slot} connection verification");
     }
+
+    private string GetTemporaryRoot(Guid sessionId, string role) =>
+        Path.Combine(_options.TemporaryRoot, "sessions", sessionId.ToString("N"), role);
 
     internal static void ThrowIfFailed(LftpCommandResult result, string operation)
     {
@@ -307,31 +462,42 @@ public sealed class SessionRegistry : IAsyncDisposable
 internal sealed class WorkspaceSession : IAsyncDisposable
 {
     private readonly SessionRegistry _registry;
+    private readonly object _lifecycleGate = new();
     private readonly SemaphoreSlim _roleGate = new(1, 1);
     private readonly SemaphoreSlim _transferOperationGate = new(1, 1);
     private readonly SemaphoreSlim _validationOperationGate = new(1, 1);
+    private readonly ILftpSession _browse;
     private ILftpSession? _transfer;
     private ILftpSession? _console;
     private ILftpSession? _validation;
     private NativeTransferQueue? _nativeTransferQueue;
     private SessionSnapshot _snapshot;
-    private bool _disposed;
+    private TaskCompletionSource? _operationsDrained;
+    private TaskCompletionSource? _disposeCompletion;
+    private int _activeOperations;
+    private volatile bool _closing;
 
     public WorkspaceSession(SessionRegistry registry, ConnectionProfile profile, string? credential, ILftpSession browse, SessionSnapshot snapshot)
     {
         _registry = registry;
         Profile = profile;
         Credential = credential;
-        Browse = browse;
+        _browse = browse;
         _snapshot = snapshot;
     }
 
     public ConnectionProfile Profile { get; }
     public string? Credential { get; private set; }
-    public ILftpSession Browse { get; }
     public SessionSnapshot Snapshot => Volatile.Read(ref _snapshot);
+    public bool IsActive => !_closing && Snapshot.IsConnected && _browse.IsRunning;
 
     public void SetLocation(PaneKind kind, string path)
+    {
+        using var lease = AcquireOperationLease();
+        SetLocationCore(kind, path);
+    }
+
+    private void SetLocationCore(PaneKind kind, string path)
     {
         var snapshot = Snapshot;
         var updated = kind == PaneKind.Local
@@ -340,8 +506,38 @@ internal sealed class WorkspaceSession : IAsyncDisposable
         Volatile.Write(ref _snapshot, updated);
     }
 
-    public Task<ILftpSession> GetConsoleAsync(CancellationToken cancellationToken) => GetRoleAsync("console", cancellationToken);
-    public Task<ILftpSession> CreateEphemeralAsync(string role, CancellationToken cancellationToken) => _registry.StartEphemeralAsync(this, role, cancellationToken);
+    public async Task<T> WithBrowseSessionAsync<T>(
+        Func<ILftpSession, Task<T>> operation,
+        PaneLocation? successfulLocation = null)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        using var lease = AcquireOperationLease();
+        var result = await operation(_browse).ConfigureAwait(false);
+        if (successfulLocation is not null) SetLocationCore(successfulLocation.Kind, successfulLocation.Path);
+        return result;
+    }
+
+    public async Task<T> WithConsoleSessionAsync<T>(
+        Func<ILftpSession, Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        using var lease = AcquireOperationLease();
+        var console = await GetRoleAsync("console", cancellationToken).ConfigureAwait(false);
+        return await operation(console).ConfigureAwait(false);
+    }
+
+    public async Task<T> WithEphemeralSessionAsync<T>(
+        string role,
+        Func<ILftpSession, Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(role);
+        ArgumentNullException.ThrowIfNull(operation);
+        using var lease = AcquireOperationLease();
+        await using var process = await _registry.StartEphemeralAsync(this, role, cancellationToken).ConfigureAwait(false);
+        return await operation(process).ConfigureAwait(false);
+    }
 
     public async Task ExecuteQueuedTransferAsync(
         TransferPlan plan,
@@ -349,6 +545,7 @@ internal sealed class WorkspaceSession : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(preSubmit);
+        using var lease = AcquireOperationLease();
         if (plan.SourceKind == TransferSourceKind.Directory)
             throw new InvalidOperationException("Directory transfers require the guarded foreground transfer session.");
         if (plan.RateLimitBytesPerSecond is not null ||
@@ -365,7 +562,7 @@ internal sealed class WorkspaceSession : IAsyncDisposable
     public async Task<T> WithTransferSessionAsync<T>(Func<ILftpSession, Task<T>> operation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operation);
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        using var lease = AcquireOperationLease();
         await _transferOperationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -381,7 +578,7 @@ internal sealed class WorkspaceSession : IAsyncDisposable
     public async Task<T> WithValidationSessionAsync<T>(Func<ILftpSession, Task<T>> operation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operation);
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        using var lease = AcquireOperationLease();
         await _validationOperationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -394,24 +591,102 @@ internal sealed class WorkspaceSession : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
-        Credential = null;
-        await Browse.DisposeAsync().ConfigureAwait(false);
-        if (_transfer is not null) await _transfer.DisposeAsync().ConfigureAwait(false);
-        if (_console is not null) await _console.DisposeAsync().ConfigureAwait(false);
-        if (_validation is not null) await _validation.DisposeAsync().ConfigureAwait(false);
-        if (_nativeTransferQueue is not null) await _nativeTransferQueue.DisposeAsync().ConfigureAwait(false);
-        _roleGate.Dispose();
-        _transferOperationGate.Dispose();
-        _validationOperationGate.Dispose();
+        Task drain;
+        TaskCompletionSource completion;
+        lock (_lifecycleGate)
+        {
+            if (_disposeCompletion is not null) return new(_disposeCompletion.Task);
+            _closing = true;
+            completion = _disposeCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (_activeOperations == 0)
+            {
+                drain = Task.CompletedTask;
+            }
+            else
+            {
+                _operationsDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                drain = _operationsDrained.Task;
+            }
+        }
+        _ = CompleteDisposeAsync(drain, completion);
+        return new(completion.Task);
+    }
+
+    internal IDisposable AcquireOperationLease()
+    {
+        lock (_lifecycleGate)
+        {
+            ObjectDisposedException.ThrowIf(_closing, this);
+            _activeOperations++;
+            return new OperationLease(this);
+        }
+    }
+
+    private async Task CompleteDisposeAsync(Task drain, TaskCompletionSource completion)
+    {
+        try
+        {
+            await drain.ConfigureAwait(false);
+            Credential = null;
+            var disposalErrors = new List<Exception>();
+            await TryDisposeChildAsync(_browse, disposalErrors).ConfigureAwait(false);
+            await TryDisposeChildAsync(_transfer, disposalErrors).ConfigureAwait(false);
+            await TryDisposeChildAsync(_console, disposalErrors).ConfigureAwait(false);
+            await TryDisposeChildAsync(_validation, disposalErrors).ConfigureAwait(false);
+            await TryDisposeChildAsync(_nativeTransferQueue, disposalErrors).ConfigureAwait(false);
+            if (disposalErrors.Count == 1) throw disposalErrors[0];
+            if (disposalErrors.Count > 1) throw new AggregateException("Multiple LFTP session children failed to stop cleanly.", disposalErrors);
+            _roleGate.Dispose();
+            _transferOperationGate.Dispose();
+            _validationOperationGate.Dispose();
+            completion.TrySetResult();
+        }
+        catch (Exception exception)
+        {
+            lock (_lifecycleGate)
+            {
+                completion.TrySetException(exception);
+                if (ReferenceEquals(_disposeCompletion, completion)) _disposeCompletion = null;
+            }
+        }
+    }
+
+    private static async Task TryDisposeChildAsync(IAsyncDisposable? child, List<Exception> errors)
+    {
+        if (child is null) return;
+        try
+        {
+            await child.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException))
+        {
+            errors.Add(exception);
+        }
+    }
+
+    private void ReleaseOperationLease()
+    {
+        TaskCompletionSource? drained = null;
+        lock (_lifecycleGate)
+        {
+            if (_activeOperations <= 0) throw new InvalidOperationException("The workspace session operation lease count is inconsistent.");
+            _activeOperations--;
+            if (_closing && _activeOperations == 0) drained = _operationsDrained;
+        }
+        drained?.TrySetResult();
+    }
+
+    private sealed class OperationLease(WorkspaceSession owner) : IDisposable
+    {
+        private WorkspaceSession? _owner = owner;
+
+        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseOperationLease();
     }
 
     private async Task<NativeTransferQueue> GetTransferQueueAsync(CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
         await _roleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -428,7 +703,6 @@ internal sealed class WorkspaceSession : IAsyncDisposable
 
     private async Task<ILftpSession> GetRoleAsync(string role, CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
         await _roleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {

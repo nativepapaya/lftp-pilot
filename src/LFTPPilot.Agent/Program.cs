@@ -25,14 +25,19 @@ public static class Program
         var paths = PackageDataPaths.CreateDefault();
         paths.EnsureCreated();
         var statePath = Path.Combine(paths.History, "agent-state.json");
+        var runtimeProvider = new PackagedLftpRuntimeProvider();
+        var hostKeyManager = new SftpHostKeyManager(
+            new JsonHostKeyStore(Path.Combine(paths.HostKeys, "trusted-sftp-host-keys.json")),
+            new OpenSshHostKeyProbe(runtimeProvider, Path.Combine(paths.Temporary, "host-key-probes")));
         var rootJob = new WindowsJobObject();
         rootJob.Assign(Process.GetCurrentProcess());
         await using (var host = new AgentHost(
             statePath,
             profileStore: new JsonProfileStore(Path.Combine(paths.Profiles, "profiles.json")),
             secretStore: new DpapiSecretStore(paths.Secrets),
+            hostKeyManager: hostKeyManager,
             processHost: new LftpProcessHost(),
-            runtimeProvider: new PackagedLftpRuntimeProvider(),
+            runtimeProvider: runtimeProvider,
             mirrorPlanner: new MirrorPlanner(),
             workspaceOptions: AgentWorkspaceOptions.CreateDefault(paths.RuntimeHome, paths.LocalCache, paths.Temporary),
             clientAuthorizer: AgentClientAuthorization.Create(paths)))

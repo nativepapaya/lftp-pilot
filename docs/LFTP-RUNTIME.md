@@ -17,9 +17,13 @@ Packaging must include the byte-exact committed `bundle-manifest.json` and
 bundle revision. Both unsigned and signed release gates stream and hash every
 runtime entry from the MSIX, verify its exact path and size, and reject missing
 or additional `lftp/` entries. Runtime execution redirects `HOME`, `TMP`, `TEMP`,
-`known_hosts`, and caches to package data, and smoke-test `lftp.exe`, `ssh.exe`,
-and `sh.exe` from the installed package. A package may not weaken these gates to
-make a build pass.
+`known_hosts`, and caches to package data. The package smoke unpacks the exact
+MSIX payload beneath a temporary simulated read-only package root and executes
+its `lftp.exe`, `ssh.exe`, and `sh.exe` against writable app-data paths. The
+OpenSSH smoke also resolves and asserts the effective configuration used for
+strict approved-key connections and for credential-free key probes; the latter
+must disable every supported authentication method. A package may not weaken
+these gates to make a build pass.
 
 Binary publication additionally requires exact license texts and
 corresponding-source evidence for every locked package. The deliberately

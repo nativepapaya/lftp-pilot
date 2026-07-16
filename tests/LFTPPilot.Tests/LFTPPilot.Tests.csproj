@@ -21,7 +21,24 @@
   </ItemGroup>
   <ItemGroup>
     <!-- Keep the pure App drag/drop trust policy testable without loading WinUI. -->
+    <Compile Include="..\..\src\LFTPPilot.App\Infrastructure\ObservableObject.cs" Link="App\ObservableObject.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\Infrastructure\RelayCommand.cs" Link="App\RelayCommand.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\Models\UiModels.cs" Link="App\UiModels.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\Services\AgentProcessManager.cs" Link="App\AgentProcessManager.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\Services\IAgentWorkspaceClient.cs" Link="App\IAgentWorkspaceClient.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\Services\LiveAgentWorkspaceClient.cs" Link="App\LiveAgentWorkspaceClient.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\FilePaneDragDropRegistry.cs" Link="App\FilePaneDragDropRegistry.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\TransferQueueAggregation.cs" Link="App\TransferQueueAggregation.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\ActivityCenterViewModel.cs" Link="App\ActivityCenterViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\ConnectionProfilesViewModel.cs" Link="App\ConnectionProfilesViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\ConsoleViewModel.cs" Link="App\ConsoleViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\FileEntryViewModel.cs" Link="App\FileEntryViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\FilePaneViewModel.cs" Link="App\FilePaneViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\MainWindowViewModel.cs" Link="App\MainWindowViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\MirrorViewModel.cs" Link="App\MirrorViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\RemoteEditItemViewModel.cs" Link="App\RemoteEditItemViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\RemoteTransferViewModel.cs" Link="App\RemoteTransferViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\SessionViewModel.cs" Link="App\SessionViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\SettingsViewModel.cs" Link="App\SettingsViewModel.cs" />
   </ItemGroup>
 </Project>
