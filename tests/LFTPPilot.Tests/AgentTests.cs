@@ -207,6 +207,30 @@ public sealed class AgentTests
         await run.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
     }
 
+    [Fact]
+    public async Task StartupClearsRetryAdvertisementWhenExecutablePlanWasNotRestored()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "jobs.json");
+        var store = new DurableJobStore(path);
+        var now = DateTimeOffset.UtcNow;
+        var failed = new JobSnapshot(Guid.NewGuid(), JobKind.Transfer, Guid.NewGuid(), "Retry me", JobState.Failed,
+            now, now, Error: new("network", "Dropped", IsTransient: true), RetryAvailable: true);
+        await store.SaveAsync([failed], TestContext.Current.CancellationToken);
+        await using var host = new AgentHost(path);
+        var run = host.RunAsync(TestContext.Current.CancellationToken);
+        await using var client = new NamedPipeEngineClient(Environment.ProcessId);
+
+        var restored = Assert.Single((await client.RequestAsync("jobs.list", cancellationToken: TestContext.Current.CancellationToken))
+            .Deserialize<JobSnapshot[]>(FramedJsonStream.SerializerOptions)!);
+        Assert.Equal(JobState.Failed, restored.State);
+        Assert.False(restored.RetryAvailable);
+        Assert.False(restored.CanRetry);
+
+        _ = await client.RequestAsync(AgentProtocol.StopMethod, cancellationToken: TestContext.Current.CancellationToken);
+        await run.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var deadline = DateTimeOffset.UtcNow + timeout;

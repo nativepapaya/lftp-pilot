@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Json.Serialization;
 
 namespace LFTPPilot.Core;
 
@@ -189,7 +190,12 @@ public sealed record JobSnapshot(
     DateTimeOffset? RunAt = null,
     double? Progress = null,
     string? Status = null,
-    EngineError? Error = null);
+    EngineError? Error = null,
+    bool RetryAvailable = false)
+{
+    [JsonIgnore]
+    public bool CanRetry => RetryAvailable && State == JobState.Failed;
+}
 
 public sealed record HistoryRecord(
     Guid Id,

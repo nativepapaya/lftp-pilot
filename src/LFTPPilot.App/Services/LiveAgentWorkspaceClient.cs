@@ -143,6 +143,14 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         return result.Cancelled;
     }
 
+    public async Task<JobSnapshot> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default)
+    {
+        if (jobId == Guid.Empty) throw new ArgumentException("A job identifier is required.", nameof(jobId));
+        var result = await RequestAsync<JobRetryResult>(WorkspaceMethods.JobRetry,
+            new JobRetryRequest(jobId), cancellationToken, retryOnDisconnect: false).ConfigureAwait(false);
+        return result.Job;
+    }
+
     public async Task<MirrorUiPreview> PreviewMirrorAsync(MirrorDefinition definition, CancellationToken cancellationToken = default)
     {
         var sessionId = await FindSessionIdAsync(definition.ProfileId, cancellationToken).ConfigureAwait(false);

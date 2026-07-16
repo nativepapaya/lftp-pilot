@@ -23,6 +23,7 @@ public interface IAgentWorkspaceClient : IAsyncDisposable
     Task<FileMutationResult> DeleteEntriesAsync(Guid sessionId, PaneKind pane, IReadOnlyList<string> paths, bool recursive, bool confirmed, CancellationToken cancellationToken = default);
     Task<JobSnapshot> EnqueueTransferAsync(Guid sessionId, TransferPlan plan, CancellationToken cancellationToken = default);
     Task<bool> CancelJobAsync(Guid jobId, CancellationToken cancellationToken = default);
+    Task<JobSnapshot> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<MirrorUiPreview> PreviewMirrorAsync(MirrorDefinition definition, CancellationToken cancellationToken = default);
     Task<JobSnapshot> ApproveMirrorAsync(MirrorUiPreview preview, bool deletionsApproved, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<string>> ExecuteConsoleAsync(Guid sessionId, string command, CancellationToken cancellationToken = default);

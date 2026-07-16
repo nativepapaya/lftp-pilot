@@ -63,6 +63,14 @@ public sealed class SessionRegistry : IAsyncDisposable
             : throw new KeyNotFoundException($"Session {sessionId} was not found.");
     }
 
+    internal WorkspaceSession GetActive(Guid sessionId)
+    {
+        var session = Get(sessionId);
+        if (!session.Snapshot.IsConnected || !session.Browse.IsRunning)
+            throw new InvalidOperationException($"Session {sessionId} is no longer actively connected.");
+        return session;
+    }
+
     internal WorkspaceSession GetActiveProfile(Guid profileId) => _sessions.Values
         .Where(session => session.Profile.Id == profileId && session.Snapshot.IsConnected && session.Browse.IsRunning)
         .OrderByDescending(session => session.Snapshot.UpdatedAt)

@@ -160,6 +160,123 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
+    public async Task FailedTransferRetryIsSingleShotRevalidatedAndCompletes()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(),
+            profile.Id,
+            TransferDirection.Download,
+            "/remote/retry-once.bin",
+            Path.Combine(fixture.Directory.Path, "retry-once.bin"),
+            TransferMode.Resume,
+            4);
+
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        var failed = fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id);
+        Assert.True(failed.CanRetry);
+        Assert.NotNull(failed.Error);
+
+        var attempts = await Task.WhenAll(Enumerable.Range(0, 2).Select(async _ =>
+        {
+            try
+            {
+                return await fixture.Service.RetryJobAsync(new(enqueued.Job.Id), TestContext.Current.CancellationToken);
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }));
+        var accepted = Assert.Single(attempts, static result => result is not null)!.Job;
+        Assert.Equal(enqueued.Job.Id, accepted.Id);
+        Assert.Null(accepted.Error);
+        Assert.Null(accepted.Progress);
+        Assert.Null(accepted.RunAt);
+
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+        var submissions = fixture.ProcessHost.TaggedCommands
+            .Where(item => item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+                item.Command.Contains("retry-once.bin", StringComparison.Ordinal))
+            .Select(static item => item.Command)
+            .ToArray();
+        Assert.Equal(2, submissions.Length);
+        Assert.Equal(2, submissions.Select(static command => command.Split(' ', 2)[1]).Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public async Task RetryPreflightFailureLeavesOriginalFailureUntouched()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var source = Path.Combine(fixture.Directory.Path, "retry-once.bin");
+        await File.WriteAllTextAsync(source, "upload", TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source, "/retry-target.bin", TransferMode.Resume);
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        var original = fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id);
+        File.Delete(source);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => fixture.Service.RetryJobAsync(
+            new(enqueued.Job.Id), TestContext.Current.CancellationToken));
+        Assert.Equal(original, fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id));
+    }
+
+    [Fact]
+    public async Task RetryRequiresTheExactOriginatingSession()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var originalSession = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download, "/remote/retry-once.bin",
+            Path.Combine(fixture.Directory.Path, "exact-session.bin"), TransferMode.Resume);
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(originalSession.SessionId, plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        var originalFailure = fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id);
+
+        Assert.True(await fixture.Service.DisconnectAsync(new(originalSession.SessionId)));
+        var replacement = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        Assert.NotEqual(originalSession.SessionId, replacement.SessionId);
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => fixture.Service.RetryJobAsync(
+            new(enqueued.Job.Id), TestContext.Current.CancellationToken));
+
+        Assert.Equal(originalFailure, fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id));
+        Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("retry-once.bin", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RetryRejectsNonTransferJobsWithoutReusingMirrorApproval()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var now = DateTimeOffset.UtcNow;
+        var mirror = new JobSnapshot(Guid.NewGuid(), JobKind.Mirror, Guid.NewGuid(), "Reviewed mirror", JobState.Failed,
+            now, now, Error: new("mirror-failed", "Changed after review"), RetryAvailable: true);
+        fixture.Jobs.Restore([mirror]);
+
+        var error = await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.RetryJobAsync(
+            new(mirror.Id), TestContext.Current.CancellationToken));
+        Assert.Contains("fresh preview", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(JobState.Failed, fixture.Jobs.GetJobs().Single().State);
+    }
+
+    [Fact]
     public async Task RunOnceTransferPersistsMetadataWaitsForSelectedTimeAndThenRuns()
     {
         var time = new ManualTimeProvider(new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero));
@@ -219,6 +336,42 @@ public sealed class WorkspaceTests
 
         Assert.Equal(JobState.Cancelled, fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State);
         Assert.DoesNotContain(fixture.ProcessHost.Commands, command => command.Contains("never-run.bin", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ScheduledFailureCleanupCompletesBeforeRetryAndCancellationTargetsTheRetry()
+    {
+        var time = new ManualTimeProvider(new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero));
+        await using var fixture = new WorkspaceFixture(timeProvider: time);
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(new(profile.Id), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download,
+            "/remote/scheduled-retry-cancel.bin", Path.Combine(fixture.Directory.Path, "scheduled-retry-cancel.bin"),
+            TransferMode.Resume, RunAt: time.GetUtcNow().AddMinutes(10));
+        var enqueued = await fixture.Service.EnqueueTransferAsync(new(session.SessionId, plan), TestContext.Current.CancellationToken);
+
+        time.Advance(TimeSpan.FromMinutes(10));
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        var retried = await fixture.Service.RetryJobAsync(new(enqueued.Job.Id), TestContext.Current.CancellationToken);
+        Assert.Null(retried.Job.RunAt);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Running,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(fixture.Service.TryCancelOperation(enqueued.Job.Id, "Cancel retried schedule"));
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Cancelled,
+            TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.ProcessHost.StoppedRoles.Contains("transfer-queue"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal("Cancel retried schedule", fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).Status);
+        Assert.Equal(2, fixture.ProcessHost.TaggedCommands.Count(item =>
+            item.Role == "transfer-queue" && item.Command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal) &&
+            item.Command.Contains("scheduled-retry-cancel.bin", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -727,6 +880,9 @@ public sealed class WorkspaceTests
         var connected = (await client.RequestAsync(WorkspaceMethods.SessionConnect, new SessionConnectRequest(profile.Id), TestContext.Current.CancellationToken))
             .Deserialize<SessionSnapshot>(FramedJsonStream.SerializerOptions);
         Assert.True(connected?.IsConnected);
+        var retryError = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.RequestAsync(WorkspaceMethods.JobRetry, new JobRetryRequest(Guid.NewGuid()), TestContext.Current.CancellationToken));
+        Assert.Contains("not found", retryError.Message, StringComparison.OrdinalIgnoreCase);
         stop.Cancel();
         await run.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
     }
@@ -916,6 +1072,7 @@ public sealed class WorkspaceTests
     private sealed class FakeProcessHost : ILftpProcessHost
     {
         private int _nextId = 100;
+        private readonly ConcurrentDictionary<string, int> _queueAttempts = new(StringComparer.Ordinal);
         public ConcurrentBag<LftpProcessStartOptions> Starts { get; } = [];
         public ConcurrentBag<string> Commands { get; } = [];
         public ConcurrentBag<(string Role, string Command)> TaggedCommands { get; } = [];
@@ -930,7 +1087,7 @@ public sealed class WorkspaceTests
                 throw new System.ComponentModel.Win32Exception("simulated process launch failure");
             Starts.Add(options);
             return Task.FromResult<ILftpSession>(new FakeSession(
-                Interlocked.Increment(ref _nextId), options.Tag, Commands, TaggedCommands, StoppedRoles, DisposedRoles));
+                Interlocked.Increment(ref _nextId), options.Tag, Commands, TaggedCommands, StoppedRoles, DisposedRoles, _queueAttempts));
         }
     }
 
@@ -940,7 +1097,8 @@ public sealed class WorkspaceTests
         ConcurrentBag<string> commands,
         ConcurrentBag<(string Role, string Command)> taggedCommands,
         ConcurrentBag<string> stoppedRoles,
-        ConcurrentBag<string> disposedRoles) : ILftpSession
+        ConcurrentBag<string> disposedRoles,
+        ConcurrentDictionary<string, int> queueAttempts) : ILftpSession
     {
         public int ProcessId { get; } = processId;
         public bool IsRunning { get; private set; } = true;
@@ -956,8 +1114,19 @@ public sealed class WorkspaceTests
             if ((role == "transfer-queue" || role.StartsWith("transfer-policy-", StringComparison.Ordinal)) &&
                 command.StartsWith("alias __LFTPPILOT_QUEUE_ALIAS_", StringComparison.Ordinal))
             {
-                if (!command.Contains("blocking.bin", StringComparison.Ordinal))
-                    EmitQueueMarker(command, command.Contains("failing-queue.bin", StringComparison.Ordinal) ? "_FAILED" : "_OK", submission: false);
+                var scheduledRetryAttempt = command.Contains("scheduled-retry-cancel.bin", StringComparison.Ordinal)
+                    ? queueAttempts.AddOrUpdate("scheduled-retry-cancel.bin", 1, static (_, count) => count + 1)
+                    : 0;
+                if (!command.Contains("blocking.bin", StringComparison.Ordinal) && scheduledRetryAttempt != 2)
+                {
+                    var retryOnceFailed = command.Contains("retry-once.bin", StringComparison.Ordinal) &&
+                        queueAttempts.AddOrUpdate("retry-once.bin", 1, static (_, count) => count + 1) == 1;
+                    EmitQueueMarker(command,
+                        command.Contains("failing-queue.bin", StringComparison.Ordinal) || retryOnceFailed || scheduledRetryAttempt == 1
+                            ? "_FAILED"
+                            : "_OK",
+                        submission: false);
+                }
                 var submissionMarker = FindQueueMarker(command, "_SUBMIT_OK", submission: true)
                     ?? throw new InvalidOperationException("The test queue command did not contain a submission marker.");
                 var submissionOutput = ImmutableArray.CreateBuilder<LftpOutputLine>();

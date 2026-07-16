@@ -34,6 +34,7 @@ public interface IJobCoordinator
     IReadOnlyList<JobSnapshot> GetJobs();
     JobSnapshot Enqueue(JobSnapshot job);
     JobSnapshot Transition(Guid jobId, JobState state, string? status = null, EngineError? error = null);
+    JobSnapshot Retry(Guid jobId, string? status = null);
     bool TryCancel(Guid jobId, string? reason = null);
 }
 

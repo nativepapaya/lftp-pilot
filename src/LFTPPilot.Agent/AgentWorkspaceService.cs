@@ -12,6 +12,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private const int MaximumBrowsePageSize = 1_000;
     private const int MaximumBrowsePageEstimatedBytes = 512 * 1024;
     private const int MaximumBrowseSnapshots = 8;
+    private const int MaximumRetryableTransfers = 10_000;
     private static readonly TimeSpan BrowseSnapshotLifetime = TimeSpan.FromMinutes(2);
     private readonly IProfileStore _profileStore;
     private readonly ISecretStore _secretStore;
@@ -26,6 +27,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly ConcurrentDictionary<Guid, StoredMirrorPreview> _previews = [];
     private readonly ConcurrentDictionary<Guid, StoredBrowseSnapshot> _browseSnapshots = [];
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _jobCancellations = [];
+    private readonly Lock _retryGate = new();
+    private readonly Dictionary<Guid, TransferRetryContext> _transferRetries = [];
     private readonly CancellationTokenSource _lifetime = new();
     private readonly object _operationGate = new();
     private readonly HashSet<Task> _operations = [];
@@ -74,6 +77,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             WorkspaceMethods.FileMove => ToJson(await MoveEntryAsync(Required<MoveEntryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
             WorkspaceMethods.FileDelete => ToJson(await DeleteEntriesAsync(Required<DeleteEntriesRequest>(arguments), cancellationToken).ConfigureAwait(false)),
             WorkspaceMethods.TransferEnqueue => ToJson(await EnqueueTransferAsync(Required<TransferEnqueueRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+            WorkspaceMethods.JobRetry => ToJson(await RetryJobAsync(Required<JobRetryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
             WorkspaceMethods.MirrorPreview => ToJson(await PreviewMirrorAsync(Required<MirrorPreviewRequest>(arguments), cancellationToken).ConfigureAwait(false)),
             WorkspaceMethods.MirrorApprove => ToJson(await ApproveMirrorAsync(Required<MirrorApproveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
             WorkspaceMethods.ConsoleExecute => ToJson(await ExecuteConsoleAsync(Required<ConsoleExecuteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
@@ -378,8 +382,10 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             if (_scheduler is null) throw new InvalidOperationException("Run-once transfers require the Agent scheduler.");
             if (runAt <= now) throw new ArgumentException("A run-once transfer requires a future run time.", nameof(request));
+            var scheduledJobId = Guid.NewGuid();
+            var scheduledRetryAvailable = TryRememberTransfer(scheduledJobId, session, request.Plan);
             var scheduled = _jobs.Enqueue(new(
-                Guid.NewGuid(),
+                scheduledJobId,
                 JobKind.Transfer,
                 session.Profile.Id,
                 $"{Path.GetFileName(request.Plan.SourcePath)} -> {Path.GetFileName(request.Plan.DestinationPath)}",
@@ -387,19 +393,30 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 now,
                 now,
                 RunAt: runAt,
-                Status: "Waiting for the selected run-once time."));
-            await _scheduler.ScheduleAsync(
-                scheduled,
-                token => RunScheduledTransferAsync(session, request.Plan, scheduled.Id, token),
-                cancellationToken).ConfigureAwait(false);
+                Status: "Waiting for the selected run-once time.",
+                RetryAvailable: scheduledRetryAvailable));
+            try
+            {
+                await _scheduler.ScheduleAsync(
+                    scheduled,
+                    token => RunScheduledTransferAsync(session, request.Plan, scheduled.Id, token),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                ForgetTransferRetry(scheduled.Id);
+                throw;
+            }
             return new(scheduled);
         }
 
         var shouldSkip = request.Plan.Mode == TransferMode.Skip &&
             await DestinationExistsAsync(session, request.Plan, cancellationToken).ConfigureAwait(false);
-        var job = _jobs.Enqueue(new(Guid.NewGuid(), JobKind.Transfer, session.Profile.Id,
+        var jobId = Guid.NewGuid();
+        var retryAvailable = !shouldSkip && TryRememberTransfer(jobId, session, request.Plan);
+        var job = _jobs.Enqueue(new(jobId, JobKind.Transfer, session.Profile.Id,
             $"{Path.GetFileName(request.Plan.SourcePath)} -> {Path.GetFileName(request.Plan.DestinationPath)}",
-            JobState.Queued, now, now));
+            JobState.Queued, now, now, RetryAvailable: retryAvailable));
         if (shouldSkip)
         {
             _jobs.Transition(job.Id, JobState.Running, "Checking destination");
@@ -408,6 +425,41 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         }
         TrackJob(job.Id, token => RunTransferAsync(session, request.Plan, job.Id, token));
         return new(job);
+    }
+
+    public async Task<JobRetryResult> RetryJobAsync(JobRetryRequest request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request.JobId == Guid.Empty) throw new ArgumentException("A job identifier is required.", nameof(request));
+        var current = _jobs.GetJobs().FirstOrDefault(job => job.Id == request.JobId)
+            ?? throw new KeyNotFoundException($"Job {request.JobId} was not found.");
+        if (current.Kind != JobKind.Transfer)
+            throw new NotSupportedException("Only failed file transfers can currently be retried. Mirrors require a fresh preview, and remote-to-remote transfers require a new route review.");
+        if (current.State != JobState.Failed) throw new InvalidOperationException("Only a failed transfer can be retried.");
+        if (!current.RetryAvailable || !TryGetTransferRetry(request.JobId, out var retryContext))
+            throw new InvalidOperationException("The Agent no longer has the validated transfer details needed to retry this job. Queue a new transfer instead.");
+
+        await WaitForPriorAttemptCleanupAsync(request.JobId, cancellationToken).ConfigureAwait(false);
+        var retryPlan = retryContext.Plan with { Id = Guid.NewGuid(), RunAt = null };
+        PlanValidator.Validate(retryPlan);
+        ValidateTransferPaths(retryPlan);
+        var session = _sessions.GetActive(retryContext.SessionId);
+        if (session.Profile.Id != retryPlan.ProfileId)
+            throw new InvalidOperationException("The originating transfer session no longer matches the reviewed profile. Queue a new transfer instead.");
+        var shouldSkip = retryPlan.Mode == TransferMode.Skip &&
+            await DestinationExistsAsync(session, retryPlan, cancellationToken).ConfigureAwait(false);
+
+        var retried = _jobs.Retry(request.JobId, "Retry queued after fresh path and session validation.");
+        if (shouldSkip)
+        {
+            _jobs.Transition(request.JobId, JobState.Running, "Checking destination before retry.");
+            retried = _jobs.Transition(request.JobId, JobState.Completed, "Retry skipped because the destination now exists.");
+            ForgetTransferRetry(request.JobId);
+            return new(retried);
+        }
+
+        TrackJob(request.JobId, token => RunTransferAsync(session, retryPlan, request.JobId, token));
+        return new(retried);
     }
 
     public async Task<MirrorPreview> PreviewMirrorAsync(MirrorPreviewRequest request, CancellationToken cancellationToken = default)
@@ -540,10 +592,15 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
     public bool TryCancelOperation(Guid jobId, string? reason = null)
     {
-        if (_scheduler?.TryCancel(jobId, reason) == true) return true;
-        if (!_jobCancellations.TryGetValue(jobId, out var cancellation)) return false;
-        if (!_jobs.TryCancel(jobId, reason)) return false;
-        cancellation.Cancel();
+        if (_jobCancellations.TryGetValue(jobId, out var cancellation))
+        {
+            if (!_jobs.TryCancel(jobId, reason)) return false;
+            ForgetTransferRetry(jobId);
+            cancellation.Cancel();
+            return true;
+        }
+        if (_scheduler?.TryCancel(jobId, reason) != true) return false;
+        ForgetTransferRetry(jobId);
         return true;
     }
 
@@ -591,6 +648,11 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         catch (Exception exception) when (exception is ArgumentException or IOException or InvalidDataException or InvalidOperationException or TimeoutException or UnauthorizedAccessException)
         {
             TryFailJob(jobId, exception);
+        }
+        finally
+        {
+            if (_jobs.GetJobs().FirstOrDefault(job => job.Id == jobId)?.State != JobState.Failed)
+                ForgetTransferRetry(jobId);
         }
     }
 
@@ -720,6 +782,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             _ = completed.Exception;
             lock (_operationGate) _operations.Remove(completed);
+            if (_jobs.GetJobs().FirstOrDefault(job => job.Id == jobId)?.State != JobState.Failed)
+                ForgetTransferRetry(jobId);
             if (_jobCancellations.TryRemove(jobId, out var source)) source.Dispose();
         }, CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
@@ -757,6 +821,36 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         try { _jobs.Transition(jobId, JobState.Failed, "Failed", new("lftp-job-failed", exception.Message)); }
         catch (InvalidOperationException) { }
     }
+
+    private bool TryRememberTransfer(Guid jobId, WorkspaceSession session, TransferPlan plan)
+    {
+        lock (_retryGate)
+        {
+            if (_transferRetries.Count >= MaximumRetryableTransfers) return false;
+            return _transferRetries.TryAdd(jobId, new(session.Snapshot.SessionId, plan with { RunAt = null }));
+        }
+    }
+
+    private bool TryGetTransferRetry(Guid jobId, out TransferRetryContext context)
+    {
+        lock (_retryGate) return _transferRetries.TryGetValue(jobId, out context!);
+    }
+
+    private void ForgetTransferRetry(Guid jobId)
+    {
+        lock (_retryGate) _transferRetries.Remove(jobId);
+    }
+
+    private async Task WaitForPriorAttemptCleanupAsync(Guid jobId, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 200 && HasPriorAttempt(jobId); attempt++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken).ConfigureAwait(false);
+        if (HasPriorAttempt(jobId))
+            throw new InvalidOperationException("The failed transfer is still finishing cleanup. Try the retry again in a moment.");
+    }
+
+    private bool HasPriorAttempt(Guid jobId) =>
+        _jobCancellations.ContainsKey(jobId) || _scheduler?.IsRegistered(jobId) == true;
 
     private async Task<ConnectionProfile> FindProfileAsync(Guid id, CancellationToken cancellationToken) =>
         (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault(profile => profile.Id == id)
@@ -982,6 +1076,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private static JsonElement ToJson<T>(T value) => JsonSerializer.SerializeToElement(value, FramedJsonStream.SerializerOptions);
 
     private sealed record StoredMirrorPreview(Guid SessionId, MirrorDefinition Definition, MirrorPreview Preview);
+    private sealed record TransferRetryContext(Guid SessionId, TransferPlan Plan);
     private sealed record StoredBrowseSnapshot(
         Guid Id,
         PaneLocation Location,
