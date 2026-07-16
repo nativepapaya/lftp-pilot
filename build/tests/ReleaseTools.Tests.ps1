@@ -10,6 +10,22 @@ function Assert-Equal($Expected, $Actual, [string]$Message) {
 function Assert-Throws([scriptblock]$Action, [string]$Message) {
     try { & $Action; throw "$Message did not throw." } catch { if ($_.Exception.Message -like "$Message did not throw.*") { throw } }
 }
+function Assert-ThrowsLike([scriptblock]$Action, [string]$Pattern, [string]$Message) {
+    try { & $Action; throw "$Message did not throw." }
+    catch {
+        if ($_.Exception.Message -like "$Message did not throw.*") { throw }
+        if ($_.Exception.Message -notlike $Pattern) {
+            throw "$Message produced unexpected error '$($_.Exception.Message)'."
+        }
+    }
+}
+function Get-ThrownMessage([scriptblock]$Action, [string]$Message) {
+    try { & $Action; throw "$Message did not throw." }
+    catch {
+        if ($_.Exception.Message -like "$Message did not throw.*") { throw }
+        return $_.Exception.Message
+    }
+}
 
 Assert-Equal '1.0.0.42' (New-MsixVersion -ProductVersion '1.0' -Sequence 42 -PreviousVersion '1.0.0.41') 'Version mapping failed.'
 Assert-Equal '1.0.1.0' (New-MsixVersion -ProductVersion '1.0' -Sequence 65536 -PreviousVersion '1.0.0.65535') 'Base-65536 rollover failed.'
@@ -26,14 +42,70 @@ foreach ($required in @(
     "--source-digest $('a' * 40)",
     "--signer-digest $('a' * 40)",
     '--deny-self-hosted-runners',
-    '--no-public-good',
     '--cert-oidc-issuer https://token.actions.githubusercontent.com',
     '--predicate-type https://slsa.dev/provenance/v1',
     '--format json'
 )) {
     if (-not $provenanceCommand.Contains($required)) { throw "Build provenance policy omitted '$required'." }
 }
+if ($provenanceCommand.Contains('--no-public-good')) {
+    throw 'Public-repository provenance cannot reject the Sigstore Public Good Instance used by GitHub Actions.'
+}
 Assert-Throws { Get-BuildProvenanceVerificationArguments 'fixture.msix' ('a' * 40) 'other/repository' } 'Repository scope override'
+
+$fakeGhRoot = Join-Path ([IO.Path]::GetTempPath()) "lftp-pilot-fake-gh-$([Guid]::NewGuid().ToString('N'))"
+try {
+    [IO.Directory]::CreateDirectory($fakeGhRoot) | Out-Null
+    $fakeGh = Join-Path $fakeGhRoot 'gh.cmd'
+    function Set-FakeGitHubResult([string]$StandardOutput, [string[]]$StandardError, [int]$ExitCode) {
+        $commands = [Collections.Generic.List[string]]::new()
+        $commands.Add('@echo off')
+        foreach ($line in @($StandardError)) { $commands.Add(">&2 echo $line") }
+        if ($null -ne $StandardOutput) { $commands.Add("echo $StandardOutput") }
+        $commands.Add("exit /b $ExitCode")
+        [IO.File]::WriteAllText($fakeGh, (($commands -join "`r`n") + "`r`n"), [Text.Encoding]::ASCII)
+    }
+    $validPublicTlog = '[{"verificationResult":{"signature":{"certificate":{"sourceRepositoryVisibilityAtSigning":"public"}},"verifiedTimestamps":[{"type":"Tlog"}]}}]'
+    Set-FakeGitHubResult $validPublicTlog @('benign verifier diagnostic') 0
+    $fakeResult = Invoke-GitHubBuildProvenanceVerification -ExecutablePath $fakeGh -Arguments @('attestation','verify','fixture.msix')
+    if (@($fakeResult.Results).Count -ne 1 -or
+        $fakeResult.Results[0].verificationResult.signature.certificate.sourceRepositoryVisibilityAtSigning -cne 'public') {
+        throw 'Successful GitHub verification did not preserve the verified JSON result.'
+    }
+    if ($ErrorActionPreference -cne 'Stop') { throw 'GitHub verification did not restore ErrorActionPreference.' }
+
+    Set-FakeGitHubResult $validPublicTlog @('verifier rejected fixture') 23
+    Assert-ThrowsLike {
+        Invoke-GitHubBuildProvenanceVerification -ExecutablePath $fakeGh -Arguments @('attestation','verify')
+    } '*exit code 23*verifier rejected fixture*' 'Nonzero GitHub verifier'
+    if ($ErrorActionPreference -cne 'Stop') { throw 'GitHub verification did not restore ErrorActionPreference after failure.' }
+    Set-FakeGitHubResult $null @(('x' * 5000), (('y' * 5000) + 'TAIL-MARKER')) 24
+    $boundedFailure = Get-ThrownMessage {
+        Invoke-GitHubBuildProvenanceVerification -ExecutablePath $fakeGh -Arguments @('attestation','verify')
+    } 'Long GitHub verifier diagnostic'
+    if ($boundedFailure.Length -gt 8300 -or $boundedFailure.Contains('TAIL-MARKER')) {
+        throw 'GitHub verifier stderr was not bounded before entering the release error record.'
+    }
+    Set-FakeGitHubResult 'not-json' @() 0
+    Assert-ThrowsLike {
+        Invoke-GitHubBuildProvenanceVerification -ExecutablePath $fakeGh -Arguments @('attestation','verify')
+    } '*invalid JSON*' 'Invalid GitHub verifier JSON'
+    Set-FakeGitHubResult '[]' @() 0
+    Assert-ThrowsLike {
+        Invoke-GitHubBuildProvenanceVerification -ExecutablePath $fakeGh -Arguments @('attestation','verify')
+    } '*no matching build provenance*' 'Empty GitHub verifier result'
+    Set-FakeGitHubResult '[{"verificationResult":{"signature":{"certificate":{"sourceRepositoryVisibilityAtSigning":"private"}},"verifiedTimestamps":[{"type":"Tlog"}]}}]' @() 0
+    Assert-ThrowsLike {
+        Invoke-GitHubBuildProvenanceVerification -ExecutablePath $fakeGh -Arguments @('attestation','verify')
+    } '*transparency-log timestamp and public source identity*' 'Private source attestation'
+    Set-FakeGitHubResult '[{"verificationResult":{"signature":{"certificate":{"sourceRepositoryVisibilityAtSigning":"public"}},"verifiedTimestamps":[{"type":"TimestampAuthority"}]}}]' @() 0
+    Assert-ThrowsLike {
+        Invoke-GitHubBuildProvenanceVerification -ExecutablePath $fakeGh -Arguments @('attestation','verify')
+    } '*transparency-log timestamp and public source identity*' 'Attestation without transparency log'
+}
+finally {
+    if (Test-Path -LiteralPath $fakeGhRoot) { Remove-Item -LiteralPath $fakeGhRoot -Recurse -Force }
+}
 
 $temporary = Join-Path ([IO.Path]::GetTempPath()) "lftp-pilot-appinstaller-$([Guid]::NewGuid().ToString('N')).appinstaller"
 try {
@@ -108,7 +180,8 @@ try {
     $previousBypass = $env:LFTP_PILOT_SYNTHETIC_PROVENANCE_TEST
     $env:LFTP_PILOT_SYNTHETIC_PROVENANCE_TEST = 'unit-fixture-only-v1'
     $record = & (Join-Path $buildRoot 'Test-BuildProvenance.ps1') -ArtifactPath $fixture -AllowSyntheticFixture
-    if ($record.verificationMode -cne 'synthetic-fixture-only' -or $record.unsignedArtifact.sha256 -notmatch '^[a-f0-9]{64}$') {
+    if ($record.verificationMode -cne 'synthetic-fixture-only' -or $record.unsignedArtifact.sha256 -notmatch '^[a-f0-9]{64}$' -or
+        $record.publicGoodAttestationRequired -ne $false -or $record.transparencyLogRequired -ne $false) {
         throw 'Synthetic diagnostic provenance did not produce bounded fixture evidence.'
     }
     $badFixture = Join-Path $fixtureRoot 'LFTPPilot.msix'; [IO.File]::WriteAllBytes($badFixture, [byte[]](1))
@@ -124,6 +197,17 @@ if ($workflow -notmatch '(?m)^\s+id-token:\s+write\s*$' -or $workflow -notmatch 
     $workflow -notmatch 'actions/attest@a1948c3f048ba23858d222213b7c278aabede763' -or
     $workflow -notmatch 'subject-path:\s+\$\{\{ runner\.temp \}\}\\unsigned\\LFTPPilot\.msix') {
     throw 'Unsigned-package workflow does not attest the exact staged MSIX with the pinned action and minimum provenance permissions.'
+}
+$provenanceScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Test-BuildProvenance.ps1') -Raw
+$releaseToolsScript = Get-Content -LiteralPath (Join-Path $buildRoot 'ReleaseTools.psm1') -Raw
+foreach ($requiredPolicy in @('sourceRepositoryVisibilityAtSigning', "Where-Object type -CEQ 'Tlog'", 'publicGoodAttestationRequired', 'transparencyLogRequired')) {
+    if (-not ($provenanceScript + $releaseToolsScript).Contains($requiredPolicy)) {
+        throw "Build-provenance verification omits public-repository policy '$requiredPolicy'."
+    }
+}
+if ($releaseToolsScript.Contains('2>&1') -or -not $releaseToolsScript.Contains('2> $standardErrorPath') -or
+    -not $provenanceScript.Contains('Invoke-GitHubBuildProvenanceVerification')) {
+    throw 'Build-provenance verification must keep native stderr separate from JSON stdout on Windows PowerShell.'
 }
 $signScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Sign-Release.ps1') -Raw
 $publishScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Publish-Release.ps1') -Raw
