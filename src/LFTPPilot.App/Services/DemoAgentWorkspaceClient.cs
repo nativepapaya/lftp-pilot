@@ -7,6 +7,7 @@ namespace LFTPPilot.App.Services;
 public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
 {
     private readonly IAppUpdateService _updates;
+    private readonly Dictionary<Guid, JobSnapshot> _jobs = [];
     private readonly ConnectionProfile _demoProfile = new(
         Guid.Parse("a4a9a7b7-f92c-455e-a4a0-6e0de2035c66"),
         "Demo server",
@@ -45,7 +46,11 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
         [
             new(Guid.NewGuid(), JobKind.Transfer, _demoProfile.Id, "release-notes.pdf", JobState.Running, now.AddMinutes(-2), now, Progress: 0.64, Status: "Downloading · 8.1 MB/s"),
             new(Guid.NewGuid(), JobKind.Mirror, _demoProfile.Id, "Nightly upload", JobState.Queued, now.AddMinutes(-1), now, Status: "Waiting for transfer slot"),
+            new(Guid.NewGuid(), JobKind.Transfer, _demoProfile.Id, "retry-sample.zip", JobState.Failed, now.AddMinutes(-4), now.AddMinutes(-3),
+                Status: "Connection dropped", Error: new("demo-network", "The demo connection was interrupted.", IsTransient: true), RetryAvailable: true),
         ];
+        _jobs.Clear();
+        foreach (var job in jobs) _jobs[job.Id] = job;
         IReadOnlyList<HistoryRecord> history =
         [
             new(Guid.NewGuid(), Guid.NewGuid(), JobKind.Transfer, "hero-banner.png", JobState.Completed, now.AddMinutes(-18), now.AddMinutes(-17), 2_850_112, "Uploaded"),
@@ -122,6 +127,24 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
     {
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(jobId != Guid.Empty);
+    }
+
+    public Task<JobSnapshot> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_jobs.TryGetValue(jobId, out var job) || !job.CanRetry)
+            throw new InvalidOperationException("Only a failed demo transfer with retained retry details can be retried.");
+        var retried = job with
+        {
+            State = JobState.Queued,
+            RunAt = null,
+            Progress = null,
+            Status = "Demo retry queued.",
+            Error = null,
+            UpdatedAt = DateTimeOffset.Now,
+        };
+        _jobs[jobId] = retried;
+        return Task.FromResult(retried);
     }
 
     public Task<MirrorUiPreview> PreviewMirrorAsync(MirrorDefinition definition, CancellationToken cancellationToken = default)

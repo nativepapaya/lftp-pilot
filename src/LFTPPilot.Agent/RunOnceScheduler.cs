@@ -75,6 +75,11 @@ public sealed class RunOnceScheduler : IAsyncDisposable
         }
     }
 
+    public bool IsRegistered(Guid jobId)
+    {
+        lock (_gate) return _scheduled.ContainsKey(jobId);
+    }
+
     public async Task MarkPendingMissedAsync(string reason, CancellationToken cancellationToken = default)
     {
         lock (_gate)

@@ -15,12 +15,14 @@ public sealed class ActivityCenterViewModel : ObservableObject
     {
         _agent = agent;
         CancelJobCommand = new AsyncRelayCommand(CancelJobAsync, CanCancelJob, ReportError);
+        RetryJobCommand = new AsyncRelayCommand(RetryJobAsync, CanRetryJob, ReportError);
     }
 
     public ObservableCollection<JobSnapshot> Jobs { get; } = [];
     public ObservableCollection<HistoryRecord> History { get; } = [];
     public ObservableCollection<ActivityLogEntry> Log { get; } = [];
     public AsyncRelayCommand CancelJobCommand { get; }
+    public AsyncRelayCommand RetryJobCommand { get; }
 
     public bool IsExpanded
     {
@@ -37,6 +39,7 @@ public sealed class ActivityCenterViewModel : ObservableObject
         Replace(Log, bootstrap.Log);
         OnPropertyChanged(nameof(ActiveCount));
         CancelJobCommand.NotifyCanExecuteChanged();
+        RetryJobCommand.NotifyCanExecuteChanged();
     }
 
     public void Add(JobSnapshot job)
@@ -46,16 +49,25 @@ public sealed class ActivityCenterViewModel : ObservableObject
         else Jobs[Jobs.IndexOf(existing)] = job;
         OnPropertyChanged(nameof(ActiveCount));
         CancelJobCommand.NotifyCanExecuteChanged();
+        RetryJobCommand.NotifyCanExecuteChanged();
     }
 
     private static bool CanCancelJob(object? parameter) =>
         parameter is JobSnapshot { State: JobState.Queued or JobState.Running or JobState.Paused or JobState.Scheduled };
+
+    private static bool CanRetryJob(object? parameter) => parameter is JobSnapshot { CanRetry: true };
 
     private async Task CancelJobAsync(object? parameter)
     {
         if (parameter is not JobSnapshot job || !CanCancelJob(job)) return;
         if (!await _agent.CancelJobAsync(job.Id).ConfigureAwait(true))
             Log.Insert(0, new(DateTimeOffset.Now, "Warning", "Agent", $"Job '{job.DisplayName}' could not be cancelled because its state already changed."));
+    }
+
+    private async Task RetryJobAsync(object? parameter)
+    {
+        if (parameter is not JobSnapshot job || !CanRetryJob(job)) return;
+        Add(await _agent.RetryJobAsync(job.Id).ConfigureAwait(true));
     }
 
     private void ReportError(Exception exception) =>

@@ -31,10 +31,14 @@
                                     <StackPanel>
                                         <TextBlock Text="{Binding DisplayName}" Style="{ThemeResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
                                         <TextBlock Text="{Binding Status}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.7" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding Error.Message}" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" TextTrimming="CharacterEllipsis" />
                                     </StackPanel>
                                     <TextBlock Grid.Column="1" Text="{Binding State}" VerticalAlignment="Center" />
                                     <ProgressBar Grid.Column="2" Value="{Binding Progress}" Maximum="1" Height="4" VerticalAlignment="Center" AutomationProperties.Name="Transfer progress" />
-                                    <Button Grid.Column="3" Margin="6,0,0,0" Padding="8,4" Content="Cancel" Click="CancelJob_Click" IsEnabled="{Binding State, Converter={StaticResource JobStateToCancellableConverter}}" ToolTipService.ToolTip="Cancel this queued, active, paused, or scheduled job" AutomationProperties.Name="Cancel job" />
+                                    <StackPanel Grid.Column="3" Margin="6,0,0,0" Orientation="Horizontal" Spacing="6">
+                                        <Button Padding="8,4" Content="Retry" Click="RetryJob_Click" IsEnabled="{Binding CanRetry}" Visibility="{Binding CanRetry, Converter={StaticResource BoolToVisibilityConverter}}" ToolTipService.ToolTip="Retry this failed transfer after the Agent revalidates its paths and active session" AutomationProperties.Name="Retry failed transfer" />
+                                        <Button Padding="8,4" Content="Cancel" Click="CancelJob_Click" IsEnabled="{Binding State, Converter={StaticResource JobStateToCancellableConverter}}" ToolTipService.ToolTip="Cancel this queued, active, paused, or scheduled job" AutomationProperties.Name="Cancel job" />
+                                    </StackPanel>
                                 </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>

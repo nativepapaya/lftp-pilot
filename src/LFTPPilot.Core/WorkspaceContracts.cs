@@ -16,6 +16,7 @@ public static class WorkspaceMethods
     public const string FileMove = "files.move";
     public const string FileDelete = "files.delete";
     public const string TransferEnqueue = "transfers.enqueue";
+    public const string JobRetry = "jobs.retry";
     public const string MirrorPreview = "mirrors.preview";
     public const string MirrorApprove = "mirrors.approve";
     public const string ConsoleExecute = "console.execute";
@@ -71,6 +72,8 @@ public sealed record DeleteEntriesRequest(
 public sealed record FileMutationResult(PaneKind Kind, ImmutableArray<string> AffectedPaths);
 public sealed record TransferEnqueueRequest(Guid SessionId, TransferPlan Plan);
 public sealed record TransferEnqueueResult(JobSnapshot Job);
+public sealed record JobRetryRequest(Guid JobId);
+public sealed record JobRetryResult(JobSnapshot Job);
 public sealed record MirrorPreviewRequest(Guid SessionId, MirrorDefinition Definition);
 public sealed record MirrorApproveRequest(
     Guid SessionId,

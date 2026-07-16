@@ -17,6 +17,11 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   trees, isolated read-only console sessions, and exact packaged-runtime trust.
 - Native LFTP transfer queues, segmented downloads, rate controls, safe mirror
   previews/execution, cancellation, and run-once transfer scheduling.
+- Explicit Activity Center retry for failed file transfers, with atomic
+  failure-state reset, fresh path/session and skip-policy validation, bounded
+  Agent-owned retry details, and duplicate-submission protection. Mirror and
+  remote-to-remote jobs continue to require fresh review instead of reusing an
+  earlier approval.
 - Managed remote editing with Agent-owned cache paths, durable Active Edits
   state across App reconnects, debounced save monitoring, strong local and
   remote content identities, and explicit conflict review. Managed files open

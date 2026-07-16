@@ -24,7 +24,12 @@ still needs real servers, signed packages, or additional product development.
   redaction, and no credential-bearing process arguments.
 - LFTP-backed uploads/downloads, resume and skip policies, segmented `pget`,
   rate controls, per-profile native LFTP queues, cancellation-safe queue
-  retirement, mirror/reverse-mirror previews, and multi-session concurrency.
+  retirement, explicit failed-transfer retry, mirror/reverse-mirror previews,
+  and multi-session concurrency. Retry is an Agent-owned, bounded operation:
+  it revalidates the exact originating session and source/destination policy,
+  waits for prior scheduled/active attempt cleanup, prevents duplicate
+  submission, and clears stale retry capability after an Agent restart rather
+  than persisting executable paths as job history.
 - Fresh mirror dry runs, bounded structured action parsing, explicit deletion
   approval, definition binding, expiry, and an immediate second dry run before
   a deletion-capable execution. Dry-run script text is never executed.
@@ -55,9 +60,8 @@ still needs real servers, signed packages, or additional product development.
 
 ## Still required before 1.0 acceptance
 
-- Finish explicit failed-job retry controls, then exercise authentication,
-  Unicode, mutation, resume/retry/cancel, TLS, FXP, and relay behavior against
-  controlled SFTP and FTP-family servers.
+- Exercise authentication, Unicode, mutation, resume/retry/cancel, TLS, FXP,
+  and relay behavior against controlled SFTP and FTP-family servers.
 - Add explicit SFTP host-key enrollment/change review and encrypted private-key
   passphrase support.
 - Persist and restore session tabs after an Agent restart, not only while the

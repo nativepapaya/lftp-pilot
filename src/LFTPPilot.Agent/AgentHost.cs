@@ -293,6 +293,7 @@ public sealed partial class AgentHost : IAsyncDisposable
     {
         if (string.IsNullOrWhiteSpace(job.DisplayName) || job.DisplayName.Length > 256) throw new ArgumentException("The job display name must contain between 1 and 256 characters.");
         if (!Enum.IsDefined(job.Kind) || !Enum.IsDefined(job.State)) throw new ArgumentException("The job kind or state is unsupported.");
+        if (job.RetryAvailable) throw new ArgumentException("Direct jobs cannot advertise an Agent-owned retry operation.");
         if (job.State == JobState.Scheduled && (job.RunAt is null || job.RunAt <= _scheduler.UtcNow))
             throw new ArgumentException("A scheduled job requires a future run time.");
         if (job.State == JobState.Queued && job.RunAt is not null)
@@ -302,15 +303,19 @@ public sealed partial class AgentHost : IAsyncDisposable
     private static IReadOnlyList<JobSnapshot> NormalizeInterruptedJobs(IEnumerable<JobSnapshot> jobs)
     {
         var now = DateTimeOffset.UtcNow;
-        return jobs.Select(job => job.State is JobState.Queued or JobState.Running or JobState.Paused
-            ? job with
+        return jobs.Select(job =>
+        {
+            var normalized = job with { RetryAvailable = false };
+            return normalized.State is JobState.Queued or JobState.Running or JobState.Paused
+            ? normalized with
             {
                 State = JobState.Failed,
                 Status = "Interrupted because the previous Agent process stopped.",
                 Error = new("agent-interrupted", "The operation did not complete before the Agent stopped.", IsTransient: true),
                 UpdatedAt = now,
             }
-            : job).ToArray();
+            : normalized;
+        }).ToArray();
     }
 
     private sealed record DispatchResult(ProtocolEnvelope Response, bool StopAfterReply);

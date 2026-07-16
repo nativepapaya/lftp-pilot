@@ -10,7 +10,7 @@ public sealed class JobCoordinator : IJobCoordinator
             [JobState.Running] = [JobState.Paused, JobState.Completed, JobState.Failed, JobState.Cancelled],
             [JobState.Paused] = [JobState.Queued, JobState.Cancelled],
             [JobState.Completed] = [],
-            [JobState.Failed] = [JobState.Queued],
+            [JobState.Failed] = [],
             [JobState.Cancelled] = [JobState.Queued],
             [JobState.Missed] = [],
         };
@@ -66,6 +66,29 @@ public sealed class JobCoordinator : IJobCoordinator
         }
         Transition(jobId, JobState.Cancelled, reason ?? "Cancelled");
         return true;
+    }
+
+    public JobSnapshot Retry(Guid jobId, string? status = null)
+    {
+        JobSnapshot updated;
+        lock (_gate)
+        {
+            if (!_jobs.TryGetValue(jobId, out var current)) throw new KeyNotFoundException($"Job {jobId} was not found.");
+            if (current.State != JobState.Failed) throw new InvalidOperationException("Only a failed job can be retried.");
+            if (!current.RetryAvailable) throw new InvalidOperationException("This failed job no longer has a retryable Agent operation.");
+            updated = current with
+            {
+                State = JobState.Queued,
+                RunAt = null,
+                Progress = null,
+                Status = status ?? "Retry queued.",
+                Error = null,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            };
+            _jobs[jobId] = updated;
+        }
+        JobChanged?.Invoke(this, updated);
+        return updated;
     }
 
     public void Restore(IEnumerable<JobSnapshot> jobs)
