@@ -10,6 +10,19 @@ function Get-Sha512Bytes([byte[]]$Bytes) { $h=[Security.Cryptography.SHA512]::Cr
 function Write-Utf8([string]$Path,[string]$Text) { [IO.Directory]::CreateDirectory((Split-Path $Path -Parent))|Out-Null;[IO.File]::WriteAllText($Path,$Text,[Text.UTF8Encoding]::new($false)) }
 function Write-Bytes([string]$Path,[byte[]]$Bytes) { [IO.Directory]::CreateDirectory((Split-Path $Path -Parent))|Out-Null;[IO.File]::WriteAllBytes($Path,$Bytes) }
 function Assert-Throws([scriptblock]$Action,[string]$Label){try{&$Action;throw "$Label did not throw."}catch{if($_.Exception.Message-eq"$Label did not throw."){throw}}}
+$repository=Split-Path $buildRoot -Parent
+$reviewedManifestPath=Join-Path $repository 'third-party-licenses/licenses-manifest.json'
+$reviewedManifest=Get-Content -LiteralPath $reviewedManifestPath -Raw | ConvertFrom-Json
+if ($reviewedManifest.complete -ne $true) { throw 'Committed release license evidence is not marked complete.' }
+$reviewedRoot=Split-Path $reviewedManifestPath -Parent
+foreach ($entry in @($reviewedManifest.packages)+@($reviewedManifest.managedPackages)) {
+    foreach ($file in $entry.licenseFiles) {
+        $path=Join-Path $reviewedRoot ([string]$file.path).Replace('/','\')
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Sha $path) -cne [string]$file.sha256) {
+            throw "Committed license evidence hash is not checkout-stable: $($file.path)"
+        }
+    }
+}
 $root=Join-Path ([IO.Path]::GetTempPath()) "lftp-pilot-license-tests-$([Guid]::NewGuid().ToString('N'))"
 try {
     $license=Join-Path $root 'licenses/fixture/LICENSE.txt';$source=Join-Path $root 'sources/fixture/fixture.src.tar.zst'

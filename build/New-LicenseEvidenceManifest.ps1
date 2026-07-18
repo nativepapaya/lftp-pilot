@@ -24,12 +24,28 @@ function Get-EvidenceHash {
 function Copy-ManagedEvidenceFile {
     param(
         [Parameter(Mandatory)][string]$Source,
-        [Parameter(Mandatory)][string]$RelativeDestination
+        [Parameter(Mandatory)][string]$RelativeDestination,
+        [switch]$NormalizeText
     )
     if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { throw "Managed evidence source is missing: $Source" }
     $destination = Join-Path $evidenceRootResolved $RelativeDestination.Replace('/', '\')
     [IO.Directory]::CreateDirectory((Split-Path $destination -Parent)) | Out-Null
-    Copy-Item -LiteralPath $Source -Destination $destination -Force
+    if ($NormalizeText) {
+        $sourceBytes = [IO.File]::ReadAllBytes($Source)
+        $normalized = [IO.MemoryStream]::new($sourceBytes.Length)
+        try {
+            for ($index = 0; $index -lt $sourceBytes.Length; $index++) {
+                if ($sourceBytes[$index] -eq 13) {
+                    if ($index + 1 -lt $sourceBytes.Length -and $sourceBytes[$index + 1] -eq 10) { $index++ }
+                    $normalized.WriteByte(10)
+                }
+                else { $normalized.WriteByte($sourceBytes[$index]) }
+            }
+            [IO.File]::WriteAllBytes($destination, $normalized.ToArray())
+        }
+        finally { $normalized.Dispose() }
+    }
+    else { Copy-Item -LiteralPath $Source -Destination $destination -Force }
 }
 
 $nativeSourcePackage = @{
@@ -157,7 +173,7 @@ $managedPackages = foreach ($package in ($managedDependencies | Sort-Object Id,V
     $safeDirectory = ($idLower + '-' + $version.ToLowerInvariant()) -replace '[^a-z0-9._-]', '_'
     $managedLicenseRecords = foreach ($source in $licenseSources) {
         $relative = "licenses/managed/$safeDirectory/$([IO.Path]::GetFileName($source))"
-        Copy-ManagedEvidenceFile $source $relative
+        Copy-ManagedEvidenceFile $source $relative -NormalizeText
         [ordered]@{ path = $relative; sha256 = Get-EvidenceHash $relative }
     }
     $category = if ($runtimePackNames.Contains($id)) { 'dotnet-runtime-pack' } else { 'nuget' }
@@ -198,6 +214,6 @@ $manifest = [ordered]@{
     managedPackages = @($managedPackages)
 }
 $manifestPath = Join-Path $evidenceRootResolved 'licenses-manifest.json'
-$json = $manifest | ConvertTo-Json -Depth 10
-Set-Content -LiteralPath $manifestPath -Value $json -Encoding utf8
+$json = ($manifest | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
+[IO.File]::WriteAllText($manifestPath, $json, [Text.UTF8Encoding]::new($false))
 Get-Item -LiteralPath $manifestPath

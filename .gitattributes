@@ -14,3 +14,4 @@
 *.cer binary
 *.msix binary
 *.msixbundle binary
+third-party-licenses/licenses/** text eol=lf
