@@ -103,3 +103,12 @@ remote files are passed as one argument to the fixed System32 Notepad executable
 with shell execution disabled; file associations never receive the cache path.
 Update downloads and replacement remain owned by Windows App Installer; LFTP
 Pilot only reports status and opens the stable feed URI.
+
+Job progress is committed through the Core coordinator as monotonic snapshots.
+Regular files retain LFTP queue byte/rate observations on the high-volume event
+stream. Guarded directory and reviewed mirror jobs use their fresh dry-run action
+multiset as the progress authority: verbose execution output advances progress
+only when it matches an unconsumed reviewed action, with at most one publication
+per percentage point. Remote transfers report validated route phases, and the
+isolated client relay adds bounded local-payload byte observations while the
+download is active. Terminal transitions remain the only way to publish 100%.

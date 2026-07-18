@@ -354,7 +354,7 @@ public sealed class CommandBuilderTests
         const string managed = @"C:\Agent State\relay\payload.bin";
 
         Assert.Equal(
-            "get \"/source file.bin\" -o \"/c/Agent State/relay/payload.bin\"",
+            "set xfer:use-temp-file no; get \"/source file.bin\" -o \"/c/Agent State/relay/payload.bin\"; set xfer:use-temp-file yes",
             LftpCommandBuilder.BuildRemoteRelayDownload("/source file.bin", managed));
         Assert.Equal(
             "set xfer:use-temp-file no; set xfer:clobber no; put \"/c/Agent State/relay/payload.bin\" -o \"/target.bin\"; set xfer:clobber yes; set xfer:use-temp-file yes",

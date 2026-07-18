@@ -1495,6 +1495,11 @@ public sealed class WorkspaceTests
     public async Task TypedDirectoryTransfersRemainTransferJobsAndCompleteThroughTheGuardedForegroundSession()
     {
         await using var fixture = new WorkspaceFixture();
+        var progressUpdates = new ConcurrentBag<JobSnapshot>();
+        fixture.Jobs.JobChanged += (_, job) =>
+        {
+            if (job.Progress is > 0 and < 1) progressUpdates.Add(job);
+        };
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
         var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
@@ -1514,6 +1519,8 @@ public sealed class WorkspaceTests
             .All(job => job.State == JobState.Completed), TestContext.Current.CancellationToken);
         Assert.Equal(JobKind.Transfer, fixture.Jobs.GetJobs().Single(job => job.Id == download.Job.Id).Kind);
         Assert.Equal(JobKind.Transfer, fixture.Jobs.GetJobs().Single(job => job.Id == upload.Job.Id).Kind);
+        Assert.Contains(progressUpdates, job => job.Id == download.Job.Id && job.Progress == 0.2);
+        Assert.Contains(progressUpdates, job => job.Id == upload.Job.Id && job.Progress == 0.2);
         Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
             item.Role == "transfer" && item.Command.Contains("mirror --continue", StringComparison.Ordinal) &&
             !item.Command.Contains("--dry-run", StringComparison.Ordinal) &&
@@ -2915,6 +2922,11 @@ public sealed class WorkspaceTests
     public async Task DeleteMirrorRequiresAgentHeldFreshPreviewAndNeverExecutesDryRunText()
     {
         await using var fixture = new WorkspaceFixture();
+        var progressUpdates = new ConcurrentBag<JobSnapshot>();
+        fixture.Jobs.JobChanged += (_, job) =>
+        {
+            if (job.Progress is > 0 and < 1) progressUpdates.Add(job);
+        };
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
         var session = await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
@@ -2944,6 +2956,7 @@ public sealed class WorkspaceTests
         var approved = await fixture.Service.ApproveMirrorAsync(
             MirrorApproval(session.SessionId, definition, preview, deletionsApproved: true), TestContext.Current.CancellationToken);
         await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == approved.Job.Id).State == JobState.Completed, TestContext.Current.CancellationToken);
+        Assert.Contains(progressUpdates, job => job.Id == approved.Job.Id && job.Progress == 0.2);
         Assert.Contains(fixture.ProcessHost.Commands, command =>
             command.Contains("mirror --verbose=1", StringComparison.Ordinal) &&
             command.Contains("--delete", StringComparison.Ordinal));
@@ -3417,6 +3430,11 @@ public sealed class WorkspaceTests
     public async Task SftpRemoteTransferRelaysThroughSeparatelyPinnedProcessesAndRemovesManagedPayload()
     {
         await using var fixture = new WorkspaceFixture();
+        var progressUpdates = new ConcurrentBag<JobSnapshot>();
+        fixture.Jobs.JobChanged += (_, job) =>
+        {
+            if (job.Progress is > 0 and < 1) progressUpdates.Add(job);
+        };
         var source = fixture.PasswordProfile(ConnectionProtocol.Sftp, "Source", "source.example");
         var destination = fixture.PasswordProfile(ConnectionProtocol.Sftp, "Destination", "destination.example");
         await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
@@ -3434,6 +3452,9 @@ public sealed class WorkspaceTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(RemoteTransferMode.ClientRelay, enqueued.Mode);
+        Assert.Contains(progressUpdates, job => job.Id == enqueued.Job.Id && job.Progress == 0.1);
+        Assert.Contains(progressUpdates, job => job.Id == enqueued.Job.Id && job.Progress == 0.65);
+        Assert.Contains(progressUpdates, job => job.Id == enqueued.Job.Id && job.Progress == 0.98);
         Assert.Contains("two isolated", enqueued.RoutingNote, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag == "remote-transfer");
         var sourceStart = Assert.Single(fixture.ProcessHost.Starts,
@@ -3450,7 +3471,7 @@ public sealed class WorkspaceTests
         Assert.DoesNotContain(destination.Id.ToString("N"), sourceInitialization.Command, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(source.Id.ToString("N"), destinationInitialization.Command, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
-            item.Role == sourceStart.Tag && item.Command.StartsWith("get \"/source.bin\" -o ", StringComparison.Ordinal));
+            item.Role == sourceStart.Tag && item.Command.Contains("get \"/source.bin\" -o ", StringComparison.Ordinal));
         Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
             item.Role == destinationStart.Tag && item.Command.Contains("put ", StringComparison.Ordinal) &&
             item.Command.EndsWith(" -o \"/new-target.bin\"; set xfer:clobber yes; set xfer:use-temp-file yes", StringComparison.Ordinal));
@@ -3483,7 +3504,7 @@ public sealed class WorkspaceTests
         _ = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
         await WaitUntilAsync(
             () => fixture.ProcessHost.TaggedCommands.Any(item =>
-                item.Role == $"remote-relay-source-{plan.Id:N}" && item.Command.StartsWith("get ", StringComparison.Ordinal)),
+                item.Role == $"remote-relay-source-{plan.Id:N}" && item.Command.Contains("get ", StringComparison.Ordinal)),
             TestContext.Current.CancellationToken);
         Assert.True(fixture.Service.TryCancelOperation(plan.Id, "User cancelled client relay"));
         await WaitUntilAsync(
@@ -5168,13 +5189,13 @@ public sealed class WorkspaceTests
                     : new LftpCommandResult([]));
             }
             if (role.StartsWith("remote-relay-source-", StringComparison.Ordinal) &&
-                command.StartsWith("get ", StringComparison.Ordinal) &&
+                command.Contains("get ", StringComparison.Ordinal) &&
                 command.Contains("failing-relay-source.bin", StringComparison.Ordinal))
             {
                 return Task.FromResult(new LftpCommandResult([new("stderr", "get: Access failed: Permission denied")]));
             }
             if (role.StartsWith("remote-relay-source-", StringComparison.Ordinal) &&
-                command.StartsWith("get ", StringComparison.Ordinal) &&
+                command.Contains("get ", StringComparison.Ordinal) &&
                 command.Contains("blocking-relay-source.bin", StringComparison.Ordinal))
             {
                 return WaitForCancellationAsync(cancellationToken);
@@ -5186,7 +5207,7 @@ public sealed class WorkspaceTests
                 return Task.FromResult(new LftpCommandResult([new("stderr", $"put: simulated failure ({command})")]));
             }
             if ((role == "remote-edit-download" || role.StartsWith("remote-relay-source-", StringComparison.Ordinal)) &&
-                command.StartsWith("get ", StringComparison.Ordinal))
+                command.Contains("get ", StringComparison.Ordinal))
             {
                 WriteRemoteEditDownload(command);
                 return Task.FromResult(new LftpCommandResult([]));

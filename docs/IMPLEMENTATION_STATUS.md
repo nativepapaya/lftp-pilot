@@ -152,6 +152,12 @@ still needs real servers, signed packages, or additional product development.
   and Activity diagnostics without credential values, private-key material, or
   the literal user-profile root. Quoted JSON secrets and text assignments are
   both redacted, and deterministic ZIP timestamps remain within format bounds.
+- Running job progress is monotonic and reconnect-safe. Guarded directory and
+  approved mirror progress counts only verbose actions found in the freshly
+  reviewed dry-run multiset, while remote-to-remote progress exposes route,
+  validation, FXP or client-relay download/upload, and cleanup phases. Relay
+  downloads add observed managed-payload bytes without accepting LFTP output as
+  executable data.
 - App Installer update status/UI and stable-feed generation with a quiet
   24-hour on-launch check plus background checks. CI builds and attests unsigned
   packages; local release tooling enforces byte-identical decoded package
@@ -171,8 +177,6 @@ still needs real servers, signed packages, or additional product development.
 - Exercise managed-cache editing, concurrent target changes, staging promotion,
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.
-- Extend live progress to guarded directory transfers, reviewed mirrors, and
-  remote-to-remote jobs.
 - Complete outbound Explorer drag/drop for remote files and add richer folder
   transfer controls such as reusable filters and per-tree parallelism.
 - Independently review and stage the exact native and managed third-party

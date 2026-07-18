@@ -9,6 +9,11 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- Guarded directory transfers and approved mirrors now publish monotonic phase
+  progress and advance through only those verbose LFTP actions that match the
+  freshly reviewed dry run. Remote-to-remote jobs expose routing, validation,
+  relay download/upload, cleanup, and FXP phases; managed relay downloads also
+  report observed bytes without weakening the isolated temporary-file boundary.
 - Native Windows shell integration is now connected end to end: the Agent owns
   terminal job notifications even after the App closes, notification clicks
   can only open the allowlisted Transfers route, active work drives taskbar

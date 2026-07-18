@@ -67,6 +67,33 @@ public sealed class JobCoordinator : IJobCoordinator
         return updated;
     }
 
+    public bool TryReportProgress(Guid jobId, double progress, string status)
+    {
+        if (!double.IsFinite(progress) || progress is < 0 or >= 1)
+            throw new ArgumentOutOfRangeException(nameof(progress), "Running job progress must be at least zero and less than one.");
+        JobSnapshotPolicy.ValidateStatus(status);
+
+        JobSnapshot updated;
+        lock (_gate)
+        {
+            if (!_jobs.TryGetValue(jobId, out var current) || current.State != JobState.Running ||
+                current.Progress is { } existing && progress < existing)
+                return false;
+            if (current.Progress == progress && string.Equals(current.Status, status, StringComparison.Ordinal))
+                return false;
+            updated = current with
+            {
+                Progress = progress,
+                Status = status,
+                UpdatedAt = NextUpdatedAt(current),
+            };
+            JobSnapshotPolicy.Validate(updated);
+            _jobs[jobId] = updated;
+        }
+        PublishJobChanged(updated);
+        return true;
+    }
+
     public bool TryCancel(Guid jobId, string? reason = null)
     {
         JobSnapshot updated;
