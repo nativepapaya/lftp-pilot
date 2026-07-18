@@ -9,6 +9,7 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
     private readonly IAppUpdateService _updates;
     private readonly Dictionary<Guid, JobSnapshot> _jobs = [];
     private readonly Dictionary<Guid, MirrorDefinition> _mirrorDefinitions = [];
+    private readonly Dictionary<Guid, FolderTransferPreset> _folderTransferPresets = [];
     private readonly Dictionary<Guid, RemoteSearchPage> _remoteSearches = [];
     private readonly ConnectionProfile _demoProfile = new(
         Guid.Parse("a4a9a7b7-f92c-455e-a4a0-6e0de2035c66"),
@@ -43,6 +44,14 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
             "/srv/releases",
             Excludes: [".git/**", "*.tmp"]);
         _mirrorDefinitions[definition.Id] = definition;
+        var preset = new FolderTransferPreset(
+            Guid.Parse("43b65c38-d4b6-4e3d-a279-29de12809fc9"),
+            "Release artifacts",
+            Includes: ["*.msix", "*.appinstaller", "SHA256SUMS.txt"],
+            Excludes: ["**/*.pdb"],
+            ParallelFiles: 4,
+            DownloadSegmentsPerFile: 4);
+        _folderTransferPresets[preset.Id] = preset;
     }
 
     public bool IsConnected => false;
@@ -79,6 +88,9 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
         {
             MirrorDefinitions = _mirrorDefinitions.Values
                 .OrderBy(static definition => definition.Name, StringComparer.CurrentCultureIgnoreCase)
+                .ToArray(),
+            FolderTransferPresets = _folderTransferPresets.Values
+                .OrderBy(static preset => preset.Name, StringComparer.CurrentCultureIgnoreCase)
                 .ToArray(),
         });
     }
@@ -262,6 +274,24 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
         };
         _jobs[jobId] = retried;
         return Task.FromResult(retried);
+    }
+
+    public Task<FolderTransferPreset> SaveFolderTransferPresetAsync(
+        FolderTransferPreset preset,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        PlanValidator.Validate(preset);
+        _folderTransferPresets[preset.Id] = preset;
+        return Task.FromResult(preset);
+    }
+
+    public Task<bool> DeleteFolderTransferPresetAsync(
+        Guid presetId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(_folderTransferPresets.Remove(presetId));
     }
 
     public Task<MirrorDefinition> SaveMirrorDefinitionAsync(

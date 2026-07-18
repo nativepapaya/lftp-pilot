@@ -32,6 +32,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly ILftpRuntimeProvider _runtimeProvider;
     private readonly IMirrorPlanner _mirrorPlanner;
     private readonly IMirrorDefinitionStore _mirrorDefinitionStore;
+    private readonly IFolderTransferPresetStore _folderTransferPresetStore;
     private readonly IHistoryStore _historyStore;
     private readonly AgentWorkspaceOptions _options;
     private readonly string _explorerExportRoot;
@@ -77,7 +78,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         RunOnceScheduler? scheduler = null,
         DurableJobStore? stateStore = null,
         IMirrorDefinitionStore? mirrorDefinitionStore = null,
-        IHistoryStore? historyStore = null)
+        IHistoryStore? historyStore = null,
+        IFolderTransferPresetStore? folderTransferPresetStore = null)
     {
         _profileStore = profileStore;
         _secretStore = secretStore;
@@ -86,6 +88,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         _runtimeProvider = runtimeProvider;
         _mirrorPlanner = mirrorPlanner;
         _mirrorDefinitionStore = mirrorDefinitionStore ?? new InMemoryMirrorDefinitionStore();
+        _folderTransferPresetStore = folderTransferPresetStore ?? new InMemoryFolderTransferPresetStore();
         _historyStore = historyStore ?? new InMemoryHistoryStore();
         _options = options;
         _explorerExportRoot = Path.GetFullPath(Path.Combine(options.CacheRoot, "explorer-exports"));
@@ -144,6 +147,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 WorkspaceMethods.FileMove => ToJson(await MoveEntryAsync(Required<MoveEntryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.FileDelete => ToJson(await DeleteEntriesAsync(Required<DeleteEntriesRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.TransferEnqueue => ToJson(await EnqueueTransferAsync(Required<TransferEnqueueRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.FolderTransferPresetList => ToJson(await ListFolderTransferPresetsAsync(cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.FolderTransferPresetSave => ToJson(await SaveFolderTransferPresetAsync(Required<FolderTransferPresetSaveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.FolderTransferPresetDelete => ToJson(await DeleteFolderTransferPresetAsync(Required<FolderTransferPresetDeleteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.JobRetry => ToJson(await RetryJobAsync(Required<JobRetryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.MirrorDefinitionList => ToJson(await ListMirrorDefinitionsAsync(cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.MirrorDefinitionSave => ToJson(await SaveMirrorDefinitionAsync(Required<MirrorDefinitionSaveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
@@ -192,6 +198,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 {
                     var profiles = (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).ToImmutableArray();
                     var mirrorDefinitions = await LoadMirrorDefinitionsAsync(profiles, cancellationToken).ConfigureAwait(false);
+                    var folderTransferPresets = await LoadFolderTransferPresetsAsync(cancellationToken).ConfigureAwait(false);
                     var history = await LoadHistoryAsync(cancellationToken).ConfigureAwait(false);
                     return new(AgentProtocol.CurrentVersion, runtime,
                         profiles,
@@ -200,6 +207,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                         _remoteEdits.GetSnapshots().ToImmutableArray())
                     {
                         MirrorDefinitions = mirrorDefinitions,
+                        FolderTransferPresets = folderTransferPresets,
                         History = history,
                     };
                 }
@@ -251,6 +259,36 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
     public Task<IReadOnlyList<ConnectionProfile>> ListProfilesAsync(CancellationToken cancellationToken = default) =>
         _profileStore.GetAllAsync(cancellationToken);
+
+    public async Task<IReadOnlyList<FolderTransferPreset>> ListFolderTransferPresetsAsync(
+        CancellationToken cancellationToken = default) =>
+        await LoadFolderTransferPresetsAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task<FolderTransferPreset> SaveFolderTransferPresetAsync(
+        FolderTransferPresetSaveRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        PlanValidator.Validate(request.Preset);
+        var presets = await LoadFolderTransferPresetsAsync(cancellationToken).ConfigureAwait(false);
+        if (presets.Any(preset => preset.Id != request.Preset.Id &&
+            string.Equals(preset.Name, request.Preset.Name, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("Folder-transfer preset names must be unique, ignoring case.");
+        await _folderTransferPresetStore.SaveAsync(request.Preset, cancellationToken).ConfigureAwait(false);
+        return request.Preset;
+    }
+
+    public async Task<bool> DeleteFolderTransferPresetAsync(
+        FolderTransferPresetDeleteRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request.PresetId == Guid.Empty)
+            throw new ArgumentException("A folder-transfer preset identifier is required.", nameof(request));
+        var presets = await LoadFolderTransferPresetsAsync(cancellationToken).ConfigureAwait(false);
+        if (!presets.Any(preset => preset.Id == request.PresetId)) return false;
+        await _folderTransferPresetStore.DeleteAsync(request.PresetId, cancellationToken).ConfigureAwait(false);
+        return true;
+    }
 
     public async Task<IReadOnlyList<MirrorDefinition>> ListMirrorDefinitionsAsync(
         CancellationToken cancellationToken = default)
@@ -978,7 +1016,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         var canonicalRequest = new TransferEnqueueRequest(request.SessionId, plan);
         if (_transferSubmissions.TryGetValue(plan.Id, out var priorSubmission))
         {
-            if (priorSubmission.Request != canonicalRequest)
+            if (!SameTransferRequest(priorSubmission.Request, canonicalRequest))
                 throw new ArgumentException("The transfer identifier is already bound to different session or plan details. Create a new transfer plan.", nameof(request));
             if (priorSubmission.Result is { } priorResult)
                 return priorResult with { Job = FindJob(plan.Id) ?? priorResult.Job };
@@ -2793,6 +2831,22 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         };
     }
 
+    private static bool SameTransferRequest(TransferEnqueueRequest left, TransferEnqueueRequest right) =>
+        left.SessionId == right.SessionId &&
+        left.Plan.Id == right.Plan.Id &&
+        left.Plan.ProfileId == right.Plan.ProfileId &&
+        left.Plan.Direction == right.Plan.Direction &&
+        string.Equals(left.Plan.SourcePath, right.Plan.SourcePath, StringComparison.Ordinal) &&
+        string.Equals(left.Plan.DestinationPath, right.Plan.DestinationPath, StringComparison.Ordinal) &&
+        left.Plan.Mode == right.Plan.Mode &&
+        left.Plan.Segments == right.Plan.Segments &&
+        left.Plan.RateLimitBytesPerSecond == right.Plan.RateLimitBytesPerSecond &&
+        left.Plan.RunAt == right.Plan.RunAt &&
+        left.Plan.SourceKind == right.Plan.SourceKind &&
+        left.Plan.ParallelFiles == right.Plan.ParallelFiles &&
+        left.Plan.EffectiveIncludes.SequenceEqual(right.Plan.EffectiveIncludes, StringComparer.Ordinal) &&
+        left.Plan.EffectiveExcludes.SequenceEqual(right.Plan.EffectiveExcludes, StringComparer.Ordinal);
+
     private static void ValidateTransferPaths(TransferPlan plan)
     {
         if (plan.SourceKind == TransferSourceKind.Directory &&
@@ -2956,7 +3010,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         plan.Direction == TransferDirection.Download ? MirrorDirection.Download : MirrorDirection.Upload,
         plan.Direction == TransferDirection.Download ? plan.DestinationPath : plan.SourcePath,
         plan.Direction == TransferDirection.Download ? plan.SourcePath : plan.DestinationPath,
-        ParallelFiles: 1,
+        Includes: plan.EffectiveIncludes,
+        Excludes: plan.EffectiveExcludes,
+        ParallelFiles: plan.ParallelFiles,
         SegmentsPerFile: plan.Segments);
 
     private static void RequireLocalSourceKind(string path, TransferSourceKind expectedKind)
@@ -3175,6 +3231,33 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         var definitions = await _mirrorDefinitionStore.GetAllAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidDataException("The saved mirror-definition store returned no collection.");
         return ValidateMirrorDefinitionSet(definitions, profileIds);
+    }
+
+    private async Task<ImmutableArray<FolderTransferPreset>> LoadFolderTransferPresetsAsync(
+        CancellationToken cancellationToken)
+    {
+        var presets = await _folderTransferPresetStore.GetAllAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidDataException("The folder-transfer preset store returned no collection.");
+        if (presets.Count > FolderTransferPolicy.MaximumPresets)
+            throw new InvalidDataException("The folder-transfer preset store contains too many records.");
+        var identifiers = new HashSet<Guid>();
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        long patternCharacters = 0;
+        foreach (var preset in presets)
+        {
+            PlanValidator.Validate(preset);
+            if (!identifiers.Add(preset.Id) || !names.Add(preset.Name))
+                throw new InvalidDataException("The folder-transfer preset store contains duplicate records.");
+            patternCharacters += preset.EffectiveIncludes.Sum(static value => (long)value.Length) +
+                preset.EffectiveExcludes.Sum(static value => (long)value.Length);
+        }
+        if (patternCharacters > FolderTransferPolicy.MaximumAggregatePatternCharacters)
+            throw new InvalidDataException("The folder-transfer preset store exceeds its aggregate pattern limit.");
+        return presets
+            .OrderBy(static preset => preset.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static preset => preset.Name, StringComparer.Ordinal)
+            .ThenBy(static preset => preset.Id)
+            .ToImmutableArray();
     }
 
     private static ImmutableArray<MirrorDefinition> ValidateMirrorDefinitionSet(

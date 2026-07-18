@@ -61,6 +61,12 @@ the App while keeping both package trees read-only.
   unconsumed previews, and remove a profile's definitions before deleting its
   metadata so an orphaned definition cannot later be rebound to a recreated
   endpoint.
+- Folder-transfer presets use their own bounded, atomic package-scoped store and
+  contain only a stable identifier, display name, ordered include/exclude globs,
+  per-tree parallelism, and download segment count. The store rejects unknown or
+  duplicate JSON properties, record/aggregate/byte overflow, device paths, and
+  reparse destinations. A lost save/delete reply triggers authoritative App
+  bootstrap refresh instead of a blind retry.
 - Remote editing accepts only a session and canonical remote file path; the
   Agent chooses the package-scoped cache path. Reviews bind strong local and
   remote identities, while dirty/watcher-failure state is returned in bootstrap
@@ -114,6 +120,9 @@ Regular files retain LFTP queue byte/rate observations on the high-volume event
 stream. Guarded directory and reviewed mirror jobs use their fresh dry-run action
 multiset as the progress authority: verbose execution output advances progress
 only when it matches an unconsumed reviewed action, with at most one publication
-per percentage point. Remote transfers report validated route phases, and the
+per percentage point. Parallel directory execution temporarily disables LFTP
+temporary destination names because LFTP 4.9.3 can strand a protected FTP data
+connection in that combination; the same session restores the setting after the
+bounded command. Remote transfers report validated route phases, and the
 isolated client relay adds bounded local-payload byte observations while the
 download is active. Terminal transitions remain the only way to publish 100%.

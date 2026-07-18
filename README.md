@@ -11,8 +11,7 @@ tree does not yet authorize a public binary release.
 
 The current bootstrap is an engineering preview, not a 1.0 release. See
 [Implementation status](docs/IMPLEMENTATION_STATUS.md) for the exact working
-surface and the remaining folder-control and signed-update
-acceptance work.
+surface and the remaining signed-update acceptance work.
 
 ## Product direction
 
@@ -21,6 +20,8 @@ acceptance work.
 - SFTP, FTP, FTPES, implicit FTPS, and plain FTP
 - LFTP queues, parallel transfers, segmented downloads, mirror/reverse mirror,
   bandwidth controls, and remote-to-remote jobs
+- Reusable folder-transfer presets with include/exclude globs, per-tree file
+  concurrency, and segmented-download controls
 - Reusable mirror definitions plus fresh dry-run previews with mandatory review
   before destination deletions
 - Managed remote editing with a package-scoped cache, strong local/remote

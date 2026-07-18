@@ -139,7 +139,40 @@ public static class PlanValidator
             issues.Add(new("segments", "range", $"Segments must be between 1 and {maximumSegments}."));
         if (plan.Direction == TransferDirection.Upload && plan.Segments != 1)
             issues.Add(new("segments", "unsupported", "Upload transfers do not support segmented transfer."));
+        if (plan.SourceKind == TransferSourceKind.File &&
+            (plan.EffectiveIncludes.Length != 0 || plan.EffectiveExcludes.Length != 0 || plan.ParallelFiles != 1))
+        {
+            issues.Add(new("folderOptions", "unsupported", "Folder filters and parallelism apply only to directory transfers."));
+        }
+        if (plan.SourceKind == TransferSourceKind.Directory)
+        {
+            if (plan.ParallelFiles is < 1 or > FolderTransferPolicy.MaximumParallelFiles)
+                issues.Add(new("parallelFiles", "range", $"Parallel files must be between 1 and {FolderTransferPolicy.MaximumParallelFiles}."));
+            ValidatePatterns(plan.EffectiveIncludes, "includes", issues);
+            ValidatePatterns(plan.EffectiveExcludes, "excludes", issues);
+            ValidatePatternTotal(plan.EffectiveIncludes, plan.EffectiveExcludes, issues);
+        }
         if (plan.RateLimitBytesPerSecond is <= 0) issues.Add(new("rateLimitBytesPerSecond", "range", "A rate limit must be positive."));
+        if (issues.Count != 0) throw new ModelValidationException(issues);
+    }
+
+    public static void Validate(FolderTransferPreset preset)
+    {
+        ArgumentNullException.ThrowIfNull(preset);
+        var issues = new List<ValidationIssue>();
+        if (preset.Id == Guid.Empty)
+            issues.Add(new("id", "required", "The folder-transfer preset identifier cannot be empty."));
+        if (string.IsNullOrWhiteSpace(preset.Name) || preset.Name.Length > FolderTransferPolicy.MaximumNameLength)
+            issues.Add(new("name", "length", $"Preset name must contain between 1 and {FolderTransferPolicy.MaximumNameLength} characters."));
+        if (preset.Name is not null && ProfileValidator.ContainsProtocolControl(preset.Name))
+            issues.Add(new("name", "control-character", "Preset name contains a prohibited control character."));
+        if (preset.ParallelFiles is < 1 or > FolderTransferPolicy.MaximumParallelFiles)
+            issues.Add(new("parallelFiles", "range", $"Parallel files must be between 1 and {FolderTransferPolicy.MaximumParallelFiles}."));
+        if (preset.DownloadSegmentsPerFile is < 1 or > FolderTransferPolicy.MaximumSegmentsPerFile)
+            issues.Add(new("downloadSegmentsPerFile", "range", $"Download segments per file must be between 1 and {FolderTransferPolicy.MaximumSegmentsPerFile}."));
+        ValidatePatterns(preset.EffectiveIncludes, "includes", issues);
+        ValidatePatterns(preset.EffectiveExcludes, "excludes", issues);
+        ValidatePatternTotal(preset.EffectiveIncludes, preset.EffectiveExcludes, issues);
         if (issues.Count != 0) throw new ModelValidationException(issues);
     }
 
@@ -161,15 +194,7 @@ public static class PlanValidator
             issues.Add(new("rateLimitBytesPerSecond", "range", $"A rate limit must be between 1 and {MirrorDefinitionPolicy.MaximumRateLimitBytesPerSecond} bytes per second."));
         ValidatePatterns(definition.EffectiveIncludes, "includes", issues);
         ValidatePatterns(definition.EffectiveExcludes, "excludes", issues);
-        var totalPatternCharacters = definition.EffectiveIncludes.Sum(static pattern => (long)(pattern?.Length ?? 0)) +
-            definition.EffectiveExcludes.Sum(static pattern => (long)(pattern?.Length ?? 0));
-        if (totalPatternCharacters > MirrorDefinitionPolicy.MaximumPatternCharactersPerDefinition)
-        {
-            issues.Add(new(
-                "patterns",
-                "length",
-                $"Include and exclude patterns cannot exceed {MirrorDefinitionPolicy.MaximumPatternCharactersPerDefinition} total characters."));
-        }
+        ValidatePatternTotal(definition.EffectiveIncludes, definition.EffectiveExcludes, issues);
         if (issues.Count != 0) throw new ModelValidationException(issues);
     }
 
@@ -282,6 +307,22 @@ public static class PlanValidator
         }
     }
 
+    private static void ValidatePatternTotal(
+        IEnumerable<string> includes,
+        IEnumerable<string> excludes,
+        ICollection<ValidationIssue> issues)
+    {
+        var totalPatternCharacters = includes.Sum(static pattern => (long)(pattern?.Length ?? 0)) +
+            excludes.Sum(static pattern => (long)(pattern?.Length ?? 0));
+        if (totalPatternCharacters > MirrorDefinitionPolicy.MaximumPatternCharactersPerDefinition)
+        {
+            issues.Add(new(
+                "patterns",
+                "length",
+                $"Include and exclude patterns cannot exceed {MirrorDefinitionPolicy.MaximumPatternCharactersPerDefinition} total characters."));
+        }
+    }
+
     private static void ValidateMirrorName(string? value, ICollection<ValidationIssue> issues)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -307,6 +348,16 @@ public static class MirrorDefinitionPolicy
     public const int MaximumParallelFiles = 16;
     public const int MaximumSegmentsPerFile = 64;
     public const long MaximumRateLimitBytesPerSecond = 1_000_000_000_000;
+}
+
+public static class FolderTransferPolicy
+{
+    public const int MaximumPresets = 64;
+    public const int MaximumNameLength = 80;
+    public const int MaximumParallelFiles = 16;
+    public const int MaximumSegmentsPerFile = 16;
+    public const int MaximumAggregatePatternCharacters = 65_536;
+    public const int MaximumSerializedStoreBytes = 128 * 1024;
 }
 
 public static class RemoteSearchPolicy

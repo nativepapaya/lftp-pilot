@@ -48,6 +48,7 @@ public sealed class MainWindowViewModel : ObservableObject
     }
 
     public ObservableCollection<SessionViewModel> Sessions { get; } = [];
+    public ObservableCollection<FolderTransferPreset> FolderTransferPresets { get; } = [];
     public ObservableCollection<RemoteEditItemViewModel> ActiveRemoteEdits { get; } = [];
     public ActivityCenterViewModel Activity { get; }
     public ConnectionProfilesViewModel Connections { get; }
@@ -93,6 +94,7 @@ public sealed class MainWindowViewModel : ObservableObject
             Connections.Load(bootstrap.Profiles);
             Mirror.LoadProfiles(bootstrap.Profiles);
             Mirror.LoadDefinitions(bootstrap.MirrorDefinitions);
+            LoadFolderTransferPresets(bootstrap.FolderTransferPresets);
             RemoteTransfer.LoadProfiles(bootstrap.Profiles);
             await Mirror.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);
             await RemoteTransfer.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);
@@ -296,7 +298,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private SessionViewModel CreateSession(Models.WorkspaceSessionSeed seed, ConnectionProfile profile)
     {
-        var session = new SessionViewModel(_agent, seed, profile);
+        var session = new SessionViewModel(_agent, seed, profile, FolderTransferPresets);
         session.JobQueued += (_, job) => Activity.Add(job);
         session.TransferOutcomeUnconfirmed += (_, submission) => RememberUnconfirmedTransfer(submission);
         session.StateRefreshRequested += (_, _) => RequestStateRefresh();
@@ -307,6 +309,13 @@ public sealed class MainWindowViewModel : ObservableObject
         };
         ApplyTransferSubmissionGuard(session);
         return session;
+    }
+
+    private void LoadFolderTransferPresets(IReadOnlyList<FolderTransferPreset> presets)
+    {
+        FolderTransferPresets.Clear();
+        foreach (var preset in presets.OrderBy(static item => item.Name, StringComparer.CurrentCultureIgnoreCase))
+            FolderTransferPresets.Add(preset);
     }
 
     private void ReportError(Exception exception)

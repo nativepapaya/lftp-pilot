@@ -199,7 +199,30 @@ public sealed record TransferPlan(
     int Segments = 1,
     long? RateLimitBytesPerSecond = null,
     DateTimeOffset? RunAt = null,
-    TransferSourceKind SourceKind = TransferSourceKind.File);
+    TransferSourceKind SourceKind = TransferSourceKind.File,
+    ImmutableArray<string> Includes = default,
+    ImmutableArray<string> Excludes = default,
+    int ParallelFiles = 1)
+{
+    public ImmutableArray<string> Includes { get; init; } = Includes.IsDefault ? [] : Includes;
+    public ImmutableArray<string> Excludes { get; init; } = Excludes.IsDefault ? [] : Excludes;
+    public ImmutableArray<string> EffectiveIncludes => Includes;
+    public ImmutableArray<string> EffectiveExcludes => Excludes;
+}
+
+public sealed record FolderTransferPreset(
+    Guid Id,
+    string Name,
+    ImmutableArray<string> Includes = default,
+    ImmutableArray<string> Excludes = default,
+    int ParallelFiles = 2,
+    int DownloadSegmentsPerFile = 4)
+{
+    public ImmutableArray<string> Includes { get; init; } = Includes.IsDefault ? [] : Includes;
+    public ImmutableArray<string> Excludes { get; init; } = Excludes.IsDefault ? [] : Excludes;
+    public ImmutableArray<string> EffectiveIncludes => Includes;
+    public ImmutableArray<string> EffectiveExcludes => Excludes;
+}
 
 public sealed record MirrorDefinition(
     Guid Id,

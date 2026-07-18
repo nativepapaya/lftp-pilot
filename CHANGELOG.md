@@ -9,6 +9,15 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- Folder transfers now expose reusable package-scoped presets, ordered include
+  and exclude globs, per-tree parallelism, and segmented-download controls in
+  the native transfer dialog. The Agent validates and persists only bounded
+  planning inputs, uses the same structured options for a fresh safety dry run
+  and execution, and the controlled real-runtime matrix proves filtered
+  parallel upload/download across FTP, opportunistic TLS, FTPES, implicit FTPS,
+  and SFTP. Parallel directory execution also scopes LFTP temporary destination
+  names off to avoid a reproduced LFTP 4.9.3 protected-data stall, restoring the
+  process setting immediately afterward.
 - Managed remote editing now has a real-runtime acceptance matrix across FTP,
   opportunistic TLS, FTPES, implicit FTPS, and SFTP. It proves reviewed cache
   uploads, concurrent delete/recreate conflicts, refresh, explicit overwrite,

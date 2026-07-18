@@ -43,6 +43,14 @@ public interface IAgentWorkspaceClient : IAsyncDisposable
     Task<FileMutationResult> MoveEntryAsync(Guid sessionId, PaneKind pane, string sourcePath, string destinationPath, CancellationToken cancellationToken = default);
     Task<FileMutationResult> DeleteEntriesAsync(Guid sessionId, PaneKind pane, IReadOnlyList<string> paths, bool recursive, bool confirmed, CancellationToken cancellationToken = default);
     Task<JobSnapshot> EnqueueTransferAsync(Guid sessionId, TransferPlan plan, CancellationToken cancellationToken = default);
+    Task<FolderTransferPreset> SaveFolderTransferPresetAsync(
+        FolderTransferPreset preset,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<FolderTransferPreset>(new NotSupportedException("Folder-transfer presets are not available through this client."));
+    Task<bool> DeleteFolderTransferPresetAsync(
+        Guid presetId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<bool>(new NotSupportedException("Folder-transfer presets are not available through this client."));
     Task<bool> CancelJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<JobSnapshot> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<MirrorDefinition> SaveMirrorDefinitionAsync(

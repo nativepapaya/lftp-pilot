@@ -325,6 +325,80 @@ public sealed class LiveAgentWorkspaceClientTests
     }
 
     [Fact]
+    public async Task MismatchedSavedFolderPresetReplyIsAnUnknownOutcome()
+    {
+        const int processId = 1305;
+        var preset = new FolderTransferPreset(
+            Guid.NewGuid(), "Exact preset", ["*.zip"], ["cache/**"], 4, 8);
+        var engine = new MutationReplyEngineClient(
+            processId,
+            WorkspaceMethods.FolderTransferPresetSave,
+            preset with { Excludes = ["different/**"] });
+        var client = CreateClient(engine, processId);
+        var invalidations = 0;
+        client.StateInvalidated += (_, _) => invalidations++;
+        try
+        {
+            var exception = await Assert.ThrowsAsync<AgentRequestOutcomeUnknownException>(() =>
+                client.SaveFolderTransferPresetAsync(preset, TestContext.Current.CancellationToken));
+            Assert.Equal(WorkspaceMethods.FolderTransferPresetSave, exception.Method);
+            Assert.IsType<InvalidDataException>(exception.InnerException);
+            Assert.Equal(1, engine.Attempts);
+            Assert.Equal(1, invalidations);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task BootstrapAcceptsOnlyBoundedUniqueFolderTransferPresets()
+    {
+        const int processId = 1307;
+        var preset = new FolderTransferPreset(
+            Guid.NewGuid(), "Release files", ["*.msix"], ["**/*.pdb"], 4, 8);
+        var bootstrap = new WorkspaceBootstrap(
+            AgentProtocol.CurrentVersion, new RuntimeStatus(true, true, "test"), [], [], [], [])
+        {
+            FolderTransferPresets = [preset],
+        };
+        var client = CreateClient(
+            new MutationReplyEngineClient(processId, "unused", true, bootstrap: bootstrap), processId);
+        try
+        {
+            var workspace = await client.LoadAsync(TestContext.Current.CancellationToken);
+            var returned = Assert.Single(workspace.FolderTransferPresets);
+            Assert.Equal(preset.Id, returned.Id);
+            Assert.Equal(preset.Name, returned.Name);
+            Assert.Equal(preset.EffectiveIncludes, returned.EffectiveIncludes);
+            Assert.Equal(preset.EffectiveExcludes, returned.EffectiveExcludes);
+            Assert.Equal(preset.ParallelFiles, returned.ParallelFiles);
+            Assert.Equal(preset.DownloadSegmentsPerFile, returned.DownloadSegmentsPerFile);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        var invalid = bootstrap with
+        {
+            FolderTransferPresets = [preset, preset with { Id = Guid.NewGuid(), Name = "release FILES" }],
+        };
+        var invalidClient = CreateClient(
+            new MutationReplyEngineClient(processId + 1, "unused", true, bootstrap: invalid), processId + 1);
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                invalidClient.LoadAsync(TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            await invalidClient.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task ReadOnlyBootstrapLostReplyReconnectsAndRetriesOnce()
     {
         const int processId = 404;

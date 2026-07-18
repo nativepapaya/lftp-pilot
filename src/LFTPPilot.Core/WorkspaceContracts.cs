@@ -21,6 +21,9 @@ public static class WorkspaceMethods
     public const string FileMove = "files.move";
     public const string FileDelete = "files.delete";
     public const string TransferEnqueue = "transfers.enqueue";
+    public const string FolderTransferPresetList = "transfers.folderPresets.list";
+    public const string FolderTransferPresetSave = "transfers.folderPresets.save";
+    public const string FolderTransferPresetDelete = "transfers.folderPresets.delete";
     public const string JobRetry = "jobs.retry";
     public const string MirrorPreview = "mirrors.preview";
     public const string MirrorApprove = "mirrors.approve";
@@ -50,6 +53,7 @@ public sealed record WorkspaceBootstrap(
     ImmutableArray<RemoteEditSession> RemoteEdits)
 {
     public ImmutableArray<MirrorDefinition> MirrorDefinitions { get; init; } = [];
+    public ImmutableArray<FolderTransferPreset> FolderTransferPresets { get; init; } = [];
     public ImmutableArray<HistoryRecord> History { get; init; } = [];
 }
 
@@ -107,6 +111,8 @@ public sealed record DeleteEntriesRequest(
 public sealed record FileMutationResult(PaneKind Kind, ImmutableArray<string> AffectedPaths);
 public sealed record TransferEnqueueRequest(Guid SessionId, TransferPlan Plan);
 public sealed record TransferEnqueueResult(JobSnapshot Job);
+public sealed record FolderTransferPresetSaveRequest(FolderTransferPreset Preset);
+public sealed record FolderTransferPresetDeleteRequest(Guid PresetId);
 public sealed record JobRetryRequest(Guid JobId);
 public sealed record JobRetryResult(JobSnapshot Job);
 public sealed record MirrorDefinitionSaveRequest(MirrorDefinition Definition);

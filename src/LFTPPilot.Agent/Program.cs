@@ -64,6 +64,8 @@ public static class Program
             clientAuthorizer: AgentClientAuthorization.Create(paths),
             mirrorDefinitionStore: new JsonMirrorDefinitionStore(
                 Path.Combine(paths.MirrorDefinitions, JsonMirrorDefinitionStore.FileName)),
+            folderTransferPresetStore: new JsonFolderTransferPresetStore(
+                Path.Combine(paths.FolderTransferPresets, JsonFolderTransferPresetStore.FileName)),
             historyStore: new JsonHistoryStore(Path.Combine(paths.History, "history.json")),
             jobObserver: notificationService is null
                 ? null

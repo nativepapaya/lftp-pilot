@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using LFTPPilot.Agent;
@@ -459,6 +460,109 @@ public sealed class ProtocolIntegrationTests
 
     [Fact]
     [Trait("Category", "ProtocolIntegration")]
+    public async Task FilteredParallelFolderTransfersUseRealLftpAcrossEveryProtocol()
+    {
+        var configPath = Environment.GetEnvironmentVariable(ConfigVariable);
+        var executablePath = Environment.GetEnvironmentVariable(RuntimeVariable);
+        if (string.IsNullOrWhiteSpace(configPath) || string.IsNullOrWhiteSpace(executablePath)) return;
+        var config = await LoadConfigAsync(configPath);
+        var endpoints = new[]
+        {
+            (ConnectionProtocol.Ftp, config.Endpoints.Ftp),
+            (ConnectionProtocol.FtpOpportunisticTls, config.Endpoints.FtpOpportunisticTls),
+            (ConnectionProtocol.FtpsExplicit, config.Endpoints.FtpsExplicit),
+            (ConnectionProtocol.FtpsImplicit, config.Endpoints.FtpsImplicit),
+            (ConnectionProtocol.Sftp, config.Endpoints.Sftp),
+        };
+        foreach (var (protocol, port) in endpoints)
+            await ExerciseFilteredFolderTransferAsync(config, executablePath, protocol, port);
+    }
+
+    private static async Task ExerciseFilteredFolderTransferAsync(
+        ProtocolLabConfig config,
+        string executablePath,
+        ConnectionProtocol protocol,
+        int port)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"lftp-pilot-folder-{protocol}-{Guid.NewGuid():N}");
+        TrackingProcessHost? diagnostics = null;
+        Directory.CreateDirectory(root);
+        try
+        {
+            var connected = await CreateConnectedServiceAsync(
+                config, executablePath, protocol, port, root);
+            diagnostics = connected.Diagnostics;
+            var (service, jobs, profile, session, _, _) = connected;
+            await using (service)
+            {
+                var source = Path.Combine(root, "filtered-source");
+                Directory.CreateDirectory(Path.Combine(source, "nested"));
+                var keepContent = "keep-雪-" + new string('K', 256 * 1024);
+                var nestedContent = "nested-雪-" + new string('N', 256 * 1024);
+                await File.WriteAllTextAsync(Path.Combine(source, "keep.txt"), keepContent, TestContext.Current.CancellationToken);
+                await File.WriteAllTextAsync(Path.Combine(source, "skip.txt"), "skip", TestContext.Current.CancellationToken);
+                await File.WriteAllTextAsync(Path.Combine(source, "drop.bin"), "drop", TestContext.Current.CancellationToken);
+                await File.WriteAllTextAsync(
+                    Path.Combine(source, "nested", "nested.txt"), nestedContent, TestContext.Current.CancellationToken);
+                var remotePath = $"/filtered-tree-{profile.Id:N}";
+                var upload = await service.EnqueueTransferAsync(new(
+                    session.SessionId,
+                    new TransferPlan(
+                        Guid.NewGuid(), profile.Id, TransferDirection.Upload,
+                        source, remotePath, TransferMode.Resume,
+                        SourceKind: TransferSourceKind.Directory,
+                        Includes: ["*/", "*.txt"],
+                        Excludes: ["skip*"],
+                        ParallelFiles: 2)),
+                    TestContext.Current.CancellationToken);
+                await WaitForCompletedAsync(jobs, upload.Job.Id, protocol);
+
+                var remote = await service.BrowseRemoteAsync(
+                    new(session.SessionId, remotePath, Fresh: true), TestContext.Current.CancellationToken);
+                Assert.Contains(remote.Entries, entry => entry.Name == "keep.txt");
+                Assert.Contains(remote.Entries, entry => entry.Name == "nested" && entry.IsDirectory);
+                Assert.DoesNotContain(remote.Entries, entry => entry.Name is "skip.txt" or "drop.bin");
+                var nested = await service.BrowseRemoteAsync(
+                    new(session.SessionId, remotePath + "/nested", Fresh: true), TestContext.Current.CancellationToken);
+                Assert.Contains(nested.Entries, entry => entry.Name == "nested.txt");
+
+                var destination = Path.Combine(root, "filtered-download");
+                var download = await service.EnqueueTransferAsync(new(
+                    session.SessionId,
+                    new TransferPlan(
+                        Guid.NewGuid(), profile.Id, TransferDirection.Download,
+                        remotePath, destination, TransferMode.Resume,
+                        Segments: 3,
+                        SourceKind: TransferSourceKind.Directory,
+                        Includes: ["*/", "*.txt"],
+                        ParallelFiles: 2)),
+                    TestContext.Current.CancellationToken);
+                await WaitForCompletedAsync(jobs, download.Job.Id, protocol);
+                Assert.Equal(keepContent, await File.ReadAllTextAsync(
+                    Path.Combine(destination, "keep.txt"), TestContext.Current.CancellationToken));
+                Assert.Equal(nestedContent, await File.ReadAllTextAsync(
+                    Path.Combine(destination, "nested", "nested.txt"), TestContext.Current.CancellationToken));
+
+                await service.DeleteEntriesAsync(
+                    new(PaneKind.Remote, [remotePath], session.SessionId, Recursive: true, Confirmed: true),
+                    TestContext.Current.CancellationToken);
+                await service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken);
+            }
+        }
+        catch (Exception exception)
+        {
+            var trace = diagnostics?.FormatRecentTrace() ?? "No process trace was available.";
+            throw new InvalidOperationException(
+                $"The controlled {protocol} folder-transfer matrix failed.{Environment.NewLine}{trace}", exception);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "ProtocolIntegration")]
     public async Task ManagedRemoteEditRestoresBackupAfterRealFtpAndSftpPromotionFailures()
     {
         var configPath = Environment.GetEnvironmentVariable(ConfigVariable);
@@ -484,7 +588,7 @@ public sealed class ProtocolIntegrationTests
         Directory.CreateDirectory(root);
         try
         {
-            var (service, jobs, profile, session, options) = await CreateConnectedServiceAsync(
+            var (service, jobs, profile, session, options, _) = await CreateConnectedServiceAsync(
                 config, executablePath, protocol, port, root);
             await using (service)
             {
@@ -584,7 +688,7 @@ public sealed class ProtocolIntegrationTests
         Directory.CreateDirectory(root);
         try
         {
-            var (service, jobs, profile, session, _) = await CreateConnectedServiceAsync(
+            var (service, jobs, profile, session, _, _) = await CreateConnectedServiceAsync(
                 config, executablePath, protocol, port, root);
             await using (service)
             {
@@ -633,7 +737,7 @@ public sealed class ProtocolIntegrationTests
         }
     }
 
-    private static async Task<(AgentWorkspaceService Service, JobCoordinator Jobs, ConnectionProfile Profile, SessionSnapshot Session, AgentWorkspaceOptions Options)>
+    private static async Task<(AgentWorkspaceService Service, JobCoordinator Jobs, ConnectionProfile Profile, SessionSnapshot Session, AgentWorkspaceOptions Options, TrackingProcessHost Diagnostics)>
         CreateConnectedServiceAsync(
             ProtocolLabConfig config,
             string executablePath,
@@ -664,11 +768,13 @@ public sealed class ProtocolIntegrationTests
             BrowseTimeout = TimeSpan.FromSeconds(20),
             TransferTimeout = TimeSpan.FromMinutes(2),
         };
+        var diagnostics = new TrackingProcessHost(
+            new TlsCaProcessHost(new LftpProcessHost(), config.TlsCaPath));
         var service = new AgentWorkspaceService(
             profiles,
             secrets,
             new SftpHostKeyManager(hostKeys, new UnexpectedHostKeyProbe()),
-            new TlsCaProcessHost(new LftpProcessHost(), config.TlsCaPath),
+            diagnostics,
             PackagedLftpRuntimeProvider.CreateTestOverride(executablePath),
             jobs,
             new MirrorPlanner(),
@@ -680,7 +786,7 @@ public sealed class ProtocolIntegrationTests
             await service.SaveProfileAsync(new(profile, config.Password), TestContext.Current.CancellationToken);
             var session = await service.ConnectAsync(
                 new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
-            return (service, jobs, profile, session, options);
+            return (service, jobs, profile, session, options, diagnostics);
         }
         catch
         {
@@ -1118,6 +1224,7 @@ public sealed class ProtocolIntegrationTests
     {
         public ConcurrentBag<string> DisposedRoles { get; } = [];
         public ConcurrentBag<(string Role, string Command)> Commands { get; } = [];
+        public ConcurrentQueue<(string Role, LftpOutputLine Output)> RecentOutput { get; } = [];
 
         public async Task<ILftpSession> StartAsync(
             LftpProcessStartOptions options,
@@ -1126,7 +1233,25 @@ public sealed class ProtocolIntegrationTests
                 await inner.StartAsync(options, cancellationToken),
                 options.Tag,
                 DisposedRoles,
-                Commands);
+                Commands,
+                RecentOutput);
+
+        public string FormatRecentTrace()
+        {
+            var builder = new StringBuilder("Recent redacted LFTP trace:");
+            foreach (var (role, command) in Commands.Reverse().Take(20).Reverse())
+            {
+                var safeCommand = command.Contains("open --user", StringComparison.Ordinal)
+                    ? "[connection command omitted]"
+                    : command;
+                builder.AppendLine().Append(role).Append(" command: ").Append(safeCommand);
+            }
+            foreach (var (role, output) in RecentOutput)
+            {
+                builder.AppendLine().Append(role).Append(' ').Append(output.Stream).Append(": ").Append(output.Line);
+            }
+            return builder.ToString();
+        }
     }
 
     private sealed class TrackingSession : ILftpSession
@@ -1135,18 +1260,21 @@ public sealed class ProtocolIntegrationTests
         private readonly ILftpSession _inner;
         private readonly string _role;
         private readonly ConcurrentBag<(string Role, string Command)> _commands;
+        private readonly ConcurrentQueue<(string Role, LftpOutputLine Output)> _recentOutput;
         private int _disposed;
 
         public TrackingSession(
             ILftpSession inner,
             string role,
             ConcurrentBag<string> disposedRoles,
-            ConcurrentBag<(string Role, string Command)> commands)
+            ConcurrentBag<(string Role, string Command)> commands,
+            ConcurrentQueue<(string Role, LftpOutputLine Output)> recentOutput)
         {
             _inner = inner;
             _role = role;
             _disposedRoles = disposedRoles;
             _commands = commands;
+            _recentOutput = recentOutput;
             _inner.OutputReceived += ForwardOutput;
             _inner.UnsolicitedOutput += ForwardUnsolicitedOutput;
         }
@@ -1183,8 +1311,23 @@ public sealed class ProtocolIntegrationTests
             finally { _disposedRoles.Add(_role); }
         }
 
-        private void ForwardOutput(object? sender, LftpOutputLine line) => OutputReceived?.Invoke(this, line);
-        private void ForwardUnsolicitedOutput(object? sender, LftpOutputLine line) => UnsolicitedOutput?.Invoke(this, line);
+        private void ForwardOutput(object? sender, LftpOutputLine line)
+        {
+            Record(line);
+            OutputReceived?.Invoke(this, line);
+        }
+
+        private void ForwardUnsolicitedOutput(object? sender, LftpOutputLine line)
+        {
+            Record(line);
+            UnsolicitedOutput?.Invoke(this, line);
+        }
+
+        private void Record(LftpOutputLine line)
+        {
+            _recentOutput.Enqueue((_role, line));
+            while (_recentOutput.Count > 400) _recentOutput.TryDequeue(out _);
+        }
     }
 
     private sealed class TlsCaSession : ILftpSession

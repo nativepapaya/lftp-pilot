@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using LFTPPilot.Core;
 
 namespace LFTPPilot.App.Models;
@@ -18,6 +19,7 @@ public sealed record UiWorkspaceBootstrap(
     string AgentStatus)
 {
     public IReadOnlyList<MirrorDefinition> MirrorDefinitions { get; init; } = [];
+    public IReadOnlyList<FolderTransferPreset> FolderTransferPresets { get; init; } = [];
 }
 
 public sealed record ActivityLogEntry(
@@ -53,13 +55,19 @@ public sealed record TransferUiOptions(
     TransferMode Mode,
     int DownloadSegments,
     long? RateLimitBytesPerSecond,
-    DateTimeOffset? RunAt)
+    DateTimeOffset? RunAt,
+    ImmutableArray<string> Includes = default,
+    ImmutableArray<string> Excludes = default,
+    int ParallelFiles = 1)
 {
+    public ImmutableArray<string> Includes { get; init; } = Includes.IsDefault ? [] : Includes;
+    public ImmutableArray<string> Excludes { get; init; } = Excludes.IsDefault ? [] : Excludes;
     public static TransferUiOptions Defaults(TransferDirection direction) => new(
         TransferMode.Auto,
         direction == TransferDirection.Download ? 4 : 1,
         null,
-        null);
+        null,
+        ParallelFiles: 2);
 }
 
 public sealed record ConsoleLine(DateTimeOffset Timestamp, string Stream, string Text)

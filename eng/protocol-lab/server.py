@@ -108,7 +108,16 @@ class ImplicitTLSFTPHandler(TLS_FTPHandler):
 
     def handle(self) -> None:
         self.secure_connection(self.ssl_context)
-        super().handle()
+
+    def handle_ssl_established(self) -> None:
+        # secure_connection() completes asynchronously. Sending the FTP greeting
+        # before this callback races parallel implicit-TLS control connections
+        # and can strand an otherwise completed data transfer.
+        FTPHandler.handle(self)
+
+    def ftp_AUTH(self, line: str) -> None:
+        del line
+        self.respond("550 AUTH is not valid after implicit TLS is established")
 
 
 class NoFxpFTPHandler(FTPHandler):

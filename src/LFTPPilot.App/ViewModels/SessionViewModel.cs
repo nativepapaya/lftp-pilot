@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using LFTPPilot.App.Infrastructure;
 using LFTPPilot.App.Models;
 using LFTPPilot.App.Services;
@@ -18,7 +19,11 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
     private string _displayName;
     private string _statusText;
 
-    public SessionViewModel(IAgentWorkspaceClient agent, WorkspaceSessionSeed seed, ConnectionProfile profile)
+    public SessionViewModel(
+        IAgentWorkspaceClient agent,
+        WorkspaceSessionSeed seed,
+        ConnectionProfile profile,
+        ObservableCollection<FolderTransferPreset>? folderTransferPresets = null)
     {
         _agent = agent;
         _profile = profile;
@@ -36,6 +41,7 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
             () => RemotePane.Path,
             NavigateToSearchMatchAsync,
             _isConnected);
+        FolderTransferPresets = folderTransferPresets ?? [];
         DownloadCommand = new AsyncRelayCommand(
             _ => TransferAsync(TransferDirection.Download),
             _ => IsConnected && RemotePane.HasSelection && !HasUnconfirmedTransfers,
@@ -58,6 +64,7 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
     public FilePaneViewModel LocalPane { get; }
     public FilePaneViewModel RemotePane { get; }
     public RemoteSearchViewModel Search { get; }
+    public ObservableCollection<FolderTransferPreset> FolderTransferPresets { get; }
     public AsyncRelayCommand DownloadCommand { get; }
     public AsyncRelayCommand UploadCommand { get; }
     public AsyncRelayCommand RefreshCommand { get; }
@@ -151,8 +158,8 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
 
         IsReconnecting = true;
         StatusText = _profile.Protocol == ConnectionProtocol.Sftp
-            ? "Inspecting the SFTP host key before reconnectingâ€¦"
-            : "Reconnectingâ€¦";
+            ? "Inspecting the SFTP host key before reconnecting…"
+            : "Reconnecting…";
         try
         {
             var seed = await _agent.ConnectAsync(
@@ -270,6 +277,12 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
             StatusText = "No items were queued";
             throw new ArgumentException("Directory transfers support only Auto or Resume mode.", nameof(options));
         }
+        if (validatedSources.Any(static source => source.Kind == TransferSourceKind.Directory))
+        {
+            PlanValidator.Validate(new FolderTransferPreset(
+                Guid.NewGuid(), "Current folder options", options.Includes, options.Excludes,
+                options.ParallelFiles, options.DownloadSegments));
+        }
 
         StatusText = direction == TransferDirection.Upload ? "Queueing upload…" : "Queueing download…";
         var destinationRoot = direction == TransferDirection.Upload ? RemotePane.Path : LocalPane.Path;
@@ -309,7 +322,10 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
                 segments,
                 options.RateLimitBytesPerSecond,
                 options.RunAt,
-                SourceKind: source.Kind);
+                SourceKind: source.Kind,
+                Includes: source.Kind == TransferSourceKind.Directory ? options.Includes : [],
+                Excludes: source.Kind == TransferSourceKind.Directory ? options.Excludes : [],
+                ParallelFiles: source.Kind == TransferSourceKind.Directory ? options.ParallelFiles : 1);
             JobSnapshot job;
             try
             {
@@ -347,6 +363,46 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
 
             return job;
         }
+    }
+
+    public async Task<FolderTransferPreset> SaveFolderTransferPresetAsync(FolderTransferPreset preset)
+    {
+        PlanValidator.Validate(preset);
+        FolderTransferPreset saved;
+        try
+        {
+            saved = await _agent.SaveFolderTransferPresetAsync(preset).ConfigureAwait(true);
+        }
+        catch (AgentRequestOutcomeUnknownException)
+        {
+            RequestStateRefresh();
+            throw;
+        }
+        var existing = FolderTransferPresets.FirstOrDefault(item => item.Id == saved.Id);
+        if (existing is not null) FolderTransferPresets.Remove(existing);
+        var insertion = 0;
+        while (insertion < FolderTransferPresets.Count &&
+            string.Compare(FolderTransferPresets[insertion].Name, saved.Name, StringComparison.CurrentCultureIgnoreCase) <= 0)
+            insertion++;
+        FolderTransferPresets.Insert(insertion, saved);
+        return saved;
+    }
+
+    public async Task<bool> DeleteFolderTransferPresetAsync(Guid presetId)
+    {
+        bool removed;
+        try
+        {
+            removed = await _agent.DeleteFolderTransferPresetAsync(presetId).ConfigureAwait(true);
+        }
+        catch (AgentRequestOutcomeUnknownException)
+        {
+            RequestStateRefresh();
+            throw;
+        }
+        if (removed && FolderTransferPresets.FirstOrDefault(item => item.Id == presetId) is { } existing)
+            FolderTransferPresets.Remove(existing);
+        return removed;
     }
 
     private async Task TransferAsync(TransferDirection direction)
@@ -395,9 +451,9 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
     private string CreateConnectionStatus() => IsConnected
         ? "Connected"
         : RequiresCredentialForReconnect
-            ? "Disconnected Â· Credential required"
+            ? "Disconnected · Credential required"
             : _connectionError is not null
-                ? $"Disconnected Â· {_connectionError.Message}"
+                ? $"Disconnected · {_connectionError.Message}"
                 : "Disconnected";
 
     private void RequestStateRefresh()

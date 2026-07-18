@@ -121,6 +121,7 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         var sessions = new List<WorkspaceSessionSeed>();
         var profileIds = bootstrap.Profiles.Select(static profile => profile.Id).ToHashSet();
         ValidateBootstrapMirrorDefinitions(bootstrap.MirrorDefinitions, profileIds);
+        ValidateFolderTransferPresets(bootstrap.FolderTransferPresets);
         ValidateBootstrapHistory(bootstrap.History);
         var sessionIds = new HashSet<Guid>();
         foreach (var snapshot in bootstrap.Sessions)
@@ -149,6 +150,7 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         return new(bootstrap.Profiles, sessions, bootstrap.Jobs, bootstrap.RemoteEdits, bootstrap.History, log, false, runtimeStatus)
         {
             MirrorDefinitions = bootstrap.MirrorDefinitions,
+            FolderTransferPresets = bootstrap.FolderTransferPresets,
         };
     }
 
@@ -345,6 +347,38 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
             semantics: RequestSemantics.Mutation,
             responseValidator: response => ValidateMutationJob(response.Job, plan.Id, JobKind.Transfer, plan.ProfileId)).ConfigureAwait(false);
         return result.Job;
+    }
+
+    public async Task<FolderTransferPreset> SaveFolderTransferPresetAsync(
+        FolderTransferPreset preset,
+        CancellationToken cancellationToken = default)
+    {
+        PlanValidator.Validate(preset);
+        return await RequestAsync<FolderTransferPreset>(WorkspaceMethods.FolderTransferPresetSave,
+            new FolderTransferPresetSaveRequest(preset), cancellationToken, retryOnDisconnect: false,
+            semantics: RequestSemantics.Mutation,
+            responseValidator: response =>
+            {
+                PlanValidator.Validate(response);
+                if (response.Id != preset.Id ||
+                    !string.Equals(response.Name, preset.Name, StringComparison.Ordinal) ||
+                    response.ParallelFiles != preset.ParallelFiles ||
+                    response.DownloadSegmentsPerFile != preset.DownloadSegmentsPerFile ||
+                    !response.EffectiveIncludes.SequenceEqual(preset.EffectiveIncludes, StringComparer.Ordinal) ||
+                    !response.EffectiveExcludes.SequenceEqual(preset.EffectiveExcludes, StringComparer.Ordinal))
+                    throw new InvalidDataException("The Agent returned a different folder-transfer preset than the submitted record.");
+            }).ConfigureAwait(false);
+    }
+
+    public async Task<bool> DeleteFolderTransferPresetAsync(
+        Guid presetId,
+        CancellationToken cancellationToken = default)
+    {
+        if (presetId == Guid.Empty)
+            throw new ArgumentException("A folder-transfer preset identifier is required.", nameof(presetId));
+        return await RequestAsync<bool>(WorkspaceMethods.FolderTransferPresetDelete,
+            new FolderTransferPresetDeleteRequest(presetId), cancellationToken, retryOnDisconnect: false,
+            semantics: RequestSemantics.Mutation).ConfigureAwait(false);
     }
 
     public async Task<bool> CancelJobAsync(Guid jobId, CancellationToken cancellationToken = default)
@@ -1050,6 +1084,41 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
             response.RateLimitBytesPerSecond != submitted.RateLimitBytesPerSecond)
         {
             throw new InvalidDataException("The Agent returned a saved mirror definition that did not exactly match the submitted definition.");
+        }
+    }
+
+    private static void ValidateFolderTransferPresets(ImmutableArray<FolderTransferPreset> presets)
+    {
+        if (presets.IsDefault || presets.Length > FolderTransferPolicy.MaximumPresets)
+            throw new InvalidDataException("The Agent returned an invalid number of folder-transfer presets.");
+        var identifiers = new HashSet<Guid>();
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        long patternCharacters = 0;
+        foreach (var preset in presets)
+        {
+            try { PlanValidator.Validate(preset); }
+            catch (ModelValidationException exception)
+            {
+                throw new InvalidDataException("The Agent returned an invalid folder-transfer preset.", exception);
+            }
+            if (!identifiers.Add(preset.Id) || !names.Add(preset.Name))
+                throw new InvalidDataException("The Agent returned duplicate folder-transfer presets.");
+            patternCharacters += preset.EffectiveIncludes.Sum(static value => (long)value.Length) +
+                preset.EffectiveExcludes.Sum(static value => (long)value.Length);
+        }
+        var durableShape = presets.Select(static preset => new
+        {
+            preset.Id,
+            preset.Name,
+            Includes = preset.EffectiveIncludes,
+            Excludes = preset.EffectiveExcludes,
+            preset.ParallelFiles,
+            preset.DownloadSegmentsPerFile,
+        });
+        if (patternCharacters > FolderTransferPolicy.MaximumAggregatePatternCharacters ||
+            JsonSerializer.SerializeToUtf8Bytes(durableShape, JsonOptions).Length > FolderTransferPolicy.MaximumSerializedStoreBytes)
+        {
+            throw new InvalidDataException("The Agent returned folder-transfer presets that exceed bounded storage limits.");
         }
     }
 
