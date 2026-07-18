@@ -1148,6 +1148,35 @@ public sealed class LiveAgentWorkspaceClientTests
         }
     }
 
+    [Fact]
+    public async Task ExplorerExportGetRejectsACompletedFileOutsideThePackageCache()
+    {
+        const int processId = 922;
+        var exportId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var reply = new ExplorerExportSnapshot(
+            exportId,
+            Guid.NewGuid(),
+            new(exportId, JobKind.Transfer, Guid.NewGuid(), "Explorer export",
+                JobState.Completed, now, now, Progress: 1),
+            [Path.Combine(Path.GetTempPath(), $"outside-export-{exportId:N}.bin")],
+            now.AddMinutes(30));
+        var engine = new MutationReplyEngineClient(
+            processId, WorkspaceMethods.ExplorerExportGet, reply);
+        var client = CreateClient(engine, processId);
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() => client.GetExplorerExportAsync(
+                exportId,
+                TestContext.Current.CancellationToken));
+            Assert.Equal(1, engine.Attempts);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
     private static LiveAgentWorkspaceClient CreateClient(IEngineClient engine, int processId) =>
         new(
             new StubUpdateService(),

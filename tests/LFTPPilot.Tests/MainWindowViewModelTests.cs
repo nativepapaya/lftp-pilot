@@ -638,6 +638,82 @@ public sealed class MainWindowViewModelTests
         Assert.Empty(viewModel.Activity.Log);
     }
 
+    [Fact]
+    public async Task RemotePaneExplorerExportPollsToCompletionAndReleasesManagedFiles()
+    {
+        var profile = Profile();
+        var seed = Seed(profile, includeRemoteFile: true);
+        var exportId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var queuedJob = new JobSnapshot(exportId, JobKind.Transfer, profile.Id,
+            "Explorer export", JobState.Queued, now, now);
+        var completedJob = queuedJob with
+        {
+            State = JobState.Completed,
+            Progress = 1,
+            Status = "Managed local copies are ready for Explorer.",
+            UpdatedAt = now.AddSeconds(1),
+        };
+        var agent = new RecordingSessionAgent(profile, [seed])
+        {
+            ExplorerStartReply = new(exportId, seed.Snapshot.SessionId, queuedJob, [], now.AddMinutes(30)),
+        };
+        agent.ExplorerGetReplies.Enqueue(new(
+            exportId,
+            seed.Snapshot.SessionId,
+            completedJob,
+            [Path.GetFullPath("managed-export.bin")],
+            now.AddMinutes(30)));
+        var viewModel = CreateViewModelWithoutUiContext(agent);
+        await viewModel.InitializeAsync();
+        var pane = Assert.Single(viewModel.Sessions).RemotePane;
+
+        var result = await pane.PrepareExplorerExportAsync(
+            exportId,
+            [new("/remote/file.bin", TransferSourceKind.File)],
+            DateTimeOffset.UtcNow.AddSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(JobState.Completed, result.Job.State);
+        Assert.Equal(exportId, Assert.Single(agent.ExplorerStartRequests).ExportId);
+        Assert.Equal(1, agent.ExplorerGetCalls);
+        Assert.True(await pane.ReleaseExplorerExportAsync(exportId, TestContext.Current.CancellationToken));
+        Assert.Equal(exportId, Assert.Single(agent.ReleasedExplorerExports));
+    }
+
+    [Fact]
+    public async Task RemotePaneExplorerExportReconcilesAnUnknownStartByStableIdentifier()
+    {
+        var profile = Profile();
+        var seed = Seed(profile, includeRemoteFile: true);
+        var exportId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var completed = new JobSnapshot(exportId, JobKind.Transfer, profile.Id,
+            "Explorer export", JobState.Completed, now, now, Progress: 1);
+        var agent = new RecordingSessionAgent(profile, [seed])
+        {
+            ExplorerStartOutcomeUnknown = true,
+        };
+        agent.ExplorerGetReplies.Enqueue(new(
+            exportId,
+            seed.Snapshot.SessionId,
+            completed,
+            [Path.GetFullPath("managed-export.bin")],
+            now.AddMinutes(30)));
+        var viewModel = CreateViewModelWithoutUiContext(agent);
+        await viewModel.InitializeAsync();
+
+        var result = await Assert.Single(viewModel.Sessions).RemotePane.PrepareExplorerExportAsync(
+            exportId,
+            [new("/remote/file.bin", TransferSourceKind.File)],
+            DateTimeOffset.UtcNow.AddSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(JobState.Completed, result.Job.State);
+        Assert.Equal(1, agent.ExplorerGetCalls);
+        Assert.Single(agent.ExplorerStartRequests);
+    }
+
     private static ConnectionProfile Profile() => new(
         Guid.NewGuid(), "FTP test", ConnectionProtocol.Ftp, "example.test", 21, "alice", AuthenticationKind.Password);
 
@@ -729,6 +805,12 @@ public sealed class MainWindowViewModelTests
         public List<Guid> DisconnectedSessionIds { get; } = [];
         public List<RemoteEditSession> RemoteEdits { get; } = [];
         public List<ConnectionProfile> AdditionalProfiles { get; } = [];
+        public List<ExplorerExportStartRequest> ExplorerStartRequests { get; } = [];
+        public Queue<ExplorerExportSnapshot> ExplorerGetReplies { get; } = [];
+        public List<Guid> ReleasedExplorerExports { get; } = [];
+        public ExplorerExportSnapshot? ExplorerStartReply { get; init; }
+        public bool ExplorerStartOutcomeUnknown { get; init; }
+        public int ExplorerGetCalls { get; private set; }
         public RemoteEditSession? ResolveMutation { get; set; }
         public bool ProfileDeleted => _profileDeleted;
         public bool IsConnected => true;
@@ -901,6 +983,34 @@ public sealed class MainWindowViewModelTests
             return Task.FromException<RemoteEditActionResult>(new IOException("upload committed before reply serialization failed"));
         }
         public Task<bool> CompleteRemoteEditAsync(string editId, CancellationToken cancellationToken = default) => Unsupported<bool>();
+        public Task<ExplorerExportSnapshot> StartExplorerExportAsync(
+            ExplorerExportStartRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ExplorerStartRequests.Add(request);
+            if (ExplorerStartOutcomeUnknown)
+                return Task.FromException<ExplorerExportSnapshot>(new AgentRequestOutcomeUnknownException(
+                    WorkspaceMethods.ExplorerExportStart,
+                    new IOException("Explorer export reply was lost.")));
+            return ExplorerStartReply is { } reply
+                ? Task.FromResult(reply)
+                : Unsupported<ExplorerExportSnapshot>();
+        }
+        public Task<ExplorerExportSnapshot> GetExplorerExportAsync(Guid exportId, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ExplorerGetCalls++;
+            if (!ExplorerGetReplies.TryDequeue(out var reply)) return Unsupported<ExplorerExportSnapshot>();
+            Assert.Equal(exportId, reply.ExportId);
+            return Task.FromResult(reply);
+        }
+        public Task<bool> ReleaseExplorerExportAsync(Guid exportId, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ReleasedExplorerExports.Add(exportId);
+            return Task.FromResult(true);
+        }
         public Task StopAgentAsync(CancellationToken cancellationToken = default) => Unsupported<object?>();
         public Task<AppUpdateStatus> CheckForUpdatesAsync(CancellationToken cancellationToken = default) => Unsupported<AppUpdateStatus>();
         public Task OpenUpdateInstallerAsync(CancellationToken cancellationToken = default) => Unsupported<object?>();

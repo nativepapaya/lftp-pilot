@@ -28,6 +28,8 @@ internal sealed class AgentRequestOutcomeUnknownException : IOException
             WorkspaceMethods.MirrorDefinitionDelete => "The saved mirror definition may have been removed",
             WorkspaceMethods.RemoteSearchStart => "The idempotent remote search may have started",
             WorkspaceMethods.RemoteSearchCancel => "The remote search may have been cancelled",
+            WorkspaceMethods.ExplorerExportStart => "The idempotent Explorer export may have started",
+            WorkspaceMethods.ExplorerExportRelease => "The Explorer export may have been released",
             _ => "The operation may have completed",
         };
         return $"The {method} request may have reached the Agent, but a complete and valid result was not available. {outcome}; the outcome is unknown. Workspace state is being refreshed.";
@@ -491,6 +493,32 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
             semantics: RequestSemantics.Mutation).ConfigureAwait(false);
     }
 
+    public async Task<ExplorerExportSnapshot> StartExplorerExportAsync(
+        ExplorerExportStartRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ExplorerExportPolicy.ValidateStart(request);
+        return await RequestAsync<ExplorerExportSnapshot>(WorkspaceMethods.ExplorerExportStart,
+            request, cancellationToken, retryOnDisconnect: false, semantics: RequestSemantics.Mutation,
+            responseValidator: snapshot => ValidateExplorerExport(snapshot, request.ExportId, request.SessionId)).ConfigureAwait(false);
+    }
+
+    public async Task<ExplorerExportSnapshot> GetExplorerExportAsync(Guid exportId, CancellationToken cancellationToken = default)
+    {
+        if (exportId == Guid.Empty) throw new ArgumentException("An Explorer export identifier is required.", nameof(exportId));
+        return await RequestAsync<ExplorerExportSnapshot>(WorkspaceMethods.ExplorerExportGet,
+            new ExplorerExportGetRequest(exportId), cancellationToken, retryOnDisconnect: true,
+            responseValidator: snapshot => ValidateExplorerExport(snapshot, exportId, expectedSessionId: null)).ConfigureAwait(false);
+    }
+
+    public async Task<bool> ReleaseExplorerExportAsync(Guid exportId, CancellationToken cancellationToken = default)
+    {
+        if (exportId == Guid.Empty) throw new ArgumentException("An Explorer export identifier is required.", nameof(exportId));
+        return await RequestAsync<bool>(WorkspaceMethods.ExplorerExportRelease,
+            new ExplorerExportReleaseRequest(exportId), cancellationToken, retryOnDisconnect: false,
+            semantics: RequestSemantics.Mutation).ConfigureAwait(false);
+    }
+
     public async Task StopAgentAsync(CancellationToken cancellationToken = default)
     {
         if (!_connected) return;
@@ -586,6 +614,34 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
             {
                 throw new InvalidDataException("The Agent returned a remote-search match that did not match its canonical path or query.");
             }
+        }
+    }
+
+    private static void ValidateExplorerExport(ExplorerExportSnapshot snapshot, Guid exportId, Guid? expectedSessionId)
+    {
+        try { ExplorerExportPolicy.ValidateSnapshot(snapshot); }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException("The Agent returned an invalid Explorer export snapshot.", exception);
+        }
+        if (snapshot.ExportId != exportId || expectedSessionId is { } sessionId && snapshot.SessionId != sessionId)
+            throw new InvalidDataException("The Agent returned an Explorer export for a different request.");
+        foreach (var path in snapshot.LocalPaths)
+            ValidateExplorerExportPath(path, exportId);
+    }
+
+    private static void ValidateExplorerExportPath(string path, Guid exportId)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidDataException("The Agent returned an invalid Explorer export path.");
+        var root = Path.GetFullPath(PackageDataPaths.CreateDefault().ExplorerExports);
+        var expectedDirectory = Path.Combine(root, exportId.ToString("N"));
+        var fullPath = Path.GetFullPath(path);
+        if (!string.Equals(Path.GetDirectoryName(fullPath), expectedDirectory, StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(fullPath) ||
+            (File.GetAttributes(fullPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+        {
+            throw new InvalidDataException("The Agent did not return a regular file from the expected package-scoped Explorer export cache.");
         }
     }
 
