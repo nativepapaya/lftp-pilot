@@ -219,6 +219,11 @@ if ($releaseToolsScript.Contains('2>&1') -or -not $releaseToolsScript.Contains('
 }
 $signScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Sign-Release.ps1') -Raw
 $publishScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Publish-Release.ps1') -Raw
+$certificateInitializationScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Initialize-DevCertificate.ps1') -Raw
+if (-not $certificateInitializationScript.Contains('Cert:\LocalMachine\TrustedPeople') -or
+    $certificateInitializationScript.Contains('Cert:\CurrentUser\TrustedPeople')) {
+    throw 'Trusted-test certificates must use the local-machine TrustedPeople store required by App Installer.'
+}
 foreach ($productionScript in @($signScript,$publishScript)) {
     if ($productionScript -match 'AllowSyntheticFixture|LFTP_PILOT_SYNTHETIC_PROVENANCE_TEST') {
         throw 'Production signing/publication exposes the synthetic provenance bypass.'

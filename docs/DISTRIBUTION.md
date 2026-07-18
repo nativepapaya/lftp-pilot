@@ -35,14 +35,19 @@ diagnostic bypass that works only with a small specially named fixture under the
 operating-system temp directory and an exact test-only environment marker; it
 cannot validate a production filename.
 
-Signing may add exactly one non-empty `AppxSignature.p7x` ZIP entry. Every other
+Signing may add exactly two non-empty canonical ZIP entries,
+`AppxSignature.p7x` and `AppxMetadata/CodeIntegrity.cat`. SignTool may rewrite
+`[Content_Types].xml`, but its structured records must remain identical except
+for the exact reviewed overrides for those two signing entries. Every other
 decoded entry name, length, and SHA-256 must remain byte-for-byte identical to
 the verified unsigned MSIX; additions, removals, case changes, substitutions,
-and duplicate logical paths fail. The release includes
+and duplicate logical paths fail. [Microsoft documents](https://learn.microsoft.com/en-us/windows/win32/appxpkg/troubleshooting)
+that a package containing `AppxMetadata/CodeIntegrity.cat` must also contain
+`AppxSignature.p7x`. The release includes
 `LFTPPilot.provenance.json`, binding the full unsigned file SHA-256 and size,
 GitHub verification result, source digest and workflow policy, signed file
 SHA-256 and size, signature-entry SHA-256, payload-entry count, and release
-certificate SHA-256.
+certificate SHA-256. It also binds the code-integrity catalog SHA-256.
 
 The reviewed `1.0` product prefix is combined with the repository-wide workflow
 run number using base 65536 (`1.0.<build>.<revision>`). Every MSIX part remains
@@ -61,12 +66,15 @@ Agent continue until idle; Windows can apply a staged package after they exit.
 
 ## Local trusted-tester setup
 
-1. Run `build/Initialize-DevCertificate.ps1` once and retain its thumbprint.
+1. Run `build/Initialize-DevCertificate.ps1` once from an elevated PowerShell and retain its thumbprint.
    The 3072-bit RSACng private key is non-exportable, and the public certificate is placed in
-   the publisher's CurrentUser TrustedPeople store so both verification tools
-   can validate candidates. Back up the machine appropriately because losing
+   the local machine's TrustedPeople store so SignTool, App Installer, and
+   package deployment can validate candidates. Back up the machine appropriately because losing
    the key ends this update identity.
-2. Trust only the exported public `LFTPPilot.cer` on tester machines.
+2. Trust only the exported public `LFTPPilot.cer` in each tester machine's
+   LocalMachine TrustedPeople store. Microsoft notes that App Installer does not
+   use the current-user certificate store for this trust decision in its
+   [trusted-certificate guidance](https://learn.microsoft.com/en-us/windows/msix/app-installer/troubleshoot-appinstaller-issues#trusted-certificates).
 3. Enable GitHub immutable releases for `nativepapaya/lftp-pilot`. Publication
    queries the immutable-release API and fails unless it reports enabled.
 4. Sign the exact attested unsigned candidate with `build/Sign-Release.ps1` from

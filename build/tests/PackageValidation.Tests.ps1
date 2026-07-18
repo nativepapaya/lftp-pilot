@@ -20,7 +20,8 @@ function Assert-Throws([scriptblock]$Action, [string]$Label) {
     try { & $Action; throw "$Label did not throw." } catch { if ($_.Exception.Message -eq "$Label did not throw.") { throw } }
 }
 
-function New-SignedFixture([string]$Unsigned, [string]$Signed, [string]$MutateEntry, [string]$RemoveEntry, [string]$ExtraEntry) {
+function New-SignedFixture([string]$Unsigned, [string]$Signed, [string]$MutateEntry, [string]$RemoveEntry,
+    [string]$ExtraEntry, [switch]$MutateContentTypes, [switch]$OmitCodeIntegrity) {
     $source = [IO.Compression.ZipFile]::OpenRead($Unsigned)
     $target = [IO.Compression.ZipFile]::Open($Signed, [IO.Compression.ZipArchiveMode]::Create)
     try {
@@ -30,9 +31,18 @@ function New-SignedFixture([string]$Unsigned, [string]$Signed, [string]$MutateEn
             try { $input.CopyTo($memory); $bytes = $memory.ToArray() }
             finally { $memory.Dispose(); $input.Dispose() }
             if ($entry.FullName -ceq $MutateEntry) { $bytes = [byte[]](9,8,7,6) }
+            if ($entry.FullName -ceq '[Content_Types].xml') {
+                $records = '<Override PartName="/AppxSignature.p7x" ContentType="application/vnd.ms-appx.signature"/><Override PartName="/AppxMetadata/CodeIntegrity.cat" ContentType="application/vnd.ms-pkiseccat"/>'
+                if ($MutateContentTypes) {
+                    $records += '<Override PartName="/unexpected-root.dll" ContentType="application/x-msdownload"/>'
+                }
+                $contentTypes = [Text.Encoding]::UTF8.GetString($bytes).Replace('</Types>', "$records</Types>")
+                $bytes = [Text.Encoding]::UTF8.GetBytes($contentTypes)
+            }
             Add-ZipBytes $target $entry.FullName $bytes
         }
         Add-ZipBytes $target 'AppxSignature.p7x' ([byte[]](5,4,3,2,1))
+        if (-not $OmitCodeIntegrity) { Add-ZipBytes $target 'AppxMetadata/CodeIntegrity.cat' ([byte[]](6,7,8,9)) }
         if ($ExtraEntry) { Add-ZipBytes $target $ExtraEntry ([byte[]](1)) }
     }
     finally { $target.Dispose(); $source.Dispose() }
@@ -74,6 +84,8 @@ function New-Fixture([string]$Root, [string]$Name, [switch]$MutateRuntime, [swit
     $msix = Join-Path $directory 'fixture.msix'
     $archive = [IO.Compression.ZipFile]::Open($msix, [IO.Compression.ZipArchiveMode]::Create)
     try {
+        $contentTypes = '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/vnd.ms-appx.manifest+xml"/><Override PartName="/AppxBlockMap.xml" ContentType="application/vnd.ms-appx.blockmap+xml"/></Types>'
+        Add-ZipBytes $archive '[Content_Types].xml' ([Text.Encoding]::UTF8.GetBytes($contentTypes))
         Add-ZipBytes $archive 'AppxManifest.xml' ([Text.Encoding]::UTF8.GetBytes($manifest))
         foreach ($required in @('LFTPPilot.exe','agent/LFTPPilot.Agent.exe','agent/LFTPPilot.Engine.dll')) {
             Add-ZipBytes $archive $required ([byte[]](1,2,3))
@@ -107,7 +119,8 @@ try {
     $signed = Join-Path $root 'signed.msix'
     New-SignedFixture $good.Msix $signed
     $comparison = Compare-LftpPilotSignedPayload -UnsignedMsix $good.Msix -SignedMsix $signed
-    if ($comparison.PayloadEntryCount -lt 1 -or $comparison.UnsignedSha256 -notmatch '^[a-f0-9]{64}$') {
+    if ($comparison.PayloadEntryCount -lt 1 -or $comparison.UnsignedSha256 -notmatch '^[a-f0-9]{64}$' -or
+        $comparison.CodeIntegritySha256 -notmatch '^[a-f0-9]{64}$') {
         throw 'Signed/unsigned comparison did not return complete package binding evidence.'
     }
     foreach ($payload in @('LFTPPilot.exe','agent/LFTPPilot.Agent.exe','agent/LFTPPilot.Engine.dll')) {
@@ -121,6 +134,12 @@ try {
     $removedSigned = Join-Path $root 'signed-removed.msix'
     New-SignedFixture $good.Msix $removedSigned $null 'agent/LFTPPilot.Engine.dll'
     Assert-Throws { Compare-LftpPilotSignedPayload $good.Msix $removedSigned } 'Removed payload'
+    $contentTypesTamper = Join-Path $root 'signed-content-types-tamper.msix'
+    New-SignedFixture $good.Msix $contentTypesTamper -MutateContentTypes
+    Assert-Throws { Compare-LftpPilotSignedPayload $good.Msix $contentTypesTamper } 'Changed content types'
+    $missingCodeIntegrity = Join-Path $root 'signed-missing-code-integrity.msix'
+    New-SignedFixture $good.Msix $missingCodeIntegrity -OmitCodeIntegrity
+    Assert-Throws { Compare-LftpPilotSignedPayload $good.Msix $missingCodeIntegrity } 'Missing code integrity'
 }
 finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
 'Package attestation tamper tests passed.'
