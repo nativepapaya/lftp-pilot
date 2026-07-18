@@ -1,0 +1,13 @@
+# Test-only loopback server dependencies. Keep every direct and transitive
+# dependency pinned so a protocol-matrix run cannot silently change underneath us.
+bcrypt==5.0.0 --hash=sha256:64ee8434b0da054d830fa8e89e1c8bf30061d539044a39524ff7dec90481e5c2
+cffi==2.1.0 --hash=sha256:1b96bfe2c4bd825681b7d311ad6d9b7280a091f43e8f63da5729638083cd3bfb
+cryptography==46.0.7 --hash=sha256:397655da831414d165029da9bc483bed2fe0e75dde6a1523ec2fe63f3c46046b
+invoke==3.0.3 --hash=sha256:f11327165e5cbb89b2ad1d88d3292b5113332c43b8553b494da435d6ec6f5053
+paramiko==5.0.0 --hash=sha256:b7044611c30140d9a75261653210e2002977b71a0497ff3ba0d98d7edbf62f7c
+pyasynchat==1.0.5 --hash=sha256:35b7859515693e479e8d95ebe9f32cbf4d6312ab7599ced39fc24699e51de46f
+pyasyncore==1.0.5 --hash=sha256:269bbc5252671827387636822841a1fb721ec6e858b23a3e12cf92eb1f97da2a
+pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+pyftpdlib==2.2.0 --hash=sha256:4ba0642078792df63dd3b2e9c8f838f2a3ecf428c7518d5921c0530d53512acf
+PyNaCl==1.6.2 --hash=sha256:62985f233210dee6548c223301b6c25440852e13d59a8b81490203c3227c5ba0
+pyOpenSSL==26.0.0 --hash=sha256:df94d28498848b98cc1c0ffb8ef1e71e40210d3b0a8064c9d29571ed2904bf81

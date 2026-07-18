@@ -9,6 +9,13 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- A disposable, repository-contained controlled protocol lab now runs the real
+  Agent, Engine, and packaged LFTP runtime against loopback FTP, opportunistic
+  FTP TLS, FTPES, implicit FTPS, and SFTP servers. It verifies password
+  authentication, strict trust, Unicode browse/mutation, uploads, segmented
+  downloads, moves, deletion, and cleanup without installing system services
+  or changing the user's certificate store. Test-only Python dependencies are
+  exact-version and distribution-hash pinned.
 - The background Agent now owns a native Windows notification-area surface.
   Double-clicking it or choosing Open restores the transfer view through the
   allowlisted activation route, while the explicitly labeled stop command
@@ -77,6 +84,10 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   and transfer rate from bounded LFTP `jobs -vv` status. Status observations
   are matched only to one exact pending source and transfer mode; ambiguous or
   malformed output is ignored without affecting queue completion or safety.
+- Fresh SFTP path checks now recognize LFTP's exact path-bound
+  `Access failed: No such file (/path)` diagnostic. Unbound, mismatched, or
+  multi-path diagnostics still fail closed, while legitimate creation of a new
+  SFTP directory or transfer target no longer reports ambiguous server output.
 - Per-session non-modal recursive remote name search with depth and case
   controls, literal Unicode basename matching, cancellable isolated LFTP
   processes, bounded snapshot paging, and fresh navigation from results.
