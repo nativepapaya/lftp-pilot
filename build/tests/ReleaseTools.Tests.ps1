@@ -237,6 +237,11 @@ if (-not $publishScript.Contains('Test-ImmutableReleases.ps1') -or -not $publish
     $publishScript -match "Join-Path \(Split-Path \`$PSScriptRoot -Parent\) 'tests'") {
     throw 'Publication does not enforce immutable releases, mandatory attested input, or production-only dependency scope.'
 }
+if (-not $publishScript.Contains('$publicationWhatIf = [bool]$WhatIfPreference') -or
+    -not $publishScript.Contains('$WhatIfPreference = $false') -or
+    -not $publishScript.Contains('$WhatIfPreference = $publicationWhatIf')) {
+    throw 'Publication -WhatIf must stage reviewable local assets while suppressing only the final GitHub release mutation.'
+}
 $tagScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Test-ReleaseTag.ps1') -Raw
 if ($tagScript -notmatch 'repos/nativepapaya/lftp-pilot/git/ref/tags/\$Tag' -or
     $tagScript -notmatch 'SourceDigest\.ToLowerInvariant') {

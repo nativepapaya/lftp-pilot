@@ -12,6 +12,10 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$publicationWhatIf = [bool]$WhatIfPreference
+# -WhatIf reviews the final external publication, not the reversible local
+# staging work that must exist for the publisher to inspect.
+$WhatIfPreference = $false
 Import-Module (Join-Path $PSScriptRoot 'ReleaseTools.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'PackageValidation.psm1') -Force
 [void](Assert-ReleaseRepository $Repository)
@@ -79,6 +83,7 @@ $licenseArchive = Join-Path $StagingDirectory 'THIRD-PARTY-LICENSES.zip'
 $assets += $licenseArchive
 & (Join-Path $PSScriptRoot 'New-Checksums.ps1') -LiteralPath $assets -OutputPath (Join-Path $StagingDirectory 'SHA256SUMS.txt') | Out-Null
 $assets += Join-Path $StagingDirectory 'SHA256SUMS.txt'
+$WhatIfPreference = $publicationWhatIf
 if ($PSCmdlet.ShouldProcess("$Repository $tag", 'Create immutable-intent public GitHub release')) {
     $sourceDigest = [string]$provenance.sourceDigest
     & gh release create $tag @assets --repo $Repository --target $sourceDigest --title "LFTP Pilot $validatedVersion" --generate-notes --verify-tag
