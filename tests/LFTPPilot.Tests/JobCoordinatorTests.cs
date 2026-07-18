@@ -32,6 +32,26 @@ public sealed class JobCoordinatorTests
     }
 
     [Fact]
+    public void RunningProgressIsMonotonicBoundedAndPublished()
+    {
+        var coordinator = new JobCoordinator();
+        var job = coordinator.Enqueue(Job(JobState.Queued));
+        coordinator.Transition(job.Id, JobState.Running);
+        JobSnapshot? observed = null;
+        coordinator.JobChanged += (_, changed) => observed = changed;
+
+        Assert.True(coordinator.TryReportProgress(job.Id, 0.25, "Validated one phase."));
+        Assert.False(coordinator.TryReportProgress(job.Id, 0.2, "Stale phase."));
+        Assert.False(coordinator.TryReportProgress(job.Id, 0.25, "Validated one phase."));
+        Assert.Equal(0.25, observed?.Progress);
+        Assert.Equal("Validated one phase.", observed?.Status);
+        Assert.Throws<ArgumentOutOfRangeException>(() => coordinator.TryReportProgress(job.Id, 1, "Not terminal."));
+
+        coordinator.Transition(job.Id, JobState.Completed);
+        Assert.False(coordinator.TryReportProgress(job.Id, 0.5, "Too late."));
+    }
+
+    [Fact]
     public void InvalidTransitionAndFailureWithoutErrorAreRejected()
     {
         var coordinator = new JobCoordinator();

@@ -255,7 +255,7 @@ public static class LftpCommandBuilder
     {
         EnsureRemoteAbsolute(remotePath, nameof(remotePath));
         EnsureFullyQualifiedLocalPath(managedLocalPath, nameof(managedLocalPath));
-        return $"get {Quote(DashSafe(remotePath))} -o {Quote(ToMsysPath(managedLocalPath))}";
+        return $"set xfer:use-temp-file no; get {Quote(DashSafe(remotePath))} -o {Quote(ToMsysPath(managedLocalPath))}; set xfer:use-temp-file yes";
     }
 
     public static string BuildRemoteRelayUpload(string managedLocalPath, string remotePath, bool overwrite)

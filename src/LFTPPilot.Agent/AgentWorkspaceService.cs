@@ -1459,7 +1459,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             TrackJob(
                 job.Id,
-                token => RunRemoteTransferAsync(source, destination, request.Plan, job.Id, routingNote, token),
+                token => RunRemoteTransferAsync(source, destination, request.Plan, sourceEntry.Size, job.Id, routingNote, token),
                 destination.Profile.Id);
         }
         catch (Exception exception) when (!IsFatalRuntimeException(exception))
@@ -1595,6 +1595,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             if (plan.SourceKind == TransferSourceKind.Directory)
             {
                 _jobs.Transition(jobId, JobState.Running, "Waiting for the guarded foreground directory transfer session.");
+                _jobs.TryReportProgress(jobId, 0.02, "Waiting for the guarded foreground directory transfer session.");
                 await RunGuardedDirectoryTransferAsync(session, plan, jobId, cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
                 _jobs.Transition(jobId, JobState.Completed, "Completed through the guarded foreground directory transfer session.");
@@ -1696,6 +1697,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         WorkspaceSession source,
         WorkspaceSession destination,
         RemoteTransferPlan plan,
+        long? sourceSize,
         Guid jobId,
         string routingNote,
         CancellationToken cancellationToken)
@@ -1703,6 +1705,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         try
         {
             _jobs.Transition(jobId, JobState.Running, routingNote);
+            _jobs.TryReportProgress(jobId, 0.03, "Revalidating the reviewed remote-transfer route.");
             if (plan.Mode == RemoteTransferMode.ClientRelay)
             {
                 await RunClientRelayAsync(source, destination, plan, jobId, cancellationToken).ConfigureAwait(false);
@@ -1711,11 +1714,13 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             {
                 await _sessions.WithRemoteTransferAsync(source, destination, jobId, async process =>
                 {
+                    _jobs.TryReportProgress(jobId, 0.15, $"Running the reviewed FXP route for {FormatProgressBytes(sourceSize)}.");
                     var result = await process.ExecuteAsync(
                         LftpCommandBuilder.BuildRemoteTransfer(plan),
                         _options.TransferTimeout,
                         cancellationToken).ConfigureAwait(false);
                     SessionRegistry.ThrowIfFailed(result, "Remote-to-remote transfer");
+                    _jobs.TryReportProgress(jobId, 0.98, "The FXP operation completed; finalizing job state.");
                     return true;
                 }, cancellationToken).ConfigureAwait(false);
             }
@@ -1757,16 +1762,25 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                     var sourceEntry = await TryStatRemoteAsync(process, plan.SourcePath, cancellationToken).ConfigureAwait(false)
                         ?? throw new FileNotFoundException("The client-relay source disappeared before download.");
                     RequireRemoteTransferKind(sourceEntry, TransferSourceKind.File, "client-relay source");
-                    var result = await process.ExecuteAsync(
+                    _jobs.TryReportProgress(jobId, 0.1, $"Downloading {FormatProgressBytes(sourceEntry.Size)} through the managed relay.");
+                    var download = process.ExecuteAsync(
                         LftpCommandBuilder.BuildRemoteRelayDownload(plan.SourcePath, relayPath),
                         _options.TransferTimeout,
+                        cancellationToken);
+                    var result = await ObserveRelayDownloadAsync(
+                        download,
+                        relayPath,
+                        sourceEntry.Size,
+                        jobId,
                         cancellationToken).ConfigureAwait(false);
                     SessionRegistry.ThrowIfFailed(result, "Client-relay source download");
+                    _jobs.TryReportProgress(jobId, 0.5, "Managed relay download completed; validating the payload.");
                     return sourceEntry.Size;
                 },
                 cancellationToken).ConfigureAwait(false);
 
             ValidateRemoteRelayPayload(relayPath, sourceSize);
+            _jobs.TryReportProgress(jobId, 0.55, "Managed relay payload validated; revalidating the destination.");
             cancellationToken.ThrowIfCancellationRequested();
 
             await destination.WithEphemeralSessionAsync(
@@ -1788,11 +1802,13 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                     if (destinationEntry is not null)
                         RequireRemoteTransferKind(destinationEntry, TransferSourceKind.File, "client-relay destination");
 
+                    _jobs.TryReportProgress(jobId, 0.65, $"Uploading {FormatProgressBytes(sourceSize)} from the managed relay.");
                     var result = await process.ExecuteAsync(
                         LftpCommandBuilder.BuildRemoteRelayUpload(relayPath, plan.DestinationPath, plan.Overwrite),
                         _options.TransferTimeout,
                         cancellationToken).ConfigureAwait(false);
                     SessionRegistry.ThrowIfFailed(result, "Client-relay destination upload");
+                    _jobs.TryReportProgress(jobId, 0.95, "Managed relay upload completed; removing temporary data.");
                     return true;
                 },
                 cancellationToken).ConfigureAwait(false);
@@ -1816,6 +1832,50 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
         if (operationFailure is not null)
             ExceptionDispatchInfo.Capture(operationFailure).Throw();
+        _jobs.TryReportProgress(jobId, 0.98, "Managed relay temporary data removed; finalizing job state.");
+    }
+
+    private async Task<LftpCommandResult> ObserveRelayDownloadAsync(
+        Task<LftpCommandResult> download,
+        string relayPath,
+        long? totalBytes,
+        Guid jobId,
+        CancellationToken cancellationToken)
+    {
+        if (totalBytes is not > 0) return await download.ConfigureAwait(false);
+        var total = totalBytes.Value;
+        var lastBucket = -1;
+        while (!download.IsCompleted)
+        {
+            await Task.WhenAny(download, Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken)).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (download.IsCompleted) break;
+            long transferred;
+            try { transferred = File.Exists(relayPath) ? new FileInfo(relayPath).Length : 0; }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { continue; }
+            var fraction = Math.Clamp((double)transferred / total, 0, 1);
+            var bucket = (int)Math.Floor(fraction * 20);
+            if (bucket <= lastBucket) continue;
+            lastBucket = bucket;
+            _jobs.TryReportProgress(
+                jobId,
+                0.1 + 0.4 * fraction,
+                $"Downloaded {FormatProgressBytes(Math.Min(transferred, total))} of {FormatProgressBytes(total)} through the managed relay.");
+        }
+        return await download.ConfigureAwait(false);
+    }
+
+    private static string FormatProgressBytes(long? bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB", "PB"];
+        double value = Math.Max(0, bytes ?? 0);
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+        return $"{value:0.#} {units[unit]}";
     }
 
     private static Exception SanitizeRemoteRelayFailure(Exception exception, string relayDirectory)
@@ -1923,6 +1983,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             await session.WithTransferSessionAsync(async transfer =>
             {
                 _jobs.Transition(jobId, JobState.Running, "Revalidating reviewed mirror actions");
+                _jobs.TryReportProgress(jobId, 0.03, "Revalidating reviewed mirror actions.");
                 ValidateMirrorLocalRoot(definition);
                 await ValidateMirrorRemoteRootAsync(transfer, definition, cancellationToken).ConfigureAwait(false);
                 var verificationResult = await transfer.ExecuteAsync(
@@ -1933,10 +1994,28 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 var verification = _mirrorPlanner.CreatePreview(definition, verificationResult.Lines.Select(static line => line.Line));
                 if (!verification.Actions.SequenceEqual(reviewedPreview.Actions))
                     throw new InvalidOperationException("The mirror actions changed after review. Generate and approve a new preview.");
+                _jobs.TryReportProgress(jobId, 0.15, $"Revalidated {reviewedPreview.Actions.Length:N0} reviewed mirror actions.");
                 ValidateMirrorLocalRoot(definition);
                 await ValidateMirrorRemoteRootAsync(transfer, definition, cancellationToken).ConfigureAwait(false);
 
-                var executionResult = await transfer.ExecuteAsync(executionCommand, _options.TransferTimeout, cancellationToken).ConfigureAwait(false);
+                _jobs.TryReportProgress(jobId, 0.2, "Running the approved mirror job.");
+                var progress = new MirrorJobProgressTracker(
+                    _mirrorPlanner,
+                    definition,
+                    reviewedPreview.Actions,
+                    0.2,
+                    0.78,
+                    (value, status) => _jobs.TryReportProgress(jobId, value, status));
+                transfer.OutputReceived += progress.Observe;
+                LftpCommandResult executionResult;
+                try
+                {
+                    executionResult = await transfer.ExecuteAsync(executionCommand, _options.TransferTimeout, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    transfer.OutputReceived -= progress.Observe;
+                }
                 SessionRegistry.ThrowIfFailed(executionResult, "LFTP mirror job");
                 return true;
             }, cancellationToken).ConfigureAwait(false);
@@ -2406,20 +2485,12 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task ValidateDirectoryTransferPreviewAsync(
+    private async Task<MirrorPreview> ValidateDirectoryTransferPreviewAsync(
         ILftpSession process,
         TransferPlan plan,
         CancellationToken cancellationToken)
     {
-        var definition = new MirrorDefinition(
-            plan.Id,
-            plan.ProfileId,
-            "Automatic directory transfer safety preflight",
-            plan.Direction == TransferDirection.Download ? MirrorDirection.Download : MirrorDirection.Upload,
-            plan.Direction == TransferDirection.Download ? plan.DestinationPath : plan.SourcePath,
-            plan.Direction == TransferDirection.Download ? plan.SourcePath : plan.DestinationPath,
-            ParallelFiles: 1,
-            SegmentsPerFile: plan.Segments);
+        var definition = DirectoryTransferMirrorDefinition(plan);
         var result = await process.ExecuteAsync(
             LftpCommandBuilder.BuildDirectoryTransferPreview(plan),
             _options.MirrorPreviewTimeout,
@@ -2439,6 +2510,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         if (preview.ContainsDeletions)
             throw new InvalidOperationException(
                 "The directory transfer dry-run proposed deletion or type-collision replacement. Use the reviewed Mirror workflow instead.");
+        return preview;
     }
 
     private async Task RunGuardedDirectoryTransferAsync(
@@ -2450,6 +2522,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         await session.WithTransferSessionAsync(async transfer =>
         {
             _jobs.Transition(jobId, JobState.Running, "Revalidating the directory transfer on its guarded LFTP session.");
+            _jobs.TryReportProgress(jobId, 0.05, "Revalidating the guarded directory endpoints.");
             await RevalidateTransferEndpointsAsync(transfer, plan, cancellationToken).ConfigureAwait(false);
             if (plan.Direction == TransferDirection.Download &&
                 Path.GetDirectoryName(plan.DestinationPath) is { Length: > 0 } destinationParent)
@@ -2457,17 +2530,44 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 Directory.CreateDirectory(destinationParent);
                 RequireLocalDestinationKind(plan.DestinationPath, plan.SourceKind);
             }
-            await ValidateDirectoryTransferPreviewAsync(transfer, plan, cancellationToken).ConfigureAwait(false);
+            _jobs.TryReportProgress(jobId, 0.1, "Generating a fresh non-destructive directory preview.");
+            var preview = await ValidateDirectoryTransferPreviewAsync(transfer, plan, cancellationToken).ConfigureAwait(false);
             await RevalidateTransferEndpointsAsync(transfer, plan, cancellationToken).ConfigureAwait(false);
-            _jobs.Transition(jobId, JobState.Running, "Running the guarded foreground directory transfer.");
-            var result = await transfer.ExecuteAsync(
-                LftpCommandBuilder.BuildTransfer(plan, background: false),
-                _options.TransferTimeout,
-                cancellationToken).ConfigureAwait(false);
+            _jobs.TryReportProgress(jobId, 0.2, $"Running {preview.Actions.Length:N0} reviewed directory actions.");
+            var progress = new MirrorJobProgressTracker(
+                _mirrorPlanner,
+                DirectoryTransferMirrorDefinition(plan),
+                preview.Actions,
+                0.2,
+                0.78,
+                (value, status) => _jobs.TryReportProgress(jobId, value, status));
+            transfer.OutputReceived += progress.Observe;
+            LftpCommandResult result;
+            try
+            {
+                result = await transfer.ExecuteAsync(
+                    LftpCommandBuilder.BuildTransfer(plan, background: false),
+                    _options.TransferTimeout,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                transfer.OutputReceived -= progress.Observe;
+            }
             SessionRegistry.ThrowIfFailed(result, "Guarded directory transfer");
             return true;
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    private static MirrorDefinition DirectoryTransferMirrorDefinition(TransferPlan plan) => new(
+        plan.Id,
+        plan.ProfileId,
+        "Automatic directory transfer safety preflight",
+        plan.Direction == TransferDirection.Download ? MirrorDirection.Download : MirrorDirection.Upload,
+        plan.Direction == TransferDirection.Download ? plan.DestinationPath : plan.SourcePath,
+        plan.Direction == TransferDirection.Download ? plan.SourcePath : plan.DestinationPath,
+        ParallelFiles: 1,
+        SegmentsPerFile: plan.Segments);
 
     private static void RequireLocalSourceKind(string path, TransferSourceKind expectedKind)
     {

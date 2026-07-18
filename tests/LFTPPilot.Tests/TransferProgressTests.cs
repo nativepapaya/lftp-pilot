@@ -54,6 +54,50 @@ public sealed class TransferProgressTests
     }
 
     [Fact]
+    public void MirrorProgressCountsOnlyRecognizedReviewedActionsAndNeverReplaysThem()
+    {
+        using var planner = new MirrorPlanner();
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), Guid.NewGuid(), "Progress", MirrorDirection.Download,
+            @"C:\Downloads", "/remote");
+        var reviewed = planner.CreatePreview(definition,
+        [
+            "Transferring file `one.txt'",
+            "Making directory `folder'",
+        ]);
+        var reports = new List<(double Progress, string Status)>();
+        var tracker = new MirrorJobProgressTracker(
+            planner, definition, reviewed.Actions, 0.2, 0.75,
+            (progress, status) => reports.Add((progress, status)));
+
+        tracker.Observe(null, new("stdout", "unrelated LFTP output"));
+        tracker.Observe(null, new("stdout", "Transferring file `not-reviewed.txt'"));
+        tracker.Observe(null, new("stdout", "Transferring file `one.txt'"));
+        tracker.Observe(null, new("stdout", "Transferring file `one.txt'"));
+        tracker.Observe(null, new("stdout", "Making directory `folder'"));
+
+        Assert.Equal(2, reports.Count);
+        Assert.Equal(0.575, reports[0].Progress, 3);
+        Assert.Equal(0.95, reports[1].Progress, 3);
+        Assert.Contains("2 of 2", reports[1].Status, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MirrorProgressObserverFailuresCannotAffectTransferOutputHandling()
+    {
+        using var planner = new MirrorPlanner();
+        var definition = new MirrorDefinition(
+            Guid.NewGuid(), Guid.NewGuid(), "Progress", MirrorDirection.Download,
+            @"C:\Downloads", "/remote");
+        var reviewed = planner.CreatePreview(definition, ["Transferring file `one.txt'"]);
+        var tracker = new MirrorJobProgressTracker(
+            planner, definition, reviewed.Actions, 0.2, 0.75,
+            static (_, _) => throw new IOException("simulated observer failure"));
+
+        tracker.Observe(null, new("stdout", "Transferring file `one.txt'"));
+    }
+
+    [Fact]
     public async Task NativeQueuePublishesMatchingProgressWithoutAffectingCompletion()
     {
         var cancellationToken = TestContext.Current.CancellationToken;

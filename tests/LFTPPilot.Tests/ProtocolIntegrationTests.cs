@@ -159,6 +159,11 @@ public sealed class ProtocolIntegrationTests
                 config.SftpHostKeyFingerprint),
                 TestContext.Current.CancellationToken);
             var jobs = new JobCoordinator();
+            var progressUpdates = new ConcurrentBag<JobSnapshot>();
+            jobs.JobChanged += (_, job) =>
+            {
+                if (job.Progress is > 0 and < 1) progressUpdates.Add(job);
+            };
             var options = AgentWorkspaceOptions.CreateDefault(Path.Combine(root, "agent")) with
             {
                 ConnectTimeout = TimeSpan.FromSeconds(20),
@@ -198,6 +203,10 @@ public sealed class ProtocolIntegrationTests
             var inboundJob = await service.EnqueueRemoteTransferAsync(
                 new(inbound), TestContext.Current.CancellationToken);
             await WaitForCompletedAsync(jobs, inboundJob.Job.Id, ConnectionProtocol.Sftp);
+            Assert.Contains(progressUpdates, job => job.Id == outboundJob.Job.Id && job.Progress == 0.65);
+            Assert.Contains(progressUpdates, job => job.Id == outboundJob.Job.Id && job.Progress == 0.98);
+            Assert.Contains(progressUpdates, job => job.Id == inboundJob.Job.Id && job.Progress == 0.65);
+            Assert.Contains(progressUpdates, job => job.Id == inboundJob.Job.Id && job.Progress == 0.98);
 
             var verificationPath = Path.Combine(root, "relay-verification.txt");
             var verification = await service.EnqueueTransferAsync(new(
