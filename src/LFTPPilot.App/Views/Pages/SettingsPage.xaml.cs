@@ -17,6 +17,11 @@ public sealed partial class SettingsPage : UserControl
         InitializeComponent();
     }
 
+    private async void SettingsPage_Loaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (DataContext is SettingsViewModel viewModel) await viewModel.RefreshAsync().ConfigureAwait(true);
+    }
+
     private async void SupportBundle_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         if (_ownerWindow == 0 || DataContext is not SettingsViewModel viewModel) return;

@@ -25,6 +25,7 @@
     <Compile Include="..\..\src\LFTPPilot.App\Infrastructure\RelayCommand.cs" Link="App\RelayCommand.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Models\UiModels.cs" Link="App\UiModels.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\AgentProcessManager.cs" Link="App\AgentProcessManager.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\Services\DemoAgentWorkspaceClient.cs" Link="App\DemoAgentWorkspaceClient.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\IAgentWorkspaceClient.cs" Link="App\IAgentWorkspaceClient.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\LiveAgentWorkspaceClient.cs" Link="App\LiveAgentWorkspaceClient.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\ProtocolActivationRouter.cs" Link="App\ProtocolActivationRouter.cs" />

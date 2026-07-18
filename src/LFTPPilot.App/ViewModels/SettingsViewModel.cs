@@ -12,7 +12,7 @@ namespace LFTPPilot.App.ViewModels;
 public sealed class SettingsViewModel : ObservableObject
 {
     private readonly IAgentWorkspaceClient _agent;
-    private string _installedVersion = "1.0.0.0";
+    private string _installedVersion = "Detecting…";
     private string _updateStatus = "Updates are checked quietly through Windows App Installer.";
     private bool _canOpenInstaller;
     private string _supportBundleStatus = "Create a sanitized ZIP when diagnostics are needed.";
@@ -20,7 +20,7 @@ public sealed class SettingsViewModel : ObservableObject
     public SettingsViewModel(IAgentWorkspaceClient agent)
     {
         _agent = agent;
-        CheckForUpdatesCommand = new AsyncRelayCommand(_ => CheckAsync(), null, ReportError);
+        CheckForUpdatesCommand = new AsyncRelayCommand(_ => RefreshAsync(), null, ReportError);
         OpenInstallerCommand = new AsyncRelayCommand(_ => OpenInstallerAsync(), _ => CanOpenInstaller, ReportError);
     }
 
@@ -30,6 +30,15 @@ public sealed class SettingsViewModel : ObservableObject
     public string UpdateStatus { get => _updateStatus; private set => SetProperty(ref _updateStatus, value); }
     public bool CanOpenInstaller { get => _canOpenInstaller; private set { if (SetProperty(ref _canOpenInstaller, value)) OpenInstallerCommand.NotifyCanExecuteChanged(); } }
     public string SupportBundleStatus { get => _supportBundleStatus; private set => SetProperty(ref _supportBundleStatus, value); }
+
+    public async Task RefreshAsync(CancellationToken cancellationToken = default)
+    {
+        try { await CheckAsync(cancellationToken).ConfigureAwait(true); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            ReportError(exception);
+        }
+    }
 
     public async Task CreateSupportBundleAsync(string destination, CancellationToken cancellationToken = default)
     {
@@ -47,7 +56,7 @@ public sealed class SettingsViewModel : ObservableObject
             var metadata = new Dictionary<string, object?>
             {
                 ["generatedAt"] = DateTimeOffset.UtcNow,
-                ["appVersion"] = typeof(SettingsViewModel).Assembly.GetName().Version?.ToString(),
+                ["appVersion"] = InstalledVersion,
                 ["os"] = Environment.OSVersion.VersionString,
                 ["framework"] = RuntimeInformation.FrameworkDescription,
                 ["packaged"] = paths.IsPackaged,
@@ -85,10 +94,10 @@ public sealed class SettingsViewModel : ObservableObject
         }
     }
 
-    private async Task CheckAsync()
+    private async Task CheckAsync(CancellationToken cancellationToken)
     {
         UpdateStatus = "Checking with Windows App Installer…";
-        var result = await _agent.CheckForUpdatesAsync().ConfigureAwait(true);
+        var result = await _agent.CheckForUpdatesAsync(cancellationToken).ConfigureAwait(true);
         InstalledVersion = result.InstalledVersion.ToString();
         UpdateStatus = result.Availability switch
         {
