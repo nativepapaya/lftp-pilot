@@ -18,6 +18,7 @@ public sealed partial class AgentHost : IAsyncDisposable
     private readonly DurableJobStore _store;
     private readonly RunOnceScheduler _scheduler;
     private readonly AgentWorkspaceService? _workspace;
+    private readonly JobHistoryRecorder? _history;
     private readonly AgentEventHub _events = new();
     private readonly Func<int, bool>? _clientAuthorizer;
     private readonly Func<Stream, ProtocolEnvelope, CancellationToken, ValueTask> _writeControlResponse =
@@ -41,7 +42,8 @@ public sealed partial class AgentHost : IAsyncDisposable
         IMirrorPlanner? mirrorPlanner = null,
         AgentWorkspaceOptions? workspaceOptions = null,
         Func<int, bool>? clientAuthorizer = null,
-        IMirrorDefinitionStore? mirrorDefinitionStore = null)
+        IMirrorDefinitionStore? mirrorDefinitionStore = null,
+        IHistoryStore? historyStore = null)
     {
         _coordinator = new();
         _store = new(statePath);
@@ -53,11 +55,17 @@ public sealed partial class AgentHost : IAsyncDisposable
             throw new ArgumentException("All workspace services must be supplied together.");
         if (profileStore is not null)
         {
+            var effectiveHistoryStore = historyStore ?? new InMemoryHistoryStore();
+            _history = new(
+                effectiveHistoryStore,
+                record => _events.Publish(EngineEventKind.Job, "history.appended", record, record.JobId),
+                PublishHistoryPersistenceFailure);
             _workspace = new(profileStore, secretStore!, hostKeyManager!, processHost!, runtimeProvider!, _coordinator, mirrorPlanner!, workspaceOptions!,
                 (kind, name, payload, jobId, sessionId) => _events.Publish(kind, name, payload, jobId, sessionId),
                 _scheduler,
                 _store,
-                mirrorDefinitionStore);
+                mirrorDefinitionStore,
+                effectiveHistoryStore);
         }
     }
 
@@ -80,6 +88,11 @@ public sealed partial class AgentHost : IAsyncDisposable
             var restoredJobs = NormalizeInterruptedJobs(state.Jobs);
             _coordinator.Restore(restoredJobs);
             await _scheduler.RestoreAsync(restoredJobs, cancellationToken).ConfigureAwait(false);
+            if (_history is not null)
+            {
+                foreach (var job in _coordinator.GetJobs()) _history.Observe(job);
+                await _history.FlushAsync().ConfigureAwait(false);
+            }
             // From this point onward the coordinator and scheduler have both
             // restored and durably committed their view of the job collection.
             // Disposal is now allowed to finalize that state.
@@ -118,6 +131,11 @@ public sealed partial class AgentHost : IAsyncDisposable
                 PublishPersistenceFailure(exception);
                 failures.Add(exception);
             }
+        }
+        if (_history is not null)
+        {
+            try { await _history.FlushAsync().ConfigureAwait(false); }
+            catch (Exception exception) when (!IsFatalRuntimeException(exception)) { failures.Add(exception); }
         }
         try { await _scheduler.DisposeAsync().ConfigureAwait(false); }
         catch (Exception exception) when (!IsFatalRuntimeException(exception)) { failures.Add(exception); }
@@ -294,6 +312,7 @@ public sealed partial class AgentHost : IAsyncDisposable
     private void OnJobChanged(object? sender, JobSnapshot job)
     {
         _events.Publish(EngineEventKind.Job, "job.changed", job, job.Id);
+        _history?.Observe(job);
         if (Volatile.Read(ref _jobStateOwned)) _ = PersistJobsAsync();
     }
 
@@ -315,6 +334,17 @@ public sealed partial class AgentHost : IAsyncDisposable
             new EngineError(
                 "job-persistence-failed",
                 "The durable job state could not be saved.",
+                Detail: exception.GetType().Name));
+    }
+
+    private void PublishHistoryPersistenceFailure(Exception exception)
+    {
+        _events.Publish(
+            EngineEventKind.Error,
+            "history.persistence-failed",
+            new EngineError(
+                "history-persistence-failed",
+                "The durable Activity history could not be saved.",
                 Detail: exception.GetType().Name));
     }
 

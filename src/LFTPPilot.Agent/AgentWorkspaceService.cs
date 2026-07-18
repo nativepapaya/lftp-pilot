@@ -31,6 +31,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly ILftpRuntimeProvider _runtimeProvider;
     private readonly IMirrorPlanner _mirrorPlanner;
     private readonly IMirrorDefinitionStore _mirrorDefinitionStore;
+    private readonly IHistoryStore _historyStore;
     private readonly AgentWorkspaceOptions _options;
     private readonly Action<EngineEventKind, string, object?, Guid?, Guid?>? _publish;
     private readonly RunOnceScheduler? _scheduler;
@@ -70,7 +71,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         Action<EngineEventKind, string, object?, Guid?, Guid?>? publish = null,
         RunOnceScheduler? scheduler = null,
         DurableJobStore? stateStore = null,
-        IMirrorDefinitionStore? mirrorDefinitionStore = null)
+        IMirrorDefinitionStore? mirrorDefinitionStore = null,
+        IHistoryStore? historyStore = null)
     {
         _profileStore = profileStore;
         _secretStore = secretStore;
@@ -79,6 +81,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         _runtimeProvider = runtimeProvider;
         _mirrorPlanner = mirrorPlanner;
         _mirrorDefinitionStore = mirrorDefinitionStore ?? new InMemoryMirrorDefinitionStore();
+        _historyStore = historyStore ?? new InMemoryHistoryStore();
         _options = options;
         _publish = publish;
         _scheduler = scheduler;
@@ -179,6 +182,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 {
                     var profiles = (await _profileStore.GetAllAsync(cancellationToken).ConfigureAwait(false)).ToImmutableArray();
                     var mirrorDefinitions = await LoadMirrorDefinitionsAsync(profiles, cancellationToken).ConfigureAwait(false);
+                    var history = await LoadHistoryAsync(cancellationToken).ConfigureAwait(false);
                     return new(AgentProtocol.CurrentVersion, runtime,
                         profiles,
                         _sessions.GetSnapshots().ToImmutableArray(),
@@ -186,6 +190,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                         _remoteEdits.GetSnapshots().ToImmutableArray())
                     {
                         MirrorDefinitions = mirrorDefinitions,
+                        History = history,
                     };
                 }
                 finally
@@ -201,6 +206,36 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         finally
         {
             _profileTrustGate.Release();
+        }
+    }
+
+    private async Task<ImmutableArray<HistoryRecord>> LoadHistoryAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var records = await _historyStore.GetRecentAsync(
+                HistoryRecordPolicy.MaximumBootstrapRecords,
+                cancellationToken).ConfigureAwait(false);
+            if (records.Count > HistoryRecordPolicy.MaximumBootstrapRecords ||
+                records.Select(static record => record.Id).Distinct().Count() != records.Count)
+            {
+                throw new InvalidDataException("The history store returned too many or duplicate records.");
+            }
+            foreach (var record in records) HistoryRecordPolicy.Validate(record);
+            return records.OrderByDescending(static record => record.FinishedAt).ToImmutableArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or JsonException or ArgumentException)
+        {
+            _publish?.Invoke(
+                EngineEventKind.Error,
+                "history.load-failed",
+                new EngineError(
+                    "history-load-failed",
+                    "The durable Activity history could not be loaded.",
+                    Detail: exception.GetType().Name),
+                null,
+                null);
+            return [];
         }
     }
 

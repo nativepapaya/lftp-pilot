@@ -349,6 +349,19 @@ public sealed class MainWindowViewModel : ObservableObject
             Mirror.ObserveJob(job);
             RemoteTransfer.ObserveJob(job);
         }
+        else if (engineEvent.Name == "history.appended")
+        {
+            var record = DeserializePayload<HistoryRecord>(engineEvent.Payload);
+            if (record is null || !IsValidHistoryRecord(record))
+            {
+                Activity.Log.Insert(0, new(engineEvent.Timestamp, "Warning", "Agent", "The Agent sent an invalid Activity history event. Refreshing workspace state."));
+                RequestStateRefresh();
+            }
+            else
+            {
+                Activity.AddHistory(record);
+            }
+        }
         else if (engineEvent.Name == "profile.saved" && DeserializePayload<ConnectionProfile>(engineEvent.Payload) is { } profile)
         {
             Connections.Upsert(profile);
@@ -408,6 +421,19 @@ public sealed class MainWindowViewModel : ObservableObject
         JsonElement { ValueKind: JsonValueKind.String } element when element.TryGetGuid(out var value) => value,
         _ => null,
     };
+
+    private static bool IsValidHistoryRecord(HistoryRecord record)
+    {
+        try
+        {
+            HistoryRecordPolicy.Validate(record);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
 
     private void LoadRemoteEdits(IEnumerable<RemoteEditSession> edits)
     {

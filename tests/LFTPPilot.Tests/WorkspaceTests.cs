@@ -4304,6 +4304,19 @@ public sealed class WorkspaceTests
     public async Task VersionedPipeExposesWorkspaceMethods()
     {
         await using var fixture = new WorkspaceFixture(createService: false);
+        var historyStore = new InMemoryHistoryStore();
+        var historyId = Guid.NewGuid();
+        var historyFinishedAt = DateTimeOffset.UtcNow;
+        var historyRecord = new HistoryRecord(
+            historyId,
+            historyId,
+            JobKind.Transfer,
+            "Prior transfer",
+            JobState.Completed,
+            historyFinishedAt.AddSeconds(-1),
+            historyFinishedAt,
+            Detail: "Complete");
+        await historyStore.AppendAsync(historyRecord, TestContext.Current.CancellationToken);
         await using var host = new AgentHost(
             Path.Combine(fixture.Directory.Path, "jobs.json"),
             profileStore: fixture.Profiles,
@@ -4313,7 +4326,8 @@ public sealed class WorkspaceTests
             runtimeProvider: fixture.Runtime,
             mirrorPlanner: new MirrorPlanner(),
             workspaceOptions: fixture.Options,
-            mirrorDefinitionStore: fixture.MirrorDefinitions);
+            mirrorDefinitionStore: fixture.MirrorDefinitions,
+            historyStore: historyStore);
         using var stop = new CancellationTokenSource();
         var run = host.RunAsync(stop.Token);
         await using var client = new NamedPipeEngineClient(Environment.ProcessId);
@@ -4339,6 +4353,7 @@ public sealed class WorkspaceTests
         Assert.Equal(AgentProtocol.CurrentVersion, bootstrap?.ProtocolVersion);
         Assert.True(bootstrap?.Runtime.Available);
         Assert.Equal(definition, Assert.Single(bootstrap?.MirrorDefinitions ?? []));
+        Assert.Equal(historyRecord, Assert.Single(bootstrap?.History ?? []));
         var directJob = JobCoordinatorTests.Job(JobState.Queued);
         var enqueueError = await Assert.ThrowsAsync<EngineRequestRejectedException>(() =>
             client.RequestAsync("jobs.enqueue", directJob, TestContext.Current.CancellationToken));

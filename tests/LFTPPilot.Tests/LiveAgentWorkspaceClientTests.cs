@@ -273,6 +273,58 @@ public sealed class LiveAgentWorkspaceClientTests
     }
 
     [Fact]
+    public async Task BootstrapValidatesAndReturnsDurableActivityHistory()
+    {
+        const int processId = 307;
+        var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
+        var record = new HistoryRecord(
+            id,
+            id,
+            JobKind.Transfer,
+            "Finished transfer",
+            JobState.Completed,
+            now.AddSeconds(-1),
+            now,
+            Detail: "Complete");
+        var bootstrap = new WorkspaceBootstrap(
+            AgentProtocol.CurrentVersion,
+            new RuntimeStatus(true, true, "test"),
+            [],
+            [],
+            [],
+            [])
+        {
+            History = [record],
+        };
+        var client = CreateClient(new MutationReplyEngineClient(processId, "unused", true, bootstrap: bootstrap), processId);
+        try
+        {
+            var workspace = await client.LoadAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(record, Assert.Single(workspace.History));
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        var invalidBootstrap = bootstrap with { History = [record, record] };
+        var invalidClient = CreateClient(
+            new MutationReplyEngineClient(processId + 1, "unused", true, bootstrap: invalidBootstrap),
+            processId + 1);
+        try
+        {
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                invalidClient.LoadAsync(TestContext.Current.CancellationToken));
+            Assert.Contains("duplicate", exception.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await invalidClient.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task ReadOnlyBootstrapLostReplyReconnectsAndRetriesOnce()
     {
         const int processId = 404;

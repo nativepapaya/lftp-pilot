@@ -47,6 +47,7 @@ public sealed record WorkspaceBootstrap(
     ImmutableArray<RemoteEditSession> RemoteEdits)
 {
     public ImmutableArray<MirrorDefinition> MirrorDefinitions { get; init; } = [];
+    public ImmutableArray<HistoryRecord> History { get; init; } = [];
 }
 
 public sealed record ProfileSaveRequest(ConnectionProfile Profile, string? Credential = null);

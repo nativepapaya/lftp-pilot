@@ -119,6 +119,7 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         var sessions = new List<WorkspaceSessionSeed>();
         var profileIds = bootstrap.Profiles.Select(static profile => profile.Id).ToHashSet();
         ValidateBootstrapMirrorDefinitions(bootstrap.MirrorDefinitions, profileIds);
+        ValidateBootstrapHistory(bootstrap.History);
         var sessionIds = new HashSet<Guid>();
         foreach (var snapshot in bootstrap.Sessions)
         {
@@ -143,7 +144,7 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         [
             new(DateTimeOffset.Now, bootstrap.Runtime.Available ? "Info" : "Error", "Agent", runtimeStatus),
         ];
-        return new(bootstrap.Profiles, sessions, bootstrap.Jobs, bootstrap.RemoteEdits, [], log, false, runtimeStatus)
+        return new(bootstrap.Profiles, sessions, bootstrap.Jobs, bootstrap.RemoteEdits, bootstrap.History, log, false, runtimeStatus)
         {
             MirrorDefinitions = bootstrap.MirrorDefinitions,
         };
@@ -897,6 +898,27 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
             snapshot.RemoteLocation.Kind != PaneKind.Remote || string.IsNullOrWhiteSpace(snapshot.RemoteLocation.Path))
         {
             throw new InvalidDataException("The Agent returned an invalid persisted session tab.");
+        }
+    }
+
+    private static void ValidateBootstrapHistory(ImmutableArray<HistoryRecord> history)
+    {
+        if (history.IsDefault || history.Length > HistoryRecordPolicy.MaximumBootstrapRecords)
+            throw new InvalidDataException("The Agent returned an invalid number of Activity history records.");
+        var ids = new HashSet<Guid>();
+        DateTimeOffset? previousFinishedAt = null;
+        foreach (var record in history)
+        {
+            try { HistoryRecordPolicy.Validate(record); }
+            catch (ArgumentException exception)
+            {
+                throw new InvalidDataException("The Agent returned an invalid Activity history record.", exception);
+            }
+            if (!ids.Add(record.Id))
+                throw new InvalidDataException("The Agent returned duplicate Activity history record identifiers.");
+            if (previousFinishedAt is { } previous && record.FinishedAt > previous)
+                throw new InvalidDataException("The Agent returned Activity history records out of order.");
+            previousFinishedAt = record.FinishedAt;
         }
     }
 

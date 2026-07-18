@@ -52,6 +52,18 @@ public sealed class ActivityCenterViewModel : ObservableObject
         RetryJobCommand.NotifyCanExecuteChanged();
     }
 
+    public void AddHistory(HistoryRecord record)
+    {
+        var existing = History.FirstOrDefault(candidate => candidate.Id == record.Id);
+        if (existing is not null) History.Remove(existing);
+        var insertionIndex = 0;
+        while (insertionIndex < History.Count && History[insertionIndex].FinishedAt >= record.FinishedAt)
+            insertionIndex++;
+        History.Insert(insertionIndex, record);
+        while (History.Count > HistoryRecordPolicy.MaximumBootstrapRecords)
+            History.RemoveAt(History.Count - 1);
+    }
+
     private static bool CanCancelJob(object? parameter) =>
         parameter is JobSnapshot { State: JobState.Queued or JobState.Running or JobState.Paused or JobState.Scheduled };
 

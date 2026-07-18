@@ -574,6 +574,37 @@ public sealed class MainWindowViewModelTests
         Assert.False(session.HasUnconfirmedTransfers);
     }
 
+    [Fact]
+    public void HistoryEventUpsertsAValidatedTerminalRecord()
+    {
+        var profile = Profile();
+        var viewModel = CreateViewModelWithoutUiContext(new RecordingSessionAgent(profile, []));
+        var applyEvent = typeof(MainWindowViewModel).GetMethod(
+            "ApplyAgentEvent",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The Agent event application method was not found.");
+        var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
+        var record = new HistoryRecord(
+            id,
+            id,
+            JobKind.Transfer,
+            "Finished transfer",
+            JobState.Completed,
+            now.AddSeconds(-1),
+            now,
+            Detail: "Complete");
+
+        applyEvent.Invoke(viewModel, [new EngineEvent(
+            20, EngineEventKind.Job, "history.appended", now, record, JobId: record.JobId)]);
+        applyEvent.Invoke(viewModel, [new EngineEvent(
+            21, EngineEventKind.Job, "history.appended", now, record with { Outcome = JobState.Cancelled }, JobId: record.JobId)]);
+
+        var updated = Assert.Single(viewModel.Activity.History);
+        Assert.Equal(JobState.Cancelled, updated.Outcome);
+        Assert.Empty(viewModel.Activity.Log);
+    }
+
     private static ConnectionProfile Profile() => new(
         Guid.NewGuid(), "FTP test", ConnectionProtocol.Ftp, "example.test", 21, "alice", AuthenticationKind.Password);
 
