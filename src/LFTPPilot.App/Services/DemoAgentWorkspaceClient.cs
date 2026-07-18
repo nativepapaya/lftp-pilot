@@ -341,6 +341,15 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
     public Task<bool> CompleteRemoteEditAsync(string editId, CancellationToken cancellationToken = default) =>
         Task.FromException<bool>(new NotSupportedException("Managed remote editing requires the live Agent."));
 
+    public Task<ExplorerExportSnapshot> StartExplorerExportAsync(ExplorerExportStartRequest request, CancellationToken cancellationToken = default) =>
+        Task.FromException<ExplorerExportSnapshot>(new NotSupportedException("Explorer export requires the live Agent."));
+
+    public Task<ExplorerExportSnapshot> GetExplorerExportAsync(Guid exportId, CancellationToken cancellationToken = default) =>
+        Task.FromException<ExplorerExportSnapshot>(new NotSupportedException("Explorer export requires the live Agent."));
+
+    public Task<bool> ReleaseExplorerExportAsync(Guid exportId, CancellationToken cancellationToken = default) =>
+        Task.FromException<bool>(new NotSupportedException("Explorer export requires the live Agent."));
+
     public Task StopAgentAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

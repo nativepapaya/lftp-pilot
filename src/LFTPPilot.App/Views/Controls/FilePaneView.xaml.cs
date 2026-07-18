@@ -33,6 +33,7 @@ public sealed partial class FilePaneView : UserControl
 {
     private readonly HashSet<Grid> _realizedRows = [];
     private bool _columnLayoutSubscribed;
+    private ExplorerExportDragState? _pendingExplorerExport;
 
     public FilePaneView()
     {
@@ -68,6 +69,7 @@ public sealed partial class FilePaneView : UserControl
         _columnLayoutSubscribed = false;
         FilePaneColumnLayout.Changed -= FilePaneColumnLayout_Changed;
         _realizedRows.Clear();
+        ReleasePendingExplorerExport();
     }
 
     private void FilePaneColumnLayout_Changed(object? sender, EventArgs e) => ApplyColumnWidths();
@@ -129,6 +131,52 @@ public sealed partial class FilePaneView : UserControl
 
         e.Data.SetData(FilePaneDragDropRegistry.DataFormat, token);
         e.Data.RequestedOperation = DataPackageOperation.Copy;
+        if (viewModel.Kind == PaneKind.Remote && sources.All(static source => source.Kind == TransferSourceKind.File))
+        {
+            ReleasePendingExplorerExport();
+            var state = new ExplorerExportDragState(Guid.NewGuid(), viewModel, sources);
+            _pendingExplorerExport = state;
+            e.Data.Properties.Title = sources.Length == 1 ? "LFTP Pilot remote file" : $"{sources.Length:N0} LFTP Pilot remote files";
+            e.Data.Properties.Description = "LFTP Pilot will prepare managed local copies if Explorer accepts this drop.";
+            e.Data.Properties.FileTypes.Add(StandardDataFormats.StorageItems);
+            e.Data.SetDataProvider(StandardDataFormats.StorageItems, request => ProvideExplorerExport(request, state));
+        }
+    }
+
+    private void FilesList_DragItemsCompleted(ListViewBase sender, DragItemsCompletedEventArgs args) => ReleasePendingExplorerExport();
+
+    private static async void ProvideExplorerExport(DataProviderRequest request, ExplorerExportDragState state)
+    {
+        var deferral = request.GetDeferral();
+        try
+        {
+            var snapshot = await state.GetOrStartAsync(request.Deadline).ConfigureAwait(true);
+            var files = new List<IStorageItem>(snapshot.LocalPaths.Length);
+            foreach (var path in snapshot.LocalPaths)
+                files.Add(await StorageFile.GetFileFromPathAsync(path));
+            request.SetData(files.ToArray());
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine(exception);
+            await state.ReleaseAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            deferral.Complete();
+        }
+    }
+
+    private void ReleasePendingExplorerExport()
+    {
+        var state = Interlocked.Exchange(ref _pendingExplorerExport, null);
+        if (state is not null) _ = ReleaseExplorerExportSafelyAsync(state);
+    }
+
+    private static async Task ReleaseExplorerExportSafelyAsync(ExplorerExportDragState state)
+    {
+        try { await state.ReleaseAsync().ConfigureAwait(false); }
+        catch (Exception exception) { System.Diagnostics.Debug.WriteLine(exception); }
     }
 
     private async void FilesList_DragOver(object sender, DragEventArgs e)
@@ -340,6 +388,37 @@ public sealed partial class FilePaneView : UserControl
         {
             e.Handled = true;
             await ViewModel.NavigateAsync(PathBox.Text).ConfigureAwait(true);
+        }
+    }
+
+    private sealed class ExplorerExportDragState(
+        Guid exportId,
+        FilePaneViewModel viewModel,
+        IReadOnlyList<FilePaneTransferSource> sources)
+    {
+        private readonly object _gate = new();
+        private Task<ExplorerExportSnapshot>? _preparation;
+        private bool _released;
+
+        public Task<ExplorerExportSnapshot> GetOrStartAsync(DateTimeOffset deadline)
+        {
+            lock (_gate)
+            {
+                if (_released) throw new InvalidOperationException("The Explorer export was already released.");
+                return _preparation ??= viewModel.PrepareExplorerExportAsync(exportId, sources, deadline);
+            }
+        }
+
+        public async Task ReleaseAsync()
+        {
+            bool wasStarted;
+            lock (_gate)
+            {
+                if (_released) return;
+                _released = true;
+                wasStarted = _preparation is not null;
+            }
+            if (wasStarted) _ = await viewModel.ReleaseExplorerExportAsync(exportId).ConfigureAwait(false);
         }
     }
 

@@ -62,6 +62,14 @@ public interface IAgentWorkspaceClient : IAsyncDisposable
     Task<RemoteEditReview> ReviewRemoteEditAsync(string editId, CancellationToken cancellationToken = default);
     Task<RemoteEditActionResult> ResolveRemoteEditAsync(string editId, string reviewToken, RemoteEditResolution resolution, CancellationToken cancellationToken = default);
     Task<bool> CompleteRemoteEditAsync(string editId, CancellationToken cancellationToken = default);
+    Task<ExplorerExportSnapshot> StartExplorerExportAsync(
+        ExplorerExportStartRequest request,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<ExplorerExportSnapshot>(new NotSupportedException("Explorer export is not available through this client."));
+    Task<ExplorerExportSnapshot> GetExplorerExportAsync(Guid exportId, CancellationToken cancellationToken = default) =>
+        Task.FromException<ExplorerExportSnapshot>(new NotSupportedException("Explorer export is not available through this client."));
+    Task<bool> ReleaseExplorerExportAsync(Guid exportId, CancellationToken cancellationToken = default) =>
+        Task.FromException<bool>(new NotSupportedException("Explorer export is not available through this client."));
     Task StopAgentAsync(CancellationToken cancellationToken = default);
     Task<AppUpdateStatus> CheckForUpdatesAsync(CancellationToken cancellationToken = default);
     Task OpenUpdateInstallerAsync(CancellationToken cancellationToken = default);

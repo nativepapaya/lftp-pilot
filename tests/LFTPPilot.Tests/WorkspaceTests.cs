@@ -2460,6 +2460,86 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
+    public async Task ExplorerExportDownloadsRegularFilesIntoManagedCacheAndReleasesThem()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var exportId = Guid.NewGuid();
+
+        var started = await fixture.Service.StartExplorerExportAsync(
+            new(exportId, session.SessionId, ["/remote/曲.txt"]), TestContext.Current.CancellationToken);
+        Assert.Equal(exportId, started.Job.Id);
+        var replay = await fixture.Service.StartExplorerExportAsync(
+            new(exportId, session.SessionId, ["/remote/曲.txt"]), TestContext.Current.CancellationToken);
+        Assert.Equal(exportId, replay.Job.Id);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == exportId).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+
+        var completed = fixture.Service.GetExplorerExport(new(exportId));
+        var localPath = Assert.Single(completed.LocalPaths);
+        Assert.Equal("remote-bytes", await File.ReadAllTextAsync(localPath, TestContext.Current.CancellationToken));
+        Assert.Equal(Path.Combine(fixture.Options.CacheRoot, "explorer-exports", exportId.ToString("N")),
+            Path.GetDirectoryName(localPath), ignoreCase: true);
+        Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == $"explorer-export-{exportId:N}" &&
+            item.Command.StartsWith("pget -n 4 -c ", StringComparison.Ordinal));
+
+        Assert.True(fixture.Service.ReleaseExplorerExport(new(exportId)));
+        await WaitUntilAsync(() => !File.Exists(localPath), TestContext.Current.CancellationToken);
+        Assert.Throws<KeyNotFoundException>(() => fixture.Service.GetExplorerExport(new(exportId)));
+    }
+
+    [Fact]
+    public async Task ReleasingActiveExplorerExportWaitsForWorkerCleanup()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var exportId = Guid.NewGuid();
+        var directory = Path.Combine(fixture.Options.CacheRoot, "explorer-exports", exportId.ToString("N"));
+
+        _ = await fixture.Service.StartExplorerExportAsync(
+            new(exportId, session.SessionId, ["/remote/blocking-explorer-export.bin"]),
+            TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.ProcessHost.TaggedCommands.Any(item =>
+                item.Role == $"explorer-export-{exportId:N}" && item.Command.StartsWith("pget ", StringComparison.Ordinal)),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(fixture.Service.ReleaseExplorerExport(new(exportId)));
+        await WaitUntilAsync(
+            () => !Directory.Exists(directory) && fixture.ProcessHost.DisposedRoles.Contains($"explorer-export-{exportId:N}"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(JobState.Cancelled, fixture.Jobs.GetJobs().Single(job => job.Id == exportId).State);
+        Assert.Throws<KeyNotFoundException>(() => fixture.Service.GetExplorerExport(new(exportId)));
+    }
+
+    [Fact]
+    public async Task ExplorerExportRejectsRemoteLinksBeforeCreatingAJob()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var exportId = Guid.NewGuid();
+
+        var exception = await Assert.ThrowsAsync<NotSupportedException>(() =>
+            fixture.Service.StartExplorerExportAsync(
+                new(exportId, session.SessionId, ["/remote/transfer-link"]),
+                TestContext.Current.CancellationToken));
+
+        Assert.Contains("symbolic link", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(fixture.Jobs.GetJobs(), job => job.Id == exportId);
+    }
+
+    [Fact]
     public async Task ActiveRemoteEditSurvivesBootstrapAndBlocksSessionAndProfileRemoval()
     {
         await using var fixture = new WorkspaceFixture();
@@ -5208,6 +5288,18 @@ public sealed class WorkspaceTests
             }
             if ((role == "remote-edit-download" || role.StartsWith("remote-relay-source-", StringComparison.Ordinal)) &&
                 command.Contains("get ", StringComparison.Ordinal))
+            {
+                WriteRemoteEditDownload(command);
+                return Task.FromResult(new LftpCommandResult([]));
+            }
+            if (role.StartsWith("explorer-export-", StringComparison.Ordinal) &&
+                command.Contains("blocking-explorer-export.bin", StringComparison.Ordinal) &&
+                command.StartsWith("pget ", StringComparison.Ordinal))
+            {
+                return WaitForCancellationAsync(cancellationToken);
+            }
+            if (role.StartsWith("explorer-export-", StringComparison.Ordinal) &&
+                command.StartsWith("pget ", StringComparison.Ordinal))
             {
                 WriteRemoteEditDownload(command);
                 return Task.FromResult(new LftpCommandResult([]));

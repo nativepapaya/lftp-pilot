@@ -20,6 +20,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private const int MaximumMirrorPreviews = 1_024;
     private const int MaximumMirrorApprovals = 1_024;
     private const int MaximumRemoteTransferPlans = 1_024;
+    private const int MaximumExplorerExports = 128;
     private static readonly TimeSpan BrowseSnapshotLifetime = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MirrorApprovalReplayLifetime = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan RemoteTransferPlanLifetime = TimeSpan.FromMinutes(15);
@@ -33,6 +34,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly IMirrorDefinitionStore _mirrorDefinitionStore;
     private readonly IHistoryStore _historyStore;
     private readonly AgentWorkspaceOptions _options;
+    private readonly string _explorerExportRoot;
     private readonly Action<EngineEventKind, string, object?, Guid?, Guid?>? _publish;
     private readonly RunOnceScheduler? _scheduler;
     private readonly RemoteEditManager _remoteEdits;
@@ -44,6 +46,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly ConcurrentDictionary<Guid, TrackedJobCancellation> _jobCancellations = [];
     private readonly ConcurrentDictionary<Guid, ImmutableHashSet<Guid>> _activeJobProfileDependencies = [];
     private readonly Dictionary<Guid, StoredRemoteTransferPlan> _remoteTransferPlans = [];
+    private readonly ConcurrentDictionary<Guid, ExplorerExportRegistration> _explorerExports = [];
     private readonly Dictionary<Guid, StoredTransferSubmission> _transferSubmissions = [];
     private readonly Lock _retryGate = new();
     private readonly Dictionary<Guid, TransferRetryContext> _transferRetries = [];
@@ -85,6 +88,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         _mirrorDefinitionStore = mirrorDefinitionStore ?? new InMemoryMirrorDefinitionStore();
         _historyStore = historyStore ?? new InMemoryHistoryStore();
         _options = options;
+        _explorerExportRoot = Path.GetFullPath(Path.Combine(options.CacheRoot, "explorer-exports"));
+        ResetExplorerExportRoot();
         _publish = publish;
         _scheduler = scheduler;
         _stateStore = stateStore;
@@ -152,6 +157,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 WorkspaceMethods.RemoteEditReview => ToJson(await ReviewRemoteEditAsync(Required<RemoteEditReviewRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.RemoteEditResolve => ToJson(await ResolveRemoteEditAsync(Required<RemoteEditResolveRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.RemoteEditComplete => ToJson(await CompleteRemoteEditAsync(Required<RemoteEditCompleteRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.ExplorerExportStart => ToJson(await StartExplorerExportAsync(Required<ExplorerExportStartRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.ExplorerExportGet => ToJson(GetExplorerExport(Required<ExplorerExportGetRequest>(arguments))),
+                WorkspaceMethods.ExplorerExportRelease => ToJson(ReleaseExplorerExport(Required<ExplorerExportReleaseRequest>(arguments))),
                 _ => throw new ArgumentException($"Unknown workspace method '{method}'."),
             };
         }
@@ -1497,6 +1505,119 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     public Task<bool> CompleteRemoteEditAsync(RemoteEditCompleteRequest request, CancellationToken cancellationToken = default) =>
         _remoteEdits.CompleteAsync(request, cancellationToken);
 
+    public async Task<ExplorerExportSnapshot> StartExplorerExportAsync(
+        ExplorerExportStartRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ExplorerExportPolicy.ValidateStart(request);
+        await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            PurgeExpiredExplorerExports(DateTimeOffset.UtcNow);
+            if (_explorerExports.TryGetValue(request.ExportId, out var existing))
+            {
+                if (existing.Request.SessionId != request.SessionId ||
+                    !existing.Request.RemotePaths.SequenceEqual(request.RemotePaths, StringComparer.Ordinal))
+                    throw new InvalidOperationException("The Explorer export identifier is already bound to different remote files.");
+                return CreateExplorerExportSnapshot(existing);
+            }
+            if (FindJob(request.ExportId) is not null)
+                throw new InvalidOperationException("The Explorer export identifier was already consumed by this Agent.");
+            if (_explorerExports.Count >= MaximumExplorerExports)
+                throw new InvalidOperationException("Too many Explorer exports are awaiting completion or release.");
+
+            var session = _sessions.GetActive(request.SessionId);
+            var remoteEntries = await session.WithValidationSessionAsync(async validation =>
+            {
+                var entries = ImmutableArray.CreateBuilder<FileEntry>(request.RemotePaths.Length);
+                foreach (var path in request.RemotePaths)
+                {
+                    await ValidateRemoteEndpointTreeAsync(
+                        validation, path, TransferSourceKind.File, required: true,
+                        "Explorer export source", cancellationToken).ConfigureAwait(false);
+                    var entry = await TryStatRemoteAsync(validation, path, cancellationToken).ConfigureAwait(false)
+                        ?? throw new FileNotFoundException("An Explorer export source was not found.");
+                    RequireRemoteTransferKind(entry, TransferSourceKind.File, "Explorer export source");
+                    entries.Add(entry);
+                }
+                return entries.MoveToImmutable();
+            }, cancellationToken).ConfigureAwait(false);
+
+            var directory = ExplorerExportDirectory(request.ExportId);
+            var items = BuildExplorerExportItems(request.RemotePaths, remoteEntries, directory);
+            var now = DateTimeOffset.UtcNow;
+            var job = _jobs.Enqueue(new(
+                request.ExportId,
+                JobKind.Transfer,
+                session.Profile.Id,
+                JobSnapshotPolicy.CanonicalizeDerivedDisplayName(
+                    request.RemotePaths.Length == 1
+                        ? $"Export {RemoteName(request.RemotePaths[0])} to Explorer"
+                        : $"Export {request.RemotePaths.Length:N0} files to Explorer",
+                    "Explorer export"),
+                JobState.Queued,
+                now,
+                now,
+                Status: "Explorer requested managed local copies."));
+            var registration = new ExplorerExportRegistration(
+                request,
+                session.Profile.Id,
+                directory,
+                items,
+                now + ExplorerExportPolicy.Lifetime);
+            if (!_explorerExports.TryAdd(request.ExportId, registration))
+            {
+                _jobs.Transition(job.Id, JobState.Failed, "Explorer export registration collided.",
+                    new("explorer-export-collision", "The Explorer export could not be registered."));
+                throw new InvalidOperationException("The Explorer export could not be registered.");
+            }
+            try
+            {
+                TrackJob(job.Id, token => RunExplorerExportAsync(session, registration, token));
+            }
+            catch (Exception exception) when (!IsFatalRuntimeException(exception))
+            {
+                TryFailJob(job.Id, exception);
+                _explorerExports.TryRemove(job.Id, out _);
+                throw;
+            }
+            return CreateExplorerExportSnapshot(registration);
+        }
+        finally
+        {
+            _profileTrustGate.Release();
+        }
+    }
+
+    public ExplorerExportSnapshot GetExplorerExport(ExplorerExportGetRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.ExportId == Guid.Empty) throw new ArgumentException("An Explorer export identifier is required.", nameof(request));
+        PurgeExpiredExplorerExports(DateTimeOffset.UtcNow);
+        var registration = _explorerExports.GetValueOrDefault(request.ExportId)
+            ?? throw new KeyNotFoundException("The Explorer export was not found or has expired.");
+        return CreateExplorerExportSnapshot(registration);
+    }
+
+    public bool ReleaseExplorerExport(ExplorerExportReleaseRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.ExportId == Guid.Empty) throw new ArgumentException("An Explorer export identifier is required.", nameof(request));
+        if (!_explorerExports.TryGetValue(request.ExportId, out var registration)) return false;
+        lock (registration.Gate) registration.Released = true;
+        var cancellationRequested = TryCancelOperation(request.ExportId, "Explorer drag completed or was cancelled.");
+        var state = FindJob(request.ExportId)?.State;
+        // TryCancelOperation transitions the durable job before the worker has
+        // necessarily released its LFTP process and file handles. Let that worker's
+        // finally block remove a released export so cleanup cannot race the download.
+        if (!cancellationRequested && !_jobCancellations.ContainsKey(request.ExportId) &&
+            state is (JobState.Completed or JobState.Failed or JobState.Cancelled or JobState.Missed))
+        {
+            TryCleanupReleasedExplorerExport(request.ExportId, registration);
+        }
+        return true;
+    }
+
     public ValueTask DisposeAsync()
     {
         Task disposal;
@@ -1538,6 +1659,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         Task[] operations;
         lock (_operationGate) operations = _operations.ToArray();
         try { await Task.WhenAll(operations).ConfigureAwait(false); } catch (OperationCanceledException) { }
+        foreach (var registration in _explorerExports.Values)
+            DeleteExplorerExportWorkspace(registration.Directory);
+        _explorerExports.Clear();
         await _remoteSearches.DisposeAsync().ConfigureAwait(false);
         await _remoteEdits.DisposeAsync().ConfigureAwait(false);
         await _sessions.DisposeAsync().ConfigureAwait(false);
@@ -1582,6 +1706,264 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         if (_scheduler?.TryCancel(jobId, reason) != true) return false;
         ForgetTransferRetry(jobId);
         return true;
+    }
+
+    private async Task RunExplorerExportAsync(
+        WorkspaceSession session,
+        ExplorerExportRegistration registration,
+        CancellationToken cancellationToken)
+    {
+        var jobId = registration.Request.ExportId;
+        var keepFiles = false;
+        try
+        {
+            _jobs.Transition(jobId, JobState.Running, "Preparing an Agent-owned Explorer export workspace.");
+            _jobs.TryReportProgress(jobId, 0.02, "Preparing an Agent-owned Explorer export workspace.");
+            CreateExplorerExportWorkspace(registration.Directory);
+            await session.WithEphemeralSessionAsync(
+                $"explorer-export-{jobId:N}",
+                async process =>
+                {
+                    for (var index = 0; index < registration.Items.Length; index++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var item = registration.Items[index];
+                        await ValidateRemoteEndpointTreeAsync(
+                            process, item.RemotePath, TransferSourceKind.File, required: true,
+                            "Explorer export source", cancellationToken).ConfigureAwait(false);
+                        var current = await TryStatRemoteAsync(process, item.RemotePath, cancellationToken).ConfigureAwait(false)
+                            ?? throw new FileNotFoundException("An Explorer export source disappeared before download.");
+                        RequireRemoteTransferKind(current, TransferSourceKind.File, "Explorer export source");
+                        if (item.ExpectedSize is { } expectedSize && current.Size != expectedSize)
+                            throw new IOException("An Explorer export source changed size after drag review. Start a fresh drag.");
+
+                        var start = 0.05 + 0.9 * index / registration.Items.Length;
+                        _jobs.TryReportProgress(jobId, start,
+                            $"Downloading file {index + 1:N0} of {registration.Items.Length:N0} for Explorer.");
+                        var plan = new TransferPlan(
+                            Guid.NewGuid(),
+                            registration.ProfileId,
+                            TransferDirection.Download,
+                            item.RemotePath,
+                            item.LocalPath,
+                            TransferMode.Resume,
+                            Segments: 4,
+                            SourceKind: TransferSourceKind.File);
+                        var result = await process.ExecuteAsync(
+                            LftpCommandBuilder.BuildTransfer(plan, background: false),
+                            _options.TransferTimeout,
+                            cancellationToken).ConfigureAwait(false);
+                        SessionRegistry.ThrowIfFailed(result, "Explorer export download");
+                        ValidateExplorerExportPayload(item.LocalPath, current.Size);
+                        var completed = 0.05 + 0.9 * (index + 1) / registration.Items.Length;
+                        _jobs.TryReportProgress(jobId, completed,
+                            $"Prepared file {index + 1:N0} of {registration.Items.Length:N0} for Explorer.");
+                    }
+                    return true;
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            lock (registration.Gate)
+            {
+                if (registration.Released) throw new OperationCanceledException(cancellationToken);
+                registration.LocalPaths = registration.Items.Select(static item => item.LocalPath).ToImmutableArray();
+                registration.ExpiresAt = DateTimeOffset.UtcNow + ExplorerExportPolicy.Lifetime;
+                keepFiles = true;
+            }
+            _jobs.Transition(jobId, JobState.Completed, "Managed local copies are ready for Explorer.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || registration.Released)
+        {
+            _jobs.TryCancel(jobId, "Explorer export cancelled.");
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or InvalidDataException or InvalidOperationException or NotSupportedException or TimeoutException or UnauthorizedAccessException)
+        {
+            TryFailJob(jobId, SanitizeExplorerExportFailure(exception, registration.Directory));
+        }
+        finally
+        {
+            if (!keepFiles)
+            {
+                DeleteExplorerExportWorkspace(registration.Directory);
+                lock (registration.Gate)
+                {
+                    if (registration.Released) _explorerExports.TryRemove(jobId, out _);
+                }
+            }
+        }
+    }
+
+    private ExplorerExportSnapshot CreateExplorerExportSnapshot(ExplorerExportRegistration registration)
+    {
+        var job = FindJob(registration.Request.ExportId)
+            ?? throw new InvalidOperationException("The Explorer export job is unavailable.");
+        ImmutableArray<string> paths;
+        DateTimeOffset expiresAt;
+        lock (registration.Gate)
+        {
+            paths = job.State == JobState.Completed && !registration.Released ? registration.LocalPaths : [];
+            expiresAt = registration.ExpiresAt;
+        }
+        var snapshot = new ExplorerExportSnapshot(
+            registration.Request.ExportId,
+            registration.Request.SessionId,
+            job,
+            paths,
+            expiresAt);
+        ExplorerExportPolicy.ValidateSnapshot(snapshot);
+        return snapshot;
+    }
+
+    private ImmutableArray<ExplorerExportItem> BuildExplorerExportItems(
+        ImmutableArray<string> remotePaths,
+        ImmutableArray<FileEntry> entries,
+        string directory)
+    {
+        if (remotePaths.Length != entries.Length) throw new InvalidOperationException("Explorer export validation became inconsistent.");
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var items = ImmutableArray.CreateBuilder<ExplorerExportItem>(remotePaths.Length);
+        for (var index = 0; index < remotePaths.Length; index++)
+        {
+            var name = CreateExplorerExportFileName(remotePaths[index]);
+            if (!names.Add(name))
+            {
+                name = AddExplorerExportNameSuffix(name, remotePaths[index]);
+                if (!names.Add(name)) throw new IOException("Selected remote file names cannot be represented uniquely for Explorer.");
+            }
+            items.Add(new(remotePaths[index], Path.Combine(directory, name), entries[index].Size));
+        }
+        return items.MoveToImmutable();
+    }
+
+    private string ExplorerExportDirectory(Guid exportId) =>
+        Path.GetFullPath(Path.Combine(_explorerExportRoot, exportId.ToString("N")));
+
+    private void CreateExplorerExportWorkspace(string directory)
+    {
+        ValidateExplorerExportDirectory(directory);
+        ValidateLocalTransferAncestors(Path.Combine(directory, "payload"));
+        if (TryGetLocalTransferAttributes(directory) is not null)
+            throw new IOException("The managed Explorer export workspace unexpectedly already exists.");
+        Directory.CreateDirectory(directory);
+        if (ClassifyLocalTransferAttributes(File.GetAttributes(directory)) != TransferSourceKind.Directory)
+            throw new IOException("The managed Explorer export workspace is not a regular directory.");
+    }
+
+    private static void ValidateExplorerExportPayload(string path, long? expectedSize)
+    {
+        ValidateLocalTransferAncestors(path);
+        var attributes = TryGetLocalTransferAttributes(path)
+            ?? throw new InvalidDataException("The Explorer export did not create its managed file.");
+        if (ClassifyLocalTransferAttributes(attributes) != TransferSourceKind.File)
+            throw new InvalidDataException("The Explorer export did not create a regular file.");
+        if (expectedSize is { } size && new FileInfo(path).Length != size)
+            throw new InvalidDataException("The Explorer export file size did not match the freshly checked source.");
+    }
+
+    private void DeleteExplorerExportWorkspace(string directory)
+    {
+        ValidateExplorerExportDirectory(directory);
+        var attributes = TryGetLocalTransferAttributes(directory);
+        if (attributes is null) return;
+        if (ClassifyLocalTransferAttributes(attributes.Value) != TransferSourceKind.Directory)
+            throw new IOException("The managed Explorer export workspace changed kind before cleanup.");
+        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+        {
+            if (ClassifyLocalTransferAttributes(File.GetAttributes(entry)) != TransferSourceKind.File)
+                throw new IOException("The managed Explorer export workspace contains an unexpected non-file entry.");
+            File.Delete(entry);
+        }
+        Directory.Delete(directory, recursive: false);
+    }
+
+    private void ValidateExplorerExportDirectory(string directory)
+    {
+        var fullPath = Path.GetFullPath(directory);
+        if (!fullPath.StartsWith(_explorerExportRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(Path.GetDirectoryName(fullPath), _explorerExportRoot, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("The managed Explorer export workspace escaped its cache root.");
+    }
+
+    private void ResetExplorerExportRoot()
+    {
+        ValidateLocalTransferAncestors(Path.Combine(_explorerExportRoot, "placeholder", "payload"));
+        if (TryGetLocalTransferAttributes(_explorerExportRoot) is { } attributes &&
+            ClassifyLocalTransferAttributes(attributes) != TransferSourceKind.Directory)
+            throw new IOException("The managed Explorer export root is not a regular directory.");
+        if (!Directory.Exists(_explorerExportRoot)) return;
+        foreach (var directory in Directory.EnumerateDirectories(_explorerExportRoot))
+            DeleteExplorerExportWorkspace(directory);
+        if (Directory.EnumerateFiles(_explorerExportRoot).Any())
+            throw new IOException("The managed Explorer export root contains an unexpected file.");
+    }
+
+    private void PurgeExpiredExplorerExports(DateTimeOffset now)
+    {
+        foreach (var pair in _explorerExports)
+        {
+            DateTimeOffset expiresAt;
+            lock (pair.Value.Gate) expiresAt = pair.Value.ExpiresAt;
+            if (expiresAt > now || FindJob(pair.Key)?.State is JobState.Queued or JobState.Running or JobState.Paused)
+                continue;
+            lock (pair.Value.Gate) pair.Value.Released = true;
+            TryCleanupReleasedExplorerExport(pair.Key, pair.Value);
+        }
+    }
+
+    private void TryCleanupReleasedExplorerExport(Guid exportId, ExplorerExportRegistration registration)
+    {
+        lock (registration.Gate)
+        {
+            if (!registration.Released || registration.CleanupStarted) return;
+            registration.CleanupStarted = true;
+        }
+        try
+        {
+            DeleteExplorerExportWorkspace(registration.Directory);
+            _explorerExports.TryRemove(exportId, out _);
+        }
+        catch
+        {
+            lock (registration.Gate) registration.CleanupStarted = false;
+            throw;
+        }
+    }
+
+    private static Exception SanitizeExplorerExportFailure(Exception exception, string directory)
+    {
+        var message = exception.Message
+            .Replace(directory, "<managed-explorer-export>", StringComparison.OrdinalIgnoreCase)
+            .Replace(LftpCommandBuilder.ToMsysPath(directory), "<managed-explorer-export>", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(message, exception.Message, StringComparison.Ordinal)
+            ? exception
+            : new IOException(message, exception);
+    }
+
+    private static string CreateExplorerExportFileName(string remotePath)
+    {
+        var leaf = RemoteName(remotePath);
+        var invalid = Path.GetInvalidFileNameChars().ToHashSet();
+        var characters = leaf.Select(character => invalid.Contains(character) || char.IsControl(character) ? '_' : character).ToArray();
+        var name = new string(characters).TrimEnd(' ', '.');
+        if (string.IsNullOrWhiteSpace(name)) name = "remote-file";
+        var stem = Path.GetFileNameWithoutExtension(name);
+        if (new[] { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" }
+            .Contains(stem, StringComparer.OrdinalIgnoreCase))
+            name = "_" + name;
+        if (name.Length <= 180) return name;
+        var extension = Path.GetExtension(name);
+        var maximumStem = Math.Max(1, 180 - extension.Length);
+        return Path.GetFileNameWithoutExtension(name)[..Math.Min(maximumStem, Path.GetFileNameWithoutExtension(name).Length)] + extension;
+    }
+
+    private static string AddExplorerExportNameSuffix(string name, string remotePath)
+    {
+        var extension = Path.GetExtension(name);
+        var stem = Path.GetFileNameWithoutExtension(name);
+        var suffix = "-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(remotePath)))[..8];
+        var maximumStem = Math.Max(1, 180 - extension.Length - suffix.Length);
+        if (stem.Length > maximumStem) stem = stem[..maximumStem];
+        return stem + suffix + extension;
     }
 
     private async Task RunTransferAsync(
@@ -2068,6 +2450,14 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 ForgetTransferRetry(jobId);
             if (_jobCancellations.TryRemove(jobId, out var source)) source.Complete();
             _activeJobProfileDependencies.TryRemove(jobId, out _);
+            if (_explorerExports.TryGetValue(jobId, out var explorerExport))
+            {
+                try { TryCleanupReleasedExplorerExport(jobId, explorerExport); }
+                catch (Exception exception) when (!IsFatalRuntimeException(exception))
+                {
+                    System.Diagnostics.Debug.WriteLine(exception);
+                }
+            }
         }, CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
@@ -2907,6 +3297,24 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private static JsonElement ToJson<T>(T value) => JsonSerializer.SerializeToElement(value, FramedJsonStream.SerializerOptions);
 
     private sealed record StoredMirrorPreview(Guid SessionId, MirrorDefinition Definition, MirrorPreview Preview);
+    private sealed record ExplorerExportItem(string RemotePath, string LocalPath, long? ExpectedSize);
+    private sealed class ExplorerExportRegistration(
+        ExplorerExportStartRequest request,
+        Guid profileId,
+        string directory,
+        ImmutableArray<ExplorerExportItem> items,
+        DateTimeOffset expiresAt)
+    {
+        public object Gate { get; } = new();
+        public ExplorerExportStartRequest Request { get; } = request;
+        public Guid ProfileId { get; } = profileId;
+        public string Directory { get; } = directory;
+        public ImmutableArray<ExplorerExportItem> Items { get; } = items;
+        public DateTimeOffset ExpiresAt { get; set; } = expiresAt;
+        public ImmutableArray<string> LocalPaths { get; set; } = [];
+        public bool Released { get; set; }
+        public bool CleanupStarted { get; set; }
+    }
     private sealed record StoredMirrorApproval(
         Guid SessionId,
         string DefinitionFingerprint,

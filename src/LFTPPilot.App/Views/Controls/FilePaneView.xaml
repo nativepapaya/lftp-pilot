@@ -124,6 +124,7 @@
                 SelectionChanged="FilesList_SelectionChanged"
                 DoubleTapped="FilesList_DoubleTapped"
                 DragItemsStarting="FilesList_DragItemsStarting"
+                DragItemsCompleted="FilesList_DragItemsCompleted"
                 DragOver="FilesList_DragOver"
                 Drop="FilesList_Drop"
                 AutomationProperties.Name="Files"

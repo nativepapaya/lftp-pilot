@@ -350,6 +350,16 @@ public sealed class ProtocolIntegrationTests
 
             await service.MoveEntryAsync(
                 new(PaneKind.Remote, uploadedPath, renamedPath, session.SessionId), TestContext.Current.CancellationToken);
+            var exportId = Guid.NewGuid();
+            _ = await service.StartExplorerExportAsync(
+                new(exportId, session.SessionId, [renamedPath]), TestContext.Current.CancellationToken);
+            await WaitForCompletedAsync(jobs, exportId, protocol);
+            var exported = service.GetExplorerExport(new(exportId));
+            var exportedPath = Assert.Single(exported.LocalPaths);
+            Assert.Equal(payload, await File.ReadAllBytesAsync(exportedPath, TestContext.Current.CancellationToken));
+            Assert.True(service.ReleaseExplorerExport(new(exportId)));
+            Assert.False(File.Exists(exportedPath));
+
             await service.DeleteEntriesAsync(
                 new(PaneKind.Remote, [renamedPath], session.SessionId, Confirmed: true), TestContext.Current.CancellationToken);
             await service.DeleteEntriesAsync(

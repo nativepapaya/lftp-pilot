@@ -9,6 +9,11 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- Remote files can now be dragged from a native pane to Explorer. Windows'
+  delayed `StorageItems` request starts a bounded Agent-owned export only when
+  Explorer accepts the drop; LFTP prepares freshly validated segmented
+  downloads in an isolated package cache, and drag completion cancels or
+  removes every managed copy without publishing remote paths as local files.
 - Guarded directory transfers and approved mirrors now publish monotonic phase
   progress and advance through only those verbose LFTP actions that match the
   freshly reviewed dry run. Remote-to-remote jobs expose routing, validation,

@@ -9,7 +9,11 @@ still needs real servers, signed packages, or additional product development.
 
 - Native WinUI 3 session tabs and virtualized dual file panes with sorting,
   multi-selection, synchronized resizable columns, keyboard actions, native
-  context menus, inbound Explorer drag/drop, and per-profile Quick Access.
+  context menus, bidirectional Explorer drag/drop for local uploads and remote
+  regular-file downloads, and per-profile Quick Access. Outbound remote drops
+  use Windows' delayed storage-item provider: the Agent creates bounded,
+  isolated, freshly validated LFTP downloads only after Explorer requests the
+  files, then cancels or removes the managed copies when the drag completes.
   Internal drag/drop uses bounded, expiring opaque tokens and is accepted only
   by the opposite pane in the same session; plain text and cross-session drops
   cannot become transfer requests.
@@ -73,7 +77,8 @@ still needs real servers, signed packages, or additional product development.
   Agent/Engine/runtime path against separate loopback FTP, opportunistic FTP
   TLS, FTPES, implicit FTPS, and SFTP servers. Password authentication, strict
   TLS and SFTP host trust, Unicode browse/mutation, upload, segmented download,
-  move, delete, and process cleanup pass across all five endpoints without
+  outbound Explorer export, move, delete, and process cleanup pass across all
+  five endpoints without
   installing a system service or changing the user's certificate store. Its
   exact test-only Python dependency graph is version- and hash-pinned.
 - LFTP-backed uploads/downloads, resume and skip policies, segmented `pget`,
@@ -177,8 +182,8 @@ still needs real servers, signed packages, or additional product development.
 - Exercise managed-cache editing, concurrent target changes, staging promotion,
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.
-- Complete outbound Explorer drag/drop for remote files and add richer folder
-  transfer controls such as reusable filters and per-tree parallelism.
+- Add richer folder transfer controls such as reusable filters and per-tree
+  parallelism.
 - Independently review and stage the exact native and managed third-party
   license/redistribution/corresponding-source evidence, create the trusted-test
   certificate, then validate an

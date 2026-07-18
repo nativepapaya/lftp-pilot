@@ -34,6 +34,9 @@ public static class WorkspaceMethods
     public const string RemoteEditReview = "remoteEdits.review";
     public const string RemoteEditResolve = "remoteEdits.resolve";
     public const string RemoteEditComplete = "remoteEdits.complete";
+    public const string ExplorerExportStart = "explorerExports.start";
+    public const string ExplorerExportGet = "explorerExports.get";
+    public const string ExplorerExportRelease = "explorerExports.release";
 }
 
 public sealed record RuntimeStatus(bool Available, bool Authenticated, string Source, string? Error = null);
@@ -131,3 +134,21 @@ public sealed record RemoteEditStartRequest(Guid SessionId, string RemotePath);
 public sealed record RemoteEditReviewRequest(string EditId);
 public sealed record RemoteEditResolveRequest(string EditId, string ReviewToken, RemoteEditResolution Resolution);
 public sealed record RemoteEditCompleteRequest(string EditId);
+public sealed record ExplorerExportStartRequest(
+    Guid ExportId,
+    Guid SessionId,
+    ImmutableArray<string> RemotePaths)
+{
+    public ImmutableArray<string> RemotePaths { get; init; } = RemotePaths.IsDefault ? [] : RemotePaths;
+}
+public sealed record ExplorerExportGetRequest(Guid ExportId);
+public sealed record ExplorerExportReleaseRequest(Guid ExportId);
+public sealed record ExplorerExportSnapshot(
+    Guid ExportId,
+    Guid SessionId,
+    JobSnapshot Job,
+    ImmutableArray<string> LocalPaths,
+    DateTimeOffset ExpiresAt)
+{
+    public ImmutableArray<string> LocalPaths { get; init; } = LocalPaths.IsDefault ? [] : LocalPaths;
+}

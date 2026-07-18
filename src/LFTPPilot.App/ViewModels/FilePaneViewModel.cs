@@ -146,6 +146,63 @@ public sealed class FilePaneViewModel : ObservableObject
         return NavigateAsync(item.FullPath);
     }
 
+    public async Task<ExplorerExportSnapshot> PrepareExplorerExportAsync(
+        Guid exportId,
+        IReadOnlyList<FilePaneTransferSource> sources,
+        DateTimeOffset deadline,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sources);
+        if (Kind != PaneKind.Remote)
+            throw new InvalidOperationException("Only remote files need an Agent-owned Explorer export.");
+        if (sources.Count is < 1 or > ExplorerExportPolicy.MaximumFiles ||
+            sources.Any(static source => source.Kind != TransferSourceKind.File))
+        {
+            throw new ArgumentException($"Select between 1 and {ExplorerExportPolicy.MaximumFiles} regular remote files.", nameof(sources));
+        }
+
+        var request = new ExplorerExportStartRequest(
+            exportId,
+            SessionId,
+            sources.Select(static source => source.Path).ToImmutableArray());
+        ExplorerExportPolicy.ValidateStart(request);
+        var remaining = deadline.ToUniversalTime() - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero)
+            throw new TimeoutException("Explorer's delayed file request expired before the export could start.");
+
+        using var deadlineCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadlineCancellation.CancelAfter(remaining);
+        ExplorerExportSnapshot snapshot;
+        try
+        {
+            snapshot = await _agent.StartExplorerExportAsync(request, deadlineCancellation.Token).ConfigureAwait(false);
+        }
+        catch (AgentRequestOutcomeUnknownException)
+        {
+            snapshot = await _agent.GetExplorerExportAsync(exportId, deadlineCancellation.Token).ConfigureAwait(false);
+        }
+
+        while (true)
+        {
+            switch (snapshot.Job.State)
+            {
+                case JobState.Completed:
+                    return snapshot;
+                case JobState.Failed:
+                case JobState.Cancelled:
+                case JobState.Missed:
+                    throw new IOException(snapshot.Job.Error?.Message ?? snapshot.Job.Status ??
+                        $"Explorer export ended in the {snapshot.Job.State} state.");
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(200), deadlineCancellation.Token).ConfigureAwait(false);
+            snapshot = await _agent.GetExplorerExportAsync(exportId, deadlineCancellation.Token).ConfigureAwait(false);
+        }
+    }
+
+    public Task<bool> ReleaseExplorerExportAsync(Guid exportId, CancellationToken cancellationToken = default) =>
+        _agent.ReleaseExplorerExportAsync(exportId, cancellationToken);
+
     public async Task NavigateAsync(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
