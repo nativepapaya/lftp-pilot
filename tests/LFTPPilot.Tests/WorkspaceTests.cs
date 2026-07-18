@@ -3397,11 +3397,190 @@ public sealed class WorkspaceTests
 
         var fxp = await fixture.Service.PlanRemoteTransferAsync(new(ftp.Id, ftp2.Id, "/a", "/b"), TestContext.Current.CancellationToken);
         Assert.Equal(RemoteTransferMode.Fxp, fxp.Mode);
-        var relayBlocked = await Assert.ThrowsAsync<NotSupportedException>(() => fixture.Service.PlanRemoteTransferAsync(
-            new(ftp.Id, sftp.Id, "/a", "/b"), TestContext.Current.CancellationToken));
-        Assert.Contains("separately pinned", relayBlocked.Message, StringComparison.OrdinalIgnoreCase);
+        var uploadRelay = await fixture.Service.PlanRemoteTransferAsync(
+            new(ftp.Id, sftp.Id, "/a", "/b"), TestContext.Current.CancellationToken);
+        var downloadRelay = await fixture.Service.PlanRemoteTransferAsync(
+            new(sftp.Id, ftp.Id, "/a", "/b"), TestContext.Current.CancellationToken);
+        var sftp2 = sftp with { Id = Guid.NewGuid(), Name = "SFTP 2", Host = "sftp-two.example" };
+        await fixture.Profiles.SaveAsync(sftp2, TestContext.Current.CancellationToken);
+        var sftpRelay = await fixture.Service.PlanRemoteTransferAsync(
+            new(sftp.Id, sftp2.Id, "/a", "/b"), TestContext.Current.CancellationToken);
+
+        Assert.Equal(RemoteTransferMode.ClientRelay, uploadRelay.Mode);
+        Assert.Equal(RemoteTransferMode.ClientRelay, downloadRelay.Mode);
+        Assert.Equal(RemoteTransferMode.ClientRelay, sftpRelay.Mode);
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.EnqueueRemoteTransferAsync(
             new(fxp), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task SftpRemoteTransferRelaysThroughSeparatelyPinnedProcessesAndRemovesManagedPayload()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.PasswordProfile(ConnectionProtocol.Sftp, "Source", "source.example");
+        var destination = fixture.PasswordProfile(ConnectionProtocol.Sftp, "Destination", "destination.example");
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(source, "source-secret"), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination, "destination-secret"), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+
+        var enqueued = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).State == JobState.Completed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RemoteTransferMode.ClientRelay, enqueued.Mode);
+        Assert.Contains("two isolated", enqueued.RoutingNote, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag == "remote-transfer");
+        var sourceStart = Assert.Single(fixture.ProcessHost.Starts,
+            start => start.Tag == $"remote-relay-source-{plan.Id:N}");
+        var destinationStart = Assert.Single(fixture.ProcessHost.Starts,
+            start => start.Tag == $"remote-relay-destination-{plan.Id:N}");
+        Assert.Equal(["source-secret"], sourceStart.Secrets);
+        Assert.Equal(["destination-secret"], destinationStart.Secrets);
+        var sourceInitialization = Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == sourceStart.Tag && item.Command.Contains("sftp:connect-program", StringComparison.Ordinal));
+        var destinationInitialization = Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == destinationStart.Tag && item.Command.Contains("sftp:connect-program", StringComparison.Ordinal));
+        Assert.NotEqual(sourceInitialization.Command, destinationInitialization.Command);
+        Assert.DoesNotContain(destination.Id.ToString("N"), sourceInitialization.Command, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(source.Id.ToString("N"), destinationInitialization.Command, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == sourceStart.Tag && item.Command.StartsWith("get \"/source.bin\" -o ", StringComparison.Ordinal));
+        Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role == destinationStart.Tag && item.Command.Contains("put ", StringComparison.Ordinal) &&
+            item.Command.EndsWith(" -o \"/new-target.bin\"; set xfer:clobber yes; set xfer:use-temp-file yes", StringComparison.Ordinal));
+        var relayDirectory = Path.Combine(fixture.Options.TemporaryRoot, "remote-relays", plan.Id.ToString("N"));
+        Assert.False(Directory.Exists(relayDirectory));
+        var serialized = JsonSerializer.Serialize(new { enqueued, Jobs = fixture.Jobs.GetJobs() }, FramedJsonStream.SerializerOptions);
+        Assert.DoesNotContain("source-secret", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("destination-secret", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(fixture.Options.TemporaryRoot, serialized, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ClientRelayCancellationDisposesSourceProcessAndRemovesManagedPayload()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Sftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/blocking-relay-source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+
+        _ = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.ProcessHost.TaggedCommands.Any(item =>
+                item.Role == $"remote-relay-source-{plan.Id:N}" && item.Command.StartsWith("get ", StringComparison.Ordinal)),
+            TestContext.Current.CancellationToken);
+        Assert.True(fixture.Service.TryCancelOperation(plan.Id, "User cancelled client relay"));
+        await WaitUntilAsync(
+            () => fixture.ProcessHost.DisposedRoles.Contains($"remote-relay-source-{plan.Id:N}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(JobState.Cancelled, fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).State);
+        Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag.StartsWith("remote-relay-destination-", StringComparison.Ordinal));
+        Assert.False(Directory.Exists(Path.Combine(fixture.Options.TemporaryRoot, "remote-relays", plan.Id.ToString("N"))));
+    }
+
+    [Fact]
+    public async Task ClientRelaySourceFailureNeverStartsDestinationAndStillRemovesWorkspace()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Sftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/failing-relay-source.bin", "/new-target.bin"), TestContext.Current.CancellationToken);
+
+        var enqueued = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains(fixture.ProcessHost.Starts, start => start.Tag == $"remote-relay-source-{plan.Id:N}");
+        Assert.DoesNotContain(fixture.ProcessHost.Starts, start => start.Tag.StartsWith("remote-relay-destination-", StringComparison.Ordinal));
+        Assert.False(Directory.Exists(Path.Combine(fixture.Options.TemporaryRoot, "remote-relays", plan.Id.ToString("N"))));
+        Assert.Contains("Permission denied", fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).Error?.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ClientRelayRevalidatesNoOverwriteDestinationAfterDownload()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Sftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/source.bin", "/relay-collision.bin"), TestContext.Current.CancellationToken);
+
+        _ = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
+            item.Role.StartsWith("remote-relay-destination-", StringComparison.Ordinal) && item.Command.Contains("put ", StringComparison.Ordinal));
+        Assert.Contains("appeared after review", fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(Directory.Exists(Path.Combine(fixture.Options.TemporaryRoot, "remote-relays", plan.Id.ToString("N"))));
+    }
+
+    [Fact]
+    public async Task ClientRelayFailureRedactsManagedLocalPathFromDurableJobError()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var source = fixture.AnonymousProfile(ConnectionProtocol.Sftp);
+        var destination = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with
+        {
+            Id = Guid.NewGuid(),
+            Name = "Destination",
+            Host = "destination.example",
+        };
+        await fixture.Service.SaveProfileAsync(new(source), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(new(destination), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(source)), TestContext.Current.CancellationToken);
+        await fixture.Service.ConnectAsync(new(ConnectionIdentity.FromProfile(destination)), TestContext.Current.CancellationToken);
+        var plan = await fixture.Service.PlanRemoteTransferAsync(
+            new(source.Id, destination.Id, "/source.bin", "/failing-relay-target.bin"), TestContext.Current.CancellationToken);
+
+        _ = await fixture.Service.EnqueueRemoteTransferAsync(new(plan), TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+
+        var error = Assert.IsType<EngineError>(fixture.Jobs.GetJobs().Single(job => job.Id == plan.Id).Error);
+        Assert.Contains("<managed-client-relay>", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(fixture.Options.TemporaryRoot, error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(LftpCommandBuilder.ToMsysPath(fixture.Options.TemporaryRoot), error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(Directory.Exists(Path.Combine(fixture.Options.TemporaryRoot, "remote-relays", plan.Id.ToString("N"))));
     }
 
     [Fact]
@@ -4988,10 +5167,36 @@ public sealed class WorkspaceTests
                     ? new LftpCommandResult([new("stderr", "mirror: Access failed: simulated directory transfer failure")])
                     : new LftpCommandResult([]));
             }
-            if (role == "remote-edit-download" && command.StartsWith("get ", StringComparison.Ordinal))
+            if (role.StartsWith("remote-relay-source-", StringComparison.Ordinal) &&
+                command.StartsWith("get ", StringComparison.Ordinal) &&
+                command.Contains("failing-relay-source.bin", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new LftpCommandResult([new("stderr", "get: Access failed: Permission denied")]));
+            }
+            if (role.StartsWith("remote-relay-source-", StringComparison.Ordinal) &&
+                command.StartsWith("get ", StringComparison.Ordinal) &&
+                command.Contains("blocking-relay-source.bin", StringComparison.Ordinal))
+            {
+                return WaitForCancellationAsync(cancellationToken);
+            }
+            if (role.StartsWith("remote-relay-destination-", StringComparison.Ordinal) &&
+                command.Contains("put ", StringComparison.Ordinal) &&
+                command.Contains("failing-relay-target.bin", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new LftpCommandResult([new("stderr", $"put: simulated failure ({command})")]));
+            }
+            if ((role == "remote-edit-download" || role.StartsWith("remote-relay-source-", StringComparison.Ordinal)) &&
+                command.StartsWith("get ", StringComparison.Ordinal))
             {
                 WriteRemoteEditDownload(command);
                 return Task.FromResult(new LftpCommandResult([]));
+            }
+            if (IsStatCommand(command) && command.Contains("/relay-collision.bin", StringComparison.Ordinal))
+            {
+                var attempt = statAttempts.AddOrUpdate("relay-collision", 1, static (_, count) => count + 1);
+                return Task.FromResult(attempt == 1
+                    ? new LftpCommandResult([new("stderr", "cls: Access failed: No such file")])
+                    : new LftpCommandResult([new("stdout", RemoteEditListing(command))]));
             }
             if (IsStatCommand(command) && command.Contains("/stat-drift-directory", StringComparison.Ordinal))
             {
@@ -5184,6 +5389,7 @@ public sealed class WorkspaceTests
                     [new("stderr", "recls: Access failed: 550 No such file or directory. (/remote/different-target)")],
                 var value when IsStatCommand(value) &&
                     (value.Contains("/created", StringComparison.Ordinal) || value.Contains("/renamed.txt", StringComparison.Ordinal) ||
+                     value.Contains("/failing-relay-target.bin", StringComparison.Ordinal) ||
                      value.Contains("/new-target.bin", StringComparison.Ordinal)) =>
                     [new("stderr", "cls: Access failed: No such file")],
                 var value when IsStatCommand(value) &&

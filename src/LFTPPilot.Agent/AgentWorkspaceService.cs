@@ -1338,7 +1338,6 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             _profileTrustGate.Release();
         }
-        ThrowIfRemoteTransferNeedsIsolatedSftpRelay(source.Protocol, destination.Protocol);
         await _remoteTransferGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -1425,7 +1424,6 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             throw new InvalidOperationException(
                 "A source or destination connection identity changed after route review. Create and review a fresh remote-transfer plan.");
         }
-        ThrowIfRemoteTransferNeedsIsolatedSftpRelay(source.Profile.Protocol, destination.Profile.Protocol);
         var expectedMode = ComputeRemoteTransferMode(source.Profile.Protocol, destination.Profile.Protocol);
         if (request.Plan.Mode != expectedMode)
             throw new ArgumentException("The remote transfer routing mode does not match the active profile protocols.", nameof(request));
@@ -1444,7 +1442,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
         var routingNote = expectedMode == RemoteTransferMode.Fxp
             ? "FXP preferred between FTP-family servers; LFTP will relay through this client if FXP is unavailable."
-            : "Client-relay routing through LFTP is required for this protocol combination.";
+            : "Managed client relay uses two isolated LFTP processes; FXP is unavailable for this protocol combination.";
         var job = _jobs.Enqueue(new(
             request.Plan.Id,
             JobKind.RemoteTransfer,
@@ -1705,15 +1703,22 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         try
         {
             _jobs.Transition(jobId, JobState.Running, routingNote);
-            await _sessions.WithRemoteTransferAsync(source, destination, jobId, async process =>
+            if (plan.Mode == RemoteTransferMode.ClientRelay)
             {
-                var result = await process.ExecuteAsync(
-                    LftpCommandBuilder.BuildRemoteTransfer(plan),
-                    _options.TransferTimeout,
-                    cancellationToken).ConfigureAwait(false);
-                SessionRegistry.ThrowIfFailed(result, "Remote-to-remote transfer");
-                return true;
-            }, cancellationToken).ConfigureAwait(false);
+                await RunClientRelayAsync(source, destination, plan, jobId, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await _sessions.WithRemoteTransferAsync(source, destination, jobId, async process =>
+                {
+                    var result = await process.ExecuteAsync(
+                        LftpCommandBuilder.BuildRemoteTransfer(plan),
+                        _options.TransferTimeout,
+                        cancellationToken).ConfigureAwait(false);
+                    SessionRegistry.ThrowIfFailed(result, "Remote-to-remote transfer");
+                    return true;
+                }, cancellationToken).ConfigureAwait(false);
+            }
             cancellationToken.ThrowIfCancellationRequested();
             _jobs.Transition(jobId, JobState.Completed, $"Completed. {routingNote}");
         }
@@ -1725,6 +1730,162 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             TryFailJob(jobId, exception);
         }
+    }
+
+    private async Task RunClientRelayAsync(
+        WorkspaceSession source,
+        WorkspaceSession destination,
+        RemoteTransferPlan plan,
+        Guid jobId,
+        CancellationToken cancellationToken)
+    {
+        var (relayDirectory, relayPath) = CreateRemoteRelayWorkspace(jobId);
+        Exception? operationFailure = null;
+        try
+        {
+            var sourceSize = await source.WithEphemeralSessionAsync(
+                $"remote-relay-source-{jobId:N}",
+                async process =>
+                {
+                    await ValidateRemoteEndpointTreeAsync(
+                        process,
+                        plan.SourcePath,
+                        TransferSourceKind.File,
+                        required: true,
+                        "client-relay source",
+                        cancellationToken).ConfigureAwait(false);
+                    var sourceEntry = await TryStatRemoteAsync(process, plan.SourcePath, cancellationToken).ConfigureAwait(false)
+                        ?? throw new FileNotFoundException("The client-relay source disappeared before download.");
+                    RequireRemoteTransferKind(sourceEntry, TransferSourceKind.File, "client-relay source");
+                    var result = await process.ExecuteAsync(
+                        LftpCommandBuilder.BuildRemoteRelayDownload(plan.SourcePath, relayPath),
+                        _options.TransferTimeout,
+                        cancellationToken).ConfigureAwait(false);
+                    SessionRegistry.ThrowIfFailed(result, "Client-relay source download");
+                    return sourceEntry.Size;
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            ValidateRemoteRelayPayload(relayPath, sourceSize);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            await destination.WithEphemeralSessionAsync(
+                $"remote-relay-destination-{jobId:N}",
+                async process =>
+                {
+                    await ValidateRemoteEndpointTreeAsync(
+                        process,
+                        plan.DestinationPath,
+                        TransferSourceKind.File,
+                        required: false,
+                        "client-relay destination",
+                        cancellationToken).ConfigureAwait(false);
+                    var destinationEntry = await TryStatRemoteAsync(process, plan.DestinationPath, cancellationToken).ConfigureAwait(false);
+                    if (destinationEntry?.Kind == EntryKind.Directory)
+                        throw new IOException("The client-relay destination became a directory before upload.");
+                    if (destinationEntry is not null && !plan.Overwrite)
+                        throw new IOException("The client-relay destination appeared after review and overwrite was not approved.");
+                    if (destinationEntry is not null)
+                        RequireRemoteTransferKind(destinationEntry, TransferSourceKind.File, "client-relay destination");
+
+                    var result = await process.ExecuteAsync(
+                        LftpCommandBuilder.BuildRemoteRelayUpload(relayPath, plan.DestinationPath, plan.Overwrite),
+                        _options.TransferTimeout,
+                        cancellationToken).ConfigureAwait(false);
+                    SessionRegistry.ThrowIfFailed(result, "Client-relay destination upload");
+                    return true;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (!IsFatalRuntimeException(exception))
+        {
+            operationFailure = SanitizeRemoteRelayFailure(exception, relayDirectory);
+        }
+
+        try
+        {
+            DeleteRemoteRelayWorkspace(relayDirectory);
+        }
+        catch (Exception cleanupFailure) when (!IsFatalRuntimeException(cleanupFailure))
+        {
+            throw operationFailure is null
+                ? new IOException("The client-relay transfer finished, but its managed temporary data could not be removed.", cleanupFailure)
+                : new IOException("The client-relay transfer failed and its managed temporary data could not be removed.",
+                    new AggregateException(operationFailure, cleanupFailure));
+        }
+
+        if (operationFailure is not null)
+            ExceptionDispatchInfo.Capture(operationFailure).Throw();
+    }
+
+    private static Exception SanitizeRemoteRelayFailure(Exception exception, string relayDirectory)
+    {
+        if (exception is OperationCanceledException) return exception;
+        var message = exception.Message
+            .Replace(relayDirectory, "<managed-client-relay>", StringComparison.OrdinalIgnoreCase)
+            .Replace(LftpCommandBuilder.ToMsysPath(relayDirectory), "<managed-client-relay>", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(message, exception.Message, StringComparison.Ordinal)
+            ? exception
+            : new IOException(message, exception);
+    }
+
+    private (string Directory, string Payload) CreateRemoteRelayWorkspace(Guid jobId)
+    {
+        var root = Path.GetFullPath(Path.Combine(_options.TemporaryRoot, "remote-relays"));
+        var directory = Path.GetFullPath(Path.Combine(root, jobId.ToString("N")));
+        var created = false;
+        try
+        {
+            ValidateLocalTransferAncestors(Path.Combine(directory, "payload.bin"));
+            if (TryGetLocalTransferAttributes(directory) is not null)
+                throw new IOException("The managed client-relay workspace unexpectedly already exists.");
+            Directory.CreateDirectory(directory);
+            created = true;
+            if (ClassifyLocalTransferAttributes(File.GetAttributes(directory)) != TransferSourceKind.Directory)
+                throw new IOException("The managed client-relay workspace is not a regular directory.");
+            return (directory, Path.Combine(directory, "payload.bin"));
+        }
+        catch (Exception creationFailure) when (created && !IsFatalRuntimeException(creationFailure))
+        {
+            try
+            {
+                DeleteRemoteRelayWorkspace(directory);
+            }
+            catch (Exception cleanupFailure) when (!IsFatalRuntimeException(cleanupFailure))
+            {
+                throw new IOException("The managed client-relay workspace could not be validated or removed.",
+                    new AggregateException(creationFailure, cleanupFailure));
+            }
+            throw;
+        }
+    }
+
+    private static void ValidateRemoteRelayPayload(string path, long? expectedSize)
+    {
+        ValidateLocalTransferAncestors(path);
+        var attributes = TryGetLocalTransferAttributes(path)
+            ?? throw new InvalidDataException("The client-relay source download did not create its managed payload.");
+        if (ClassifyLocalTransferAttributes(attributes) != TransferSourceKind.File)
+            throw new InvalidDataException("The client-relay source download did not create a regular file.");
+        var actualSize = new FileInfo(path).Length;
+        if (expectedSize is { } size && actualSize != size)
+            throw new InvalidDataException("The client-relay source download size did not match the freshly checked source.");
+    }
+
+    private static void DeleteRemoteRelayWorkspace(string directory)
+    {
+        var attributes = TryGetLocalTransferAttributes(directory);
+        if (attributes is null) return;
+        if (ClassifyLocalTransferAttributes(attributes.Value) != TransferSourceKind.Directory)
+            throw new IOException("The managed client-relay workspace changed kind before cleanup.");
+        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+        {
+            var entryAttributes = File.GetAttributes(entry);
+            if (ClassifyLocalTransferAttributes(entryAttributes) != TransferSourceKind.File)
+                throw new IOException("The managed client-relay workspace contains an unexpected non-file entry.");
+            File.Delete(entry);
+        }
+        Directory.Delete(directory, recursive: false);
     }
 
     private async Task<bool> DestinationExistsAsync(WorkspaceSession session, TransferPlan plan, CancellationToken cancellationToken)
@@ -2004,15 +2165,6 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         source != ConnectionProtocol.Sftp && destination != ConnectionProtocol.Sftp
             ? RemoteTransferMode.Fxp
             : RemoteTransferMode.ClientRelay;
-
-    private static void ThrowIfRemoteTransferNeedsIsolatedSftpRelay(
-        ConnectionProtocol source,
-        ConnectionProtocol destination)
-    {
-        if (source != ConnectionProtocol.Sftp && destination != ConnectionProtocol.Sftp) return;
-        throw new NotSupportedException(
-            "SFTP and mixed-protocol remote-to-remote transfers are blocked until client relay uses distinct, separately pinned LFTP processes. FTP-family FXP remains available.");
-    }
 
     private static string NormalizeRemotePath(string path) => path == "/" ? path : path.TrimEnd('/');
 

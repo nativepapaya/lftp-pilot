@@ -335,7 +335,7 @@ public sealed class CommandBuilderTests
     }
 
     [Fact]
-    public void RemoteTransferUsesCredentialFreeSlotUrlsAndScopedFxpRouting()
+    public void RemoteTransferUsesCredentialFreeSlotUrlsAndKeepsClientRelayOutOfTheSharedProcess()
     {
         var source = Guid.NewGuid();
         var destination = Guid.NewGuid();
@@ -345,9 +345,23 @@ public sealed class CommandBuilderTests
         Assert.Equal(
             "set ftp:use-fxp true; set xfer:use-temp-file no; set xfer:clobber no; get \"slot:source/source file.bin\" -o \"slot:destination/target.bin\"; set xfer:clobber yes; set xfer:use-temp-file yes",
             LftpCommandBuilder.BuildRemoteTransfer(fxp));
+        Assert.Throws<InvalidOperationException>(() => LftpCommandBuilder.BuildRemoteTransfer(relay));
+    }
+
+    [Fact]
+    public void RemoteRelayUsesManagedLocalPathAndScopesNoClobberWithoutDeleteBeforeUpload()
+    {
+        const string managed = @"C:\Agent State\relay\payload.bin";
+
         Assert.Equal(
-            "set ftp:use-fxp false; get -e \"slot:source/source file.bin\" -o \"slot:destination/target.bin\"",
-            LftpCommandBuilder.BuildRemoteTransfer(relay));
+            "get \"/source file.bin\" -o \"/c/Agent State/relay/payload.bin\"",
+            LftpCommandBuilder.BuildRemoteRelayDownload("/source file.bin", managed));
+        Assert.Equal(
+            "set xfer:use-temp-file no; set xfer:clobber no; put \"/c/Agent State/relay/payload.bin\" -o \"/target.bin\"; set xfer:clobber yes; set xfer:use-temp-file yes",
+            LftpCommandBuilder.BuildRemoteRelayUpload(managed, "/target.bin", overwrite: false));
+        var overwrite = LftpCommandBuilder.BuildRemoteRelayUpload(managed, "/target.bin", overwrite: true);
+        Assert.Equal("put \"/c/Agent State/relay/payload.bin\" -o \"/target.bin\"", overwrite);
+        Assert.DoesNotContain("put -e", overwrite, StringComparison.Ordinal);
     }
 
     private static ConnectionProfile Profile(ConnectionProtocol protocol, int port) =>

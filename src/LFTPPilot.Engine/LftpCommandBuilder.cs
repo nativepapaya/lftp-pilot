@@ -242,12 +242,30 @@ public static class LftpCommandBuilder
     public static string BuildRemoteTransfer(RemoteTransferPlan plan)
     {
         PlanValidator.Validate(plan);
+        if (plan.Mode != RemoteTransferMode.Fxp)
+            throw new InvalidOperationException("Client relay requires distinct source and destination LFTP processes.");
         var source = SlotUrl("source", plan.SourcePath);
         var destination = SlotUrl("destination", plan.DestinationPath);
-        var routing = plan.Mode == RemoteTransferMode.Fxp ? "set ftp:use-fxp true" : "set ftp:use-fxp false";
         var overwrite = plan.Overwrite ? " -e" : string.Empty;
-        if (plan.Overwrite) return $"{routing}; get{overwrite} {Quote(source)} -o {Quote(destination)}";
-        return $"{routing}; set xfer:use-temp-file no; set xfer:clobber no; get {Quote(source)} -o {Quote(destination)}; set xfer:clobber yes; set xfer:use-temp-file yes";
+        if (plan.Overwrite) return $"set ftp:use-fxp true; get{overwrite} {Quote(source)} -o {Quote(destination)}";
+        return $"set ftp:use-fxp true; set xfer:use-temp-file no; set xfer:clobber no; get {Quote(source)} -o {Quote(destination)}; set xfer:clobber yes; set xfer:use-temp-file yes";
+    }
+
+    public static string BuildRemoteRelayDownload(string remotePath, string managedLocalPath)
+    {
+        EnsureRemoteAbsolute(remotePath, nameof(remotePath));
+        EnsureFullyQualifiedLocalPath(managedLocalPath, nameof(managedLocalPath));
+        return $"get {Quote(DashSafe(remotePath))} -o {Quote(ToMsysPath(managedLocalPath))}";
+    }
+
+    public static string BuildRemoteRelayUpload(string managedLocalPath, string remotePath, bool overwrite)
+    {
+        EnsureFullyQualifiedLocalPath(managedLocalPath, nameof(managedLocalPath));
+        EnsureRemoteAbsolute(remotePath, nameof(remotePath));
+        var upload = $"put {Quote(ToMsysPath(managedLocalPath))} -o {Quote(DashSafe(remotePath))}";
+        return overwrite
+            ? upload
+            : $"set xfer:use-temp-file no; set xfer:clobber no; {upload}; set xfer:clobber yes; set xfer:use-temp-file yes";
     }
 
     public static string BuildRemoteEditDownload(string remotePath, string managedLocalPath)
