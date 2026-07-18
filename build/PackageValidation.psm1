@@ -139,6 +139,91 @@ function Get-PackageContentMap {
     finally { $archive.Dispose() }
 }
 
+function Get-PackageContentTypes {
+    param([Parameter(Mandatory)][string]$MsixPath)
+    $resolved = (Resolve-Path -LiteralPath $MsixPath).Path
+    $archive = [IO.Compression.ZipFile]::OpenRead($resolved)
+    try {
+        $matches = @($archive.Entries | Where-Object FullName -CEQ '[Content_Types].xml')
+        if ($matches.Count -ne 1 -or $matches[0].Length -gt 262144) {
+            throw "Package '$resolved' has missing, ambiguous, or unreasonably large content-type metadata."
+        }
+        $settings = [Xml.XmlReaderSettings]::new()
+        $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+        $settings.XmlResolver = $null
+        $settings.MaxCharactersInDocument = 1048576
+        $stream = $matches[0].Open()
+        $reader = [Xml.XmlReader]::Create($stream, $settings)
+        $document = [Xml.XmlDocument]::new(); $document.XmlResolver = $null
+        try { $document.Load($reader) } finally { $reader.Dispose(); $stream.Dispose() }
+        $root = $document.DocumentElement
+        if ($null -eq $root -or $root.LocalName -cne 'Types' -or
+            $root.NamespaceURI -cne 'http://schemas.openxmlformats.org/package/2006/content-types') {
+            throw "Package '$resolved' has invalid content-type metadata."
+        }
+        $records = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+        foreach ($node in $root.ChildNodes) {
+            if ($node.NodeType -ne [Xml.XmlNodeType]::Element -or $node.NamespaceURI -cne $root.NamespaceURI -or
+                $node.HasChildNodes -or $node.Attributes.Count -ne 2) {
+                throw "Package '$resolved' has unsupported content-type metadata."
+            }
+            if ($node.LocalName -ceq 'Default') {
+                $nameAttribute = 'Extension'
+            }
+            elseif ($node.LocalName -ceq 'Override') {
+                $nameAttribute = 'PartName'
+            }
+            else { throw "Package '$resolved' has unsupported content-type element '$($node.LocalName)'." }
+            $names = @($node.Attributes | ForEach-Object Name | Sort-Object)
+            if (($names -join ',') -cne "ContentType,$nameAttribute") {
+                throw "Package '$resolved' has unsupported content-type attributes."
+            }
+            $name = $node.GetAttribute($nameAttribute)
+            $contentType = $node.GetAttribute('ContentType')
+            $key = "$($node.LocalName)|$name"
+            if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($contentType) -or
+                $records.ContainsKey($key)) {
+                throw "Package '$resolved' has invalid or duplicate content-type metadata."
+            }
+            $records.Add($key, $contentType)
+        }
+        return $records
+    }
+    finally { $archive.Dispose() }
+}
+
+function Compare-PackageSigningContentTypes {
+    param(
+        [Parameter(Mandatory)][string]$UnsignedMsix,
+        [Parameter(Mandatory)][string]$SignedMsix
+    )
+    $unsigned = Get-PackageContentTypes -MsixPath $UnsignedMsix
+    $signed = Get-PackageContentTypes -MsixPath $SignedMsix
+    $signingRecords = [ordered]@{
+        'Override|/AppxSignature.p7x' = 'application/vnd.ms-appx.signature'
+        'Override|/AppxMetadata/CodeIntegrity.cat' = 'application/vnd.ms-pkiseccat'
+    }
+    if ($signed.Count -ne ($unsigned.Count + $signingRecords.Count)) {
+        throw 'Signing changed the content-type record count beyond the two reviewed signing records.'
+    }
+    foreach ($key in $unsigned.Keys) {
+        if (-not $signed.ContainsKey($key) -or $signed[$key] -cne $unsigned[$key]) {
+            throw "Signing changed package content-type record '$key'."
+        }
+    }
+    foreach ($entry in $signingRecords.GetEnumerator()) {
+        if ($unsigned.ContainsKey($entry.Key) -or -not $signed.ContainsKey($entry.Key) -or
+            $signed[$entry.Key] -cne $entry.Value) {
+            throw "Signing did not add the exact reviewed content-type record '$($entry.Key)'."
+        }
+    }
+    foreach ($key in $signed.Keys) {
+        if (-not $unsigned.ContainsKey($key) -and -not $signingRecords.Contains($key)) {
+            throw "Signing added unexpected package content-type record '$key'."
+        }
+    }
+}
+
 function Compare-LftpPilotSignedPayload {
     [CmdletBinding()]
     param(
@@ -150,21 +235,26 @@ function Compare-LftpPilotSignedPayload {
     if ($unsignedPath -eq $signedPath) { throw 'Unsigned and signed package paths must be different files.' }
     $unsigned = Get-PackageContentMap $unsignedPath
     $signed = Get-PackageContentMap $signedPath
-    if ($unsigned.ContainsKey('AppxSignature.p7x')) { throw 'The attested input already contains AppxSignature.p7x.' }
-    if (-not $signed.ContainsKey('AppxSignature.p7x') -or $signed['AppxSignature.p7x'].Name -cne 'AppxSignature.p7x' -or
-        $signed['AppxSignature.p7x'].Length -le 0) { throw 'The signed package lacks a non-empty canonical AppxSignature.p7x entry.' }
-    if ($signed.Count -ne ($unsigned.Count + 1)) {
-        throw "The signed package entry count $($signed.Count) is not exactly the unsigned count $($unsigned.Count) plus its signature."
+    foreach ($signingEntry in @('AppxSignature.p7x', 'AppxMetadata/CodeIntegrity.cat')) {
+        if ($unsigned.ContainsKey($signingEntry)) { throw "The attested input already contains $signingEntry." }
+        if (-not $signed.ContainsKey($signingEntry) -or $signed[$signingEntry].Name -cne $signingEntry -or
+            $signed[$signingEntry].Length -le 0) { throw "The signed package lacks non-empty canonical signing entry '$signingEntry'." }
     }
+    if ($signed.Count -ne ($unsigned.Count + 2)) {
+        throw "The signed package entry count $($signed.Count) is not exactly the unsigned count $($unsigned.Count) plus its two signing entries."
+    }
+    Compare-PackageSigningContentTypes -UnsignedMsix $unsignedPath -SignedMsix $signedPath
     foreach ($name in $unsigned.Keys) {
         if (-not $signed.ContainsKey($name)) { throw "Signing removed package payload '$name'." }
+        if ($name -ceq '[Content_Types].xml') { continue }
         $before = $unsigned[$name]; $after = $signed[$name]
         if ($before.Name -cne $after.Name -or $before.Length -ne $after.Length -or $before.Sha256 -cne $after.Sha256) {
             throw "Signing changed package payload '$name'."
         }
     }
     foreach ($name in $signed.Keys) {
-        if ($name -cne 'AppxSignature.p7x' -and -not $unsigned.ContainsKey($name)) {
+        if ($name -cne 'AppxSignature.p7x' -and $name -cne 'AppxMetadata/CodeIntegrity.cat' -and
+            -not $unsigned.ContainsKey($name)) {
             throw "Signing added unexpected package payload '$name'."
         }
     }
@@ -175,6 +265,7 @@ function Compare-LftpPilotSignedPayload {
         SignedSha256=Get-FileSha256 $signedPath
         PayloadEntryCount=$unsigned.Count
         SignatureSha256=$signed['AppxSignature.p7x'].Sha256
+        CodeIntegritySha256=$signed['AppxMetadata/CodeIntegrity.cat'].Sha256
     }
 }
 

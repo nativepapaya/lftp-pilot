@@ -53,9 +53,10 @@ $provenance | Add-Member -NotePropertyName signedArtifact -NotePropertyValue ([o
     name='LFTPPilot.msix'; length=[long]$signedFile.Length; sha256=(Get-FileSha256 $signedFile.FullName)
 })
 $provenance | Add-Member -NotePropertyName payloadBinding -NotePropertyValue ([ordered]@{
-    policy='Every decoded ZIP entry must be byte-identical to the attested unsigned package; only non-empty AppxSignature.p7x may be added.'
+    policy='Every decoded ZIP entry must be byte-identical to the attested unsigned package except reviewed SignTool metadata: AppxSignature.p7x, AppxMetadata/CodeIntegrity.cat, and their exact content-type overrides.'
     payloadEntryCount=[int]$payloadBinding.PayloadEntryCount
     signatureSha256=[string]$payloadBinding.SignatureSha256
+    codeIntegritySha256=[string]$payloadBinding.CodeIntegritySha256
 })
 $provenance | Add-Member -NotePropertyName certificateSha256 -NotePropertyValue $certificateSha256
 [IO.File]::WriteAllText($provenancePath, (($provenance | ConvertTo-Json -Depth 40) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
