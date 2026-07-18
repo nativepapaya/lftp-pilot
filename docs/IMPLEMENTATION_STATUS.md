@@ -77,8 +77,9 @@ still needs real servers, signed packages, or additional product development.
   Agent/Engine/runtime path against separate loopback FTP, opportunistic FTP
   TLS, FTPES, implicit FTPS, and SFTP servers. Password authentication, strict
   TLS and SFTP host trust, Unicode browse/mutation, upload, segmented download,
-  outbound Explorer export, move, delete, and process cleanup pass across all
-  five endpoints without
+  interrupted resume, failed-transfer retry, active cancellation, outbound
+  Explorer export, move, delete, and process cleanup pass across all five
+  protocol surfaces without
   installing a system service or changing the user's certificate store. Its
   exact test-only Python dependency graph is version- and hash-pinned.
 - LFTP-backed uploads/downloads, resume and skip policies, segmented `pget`,
@@ -122,11 +123,14 @@ still needs real servers, signed packages, or additional product development.
   Agent bootstrap reconciles the stable definition identifier.
 - Read-only isolated advanced console; local shell syntax and structured
   mutation/transfer commands are blocked.
-- Reviewed FTP-family remote-to-remote file plans and jobs prefer FXP with
-  LFTP's client-relay fallback. SFTP and mixed pairs use a managed client relay
-  with distinct source and destination processes, independently pinned host
-  trust, a freshly size-checked Agent-owned payload, destination no-clobber
-  revalidation, and terminal cleanup on success, failure, or cancellation. The
+- Reviewed plain-FTP remote-to-remote file plans and jobs prefer FXP with
+  LFTP's client-side fallback. TLS-protected FTP, SFTP, and mixed pairs use a
+  managed client relay with distinct source and destination processes,
+  independently pinned trust, a freshly size-checked Agent-owned payload,
+  destination no-clobber revalidation, and terminal cleanup on success,
+  failure, or cancellation. The controlled lab proves direct plain-FTP FXP,
+  forced fallback after both FXP dispositions are rejected, encrypted
+  FTP-family relay, SFTP-to-SFTP relay, and both mixed directions. The
   Agent issues each reviewed plan ID, consumes it once as the durable job ID,
   and makes concurrent or lost-reply replays converge on one execution. The
   plan pins both full connection identities, so a profile endpoint or user
@@ -174,11 +178,6 @@ still needs real servers, signed packages, or additional product development.
 
 ## Still required before 1.0 acceptance
 
-- Complete the controlled matrix for interrupted resume, failed-transfer
-  retry, active cancellation, FTP-to-FTP FXP/client-relay routing, and the
-  remaining routing cases. Password authentication, both SSH-key modes,
-  Unicode browse/mutation, TLS, upload, and segmented download already pass on
-  every applicable supported protocol.
 - Exercise managed-cache editing, concurrent target changes, staging promotion,
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.

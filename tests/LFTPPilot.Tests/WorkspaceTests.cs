@@ -3478,18 +3478,22 @@ public sealed class WorkspaceTests
     }
 
     [Fact]
-    public async Task RemoteTransferPlanningChoosesFxpOnlyForFtpFamily()
+    public async Task RemoteTransferPlanningChoosesFxpOnlyForTwoPlainFtpEndpoints()
     {
         await using var fixture = new WorkspaceFixture();
-        var ftp = fixture.AnonymousProfile(ConnectionProtocol.FtpsExplicit);
+        var ftp = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
         var ftp2 = fixture.AnonymousProfile(ConnectionProtocol.Ftp) with { Id = Guid.NewGuid(), Name = "FTP 2", Host = "two.example" };
+        var ftps = fixture.AnonymousProfile(ConnectionProtocol.FtpsExplicit) with { Id = Guid.NewGuid(), Name = "FTPES", Host = "secure.example" };
         var sftp = fixture.AnonymousProfile(ConnectionProtocol.Sftp) with { Id = Guid.NewGuid(), Name = "SFTP", Host = "sftp.example" };
         await fixture.Profiles.SaveAsync(ftp, TestContext.Current.CancellationToken);
         await fixture.Profiles.SaveAsync(ftp2, TestContext.Current.CancellationToken);
+        await fixture.Profiles.SaveAsync(ftps, TestContext.Current.CancellationToken);
         await fixture.Profiles.SaveAsync(sftp, TestContext.Current.CancellationToken);
 
         var fxp = await fixture.Service.PlanRemoteTransferAsync(new(ftp.Id, ftp2.Id, "/a", "/b"), TestContext.Current.CancellationToken);
         Assert.Equal(RemoteTransferMode.Fxp, fxp.Mode);
+        var encryptedRelay = await fixture.Service.PlanRemoteTransferAsync(
+            new(ftps.Id, ftp2.Id, "/a", "/b"), TestContext.Current.CancellationToken);
         var uploadRelay = await fixture.Service.PlanRemoteTransferAsync(
             new(ftp.Id, sftp.Id, "/a", "/b"), TestContext.Current.CancellationToken);
         var downloadRelay = await fixture.Service.PlanRemoteTransferAsync(
@@ -3502,6 +3506,7 @@ public sealed class WorkspaceTests
         Assert.Equal(RemoteTransferMode.ClientRelay, uploadRelay.Mode);
         Assert.Equal(RemoteTransferMode.ClientRelay, downloadRelay.Mode);
         Assert.Equal(RemoteTransferMode.ClientRelay, sftpRelay.Mode);
+        Assert.Equal(RemoteTransferMode.ClientRelay, encryptedRelay.Mode);
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.EnqueueRemoteTransferAsync(
             new(fxp), TestContext.Current.CancellationToken));
     }
@@ -3688,7 +3693,7 @@ public sealed class WorkspaceTests
     public async Task RemoteTransferExecutesFxpPreferredJobWithoutPuttingCredentialsInArgumentsOrResults()
     {
         await using var fixture = new WorkspaceFixture();
-        var source = fixture.PasswordProfile(ConnectionProtocol.FtpsExplicit, "Source", "source.example");
+        var source = fixture.PasswordProfile(ConnectionProtocol.Ftp, "Source", "source.example");
         var destination = fixture.PasswordProfile(ConnectionProtocol.Ftp, "Destination", "destination.example");
         await fixture.Service.SaveProfileAsync(new(source, "source-secret"), TestContext.Current.CancellationToken);
         await fixture.Service.SaveProfileAsync(new(destination, "destination-secret"), TestContext.Current.CancellationToken);

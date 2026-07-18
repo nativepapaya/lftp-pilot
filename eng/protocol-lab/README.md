@@ -1,8 +1,10 @@
 # Controlled protocol lab
 
-This test-only lab creates five disposable loopback servers for the real LFTP
-acceptance matrix: FTP, opportunistic FTP TLS, explicit FTPS, implicit FTPS,
-and SFTP. The SFTP endpoint supplies unencrypted and passphrase-encrypted
+This test-only lab creates the five supported loopback protocol surfaces plus
+three plain-FTP routing peers for the real LFTP acceptance matrix: FTP,
+opportunistic FTP TLS, explicit FTPS, implicit FTPS, and SFTP. Dedicated peers
+allow direct FXP and a forced client-fallback path to be verified separately.
+The SFTP endpoint supplies unencrypted and passphrase-encrypted
 client keys and can rotate its host key in place so enrollment, unchanged
 trust, and replacement are tested against one endpoint. The lab never installs
 or enables a Windows service and never listens on a non-loopback interface.

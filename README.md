@@ -11,7 +11,7 @@ tree does not yet authorize a public binary release.
 
 The current bootstrap is an engineering preview, not a 1.0 release. See
 [Implementation status](docs/IMPLEMENTATION_STATUS.md) for the exact working
-surface and the remaining real-server, tray, and signed-update
+surface and the remaining managed-edit, folder-control, and signed-update
 acceptance work.
 
 ## Product direction
