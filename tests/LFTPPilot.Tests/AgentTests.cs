@@ -354,6 +354,28 @@ public sealed class AgentTests
     }
 
     [Fact]
+    public async Task IdleExitCountdownUsesTheReliableControlClientLifetime()
+    {
+        using var directory = new TemporaryDirectory();
+        using var runCancellation = new CancellationTokenSource();
+        await using var host = new AgentHost(Path.Combine(directory.Path, "jobs.json"));
+        var run = host.RunAsync(runCancellation.Token);
+
+        Task idleExit;
+        await using (var client = new NamedPipeEngineClient(Environment.ProcessId))
+        {
+            _ = await client.RequestAsync("ping", cancellationToken: TestContext.Current.CancellationToken);
+            idleExit = host.WaitForIdleExitAsync(TimeSpan.FromMilliseconds(25), TestContext.Current.CancellationToken);
+            await Task.Delay(60, TestContext.Current.CancellationToken);
+            Assert.False(idleExit.IsCompleted);
+        }
+
+        await idleExit.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        runCancellation.Cancel();
+        await run.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task CurrentUserPipeSupportsPingDurableQueueAndCancel()
     {
         using var directory = new TemporaryDirectory();

@@ -9,6 +9,14 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- The background Agent now owns a native Windows notification-area surface.
+  Double-clicking it or choosing Open restores the transfer view through the
+  allowlisted activation route, while the explicitly labeled stop command
+  performs the same graceful Agent shutdown and process-tree cleanup as the
+  App. After the last App disconnects, scheduled work and managed edits keep
+  the Agent alive; once background work finishes, a two-minute recovery window
+  expires before it exits automatically. An orphaned Agent that never receives
+  an App connection follows the same policy after workspace restoration.
 - Initial native Windows repository, architecture, and product foundation.
 - Virtualized WinUI dual panes, persistent Agent sessions, native file
   operations, Quick Access bookmarks, transfer activity, and reviewed remote

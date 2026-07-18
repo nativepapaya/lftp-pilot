@@ -18,6 +18,14 @@ internal sealed class ManualTimeProvider(DateTimeOffset initialUtcNow) : TimePro
 
     public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 
+    public int ScheduledTimerCount
+    {
+        get
+        {
+            lock (_gate) return _timers.Count(timer => !timer.Disposed && timer.DueAt is not null);
+        }
+    }
+
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {
         ArgumentNullException.ThrowIfNull(callback);

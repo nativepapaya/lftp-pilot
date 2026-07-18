@@ -59,6 +59,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private Task? _disposeTask;
     private bool _disposed;
 
+    internal bool HasActiveRemoteEdits => _remoteEdits.GetSnapshots().Count > 0;
+
     public AgentWorkspaceService(
         IProfileStore profileStore,
         ISecretStore secretStore,

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using LFTPPilot.Engine;
 using LFTPPilot.Windows.Security;
+using LFTPPilot.Windows.Shell;
 using LFTPPilot.Windows.Storage;
 
 namespace LFTPPilot.Agent;
@@ -8,6 +9,7 @@ namespace LFTPPilot.Agent;
 public static class Program
 {
     private const string MutexName = "Local\\LFTPPilot.Agent.v1";
+    private static readonly TimeSpan IdleExitDelay = TimeSpan.FromMinutes(2);
 
     public static async Task<int> Main(string[] args)
     {
@@ -21,6 +23,7 @@ public static class Program
         if (!createdNew) return 0;
         using var shutdown = new CancellationTokenSource();
         Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; shutdown.Cancel(); };
+        using var tray = AgentTrayHost.TryStart(shutdown.Cancel);
 
         var paths = PackageDataPaths.CreateDefault();
         paths.EnsureCreated();
@@ -45,8 +48,21 @@ public static class Program
                 Path.Combine(paths.MirrorDefinitions, JsonMirrorDefinitionStore.FileName)),
             historyStore: new JsonHistoryStore(Path.Combine(paths.History, "history.json"))))
         {
-            try { await host.RunAsync(shutdown.Token).ConfigureAwait(false); }
+            using var runLifetime = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
+            try
+            {
+                var run = host.RunAsync(runLifetime.Token);
+                var idleExit = host.WaitForIdleExitAsync(IdleExitDelay, runLifetime.Token);
+                var completed = await Task.WhenAny(run, idleExit).ConfigureAwait(false);
+                if (completed == idleExit)
+                {
+                    await idleExit.ConfigureAwait(false);
+                    shutdown.Cancel();
+                }
+                await run.ConfigureAwait(false);
+            }
             catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }
+            finally { await runLifetime.CancelAsync().ConfigureAwait(false); }
         }
 
         // Do not dispose this kill-on-close handle while the assigned agent is
