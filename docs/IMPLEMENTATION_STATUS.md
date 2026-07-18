@@ -146,8 +146,16 @@ still needs real servers, signed packages, or additional product development.
   strong remote path/size/mtime/SHA-256 and local SHA-256 identities. Dirty and
   watcher-failure state survives App reconnects through the Active Edits
   surface; active edits block accidental session disconnect or profile removal.
+  The controlled real-runtime matrix now proves initial cache download, normal
+  reviewed upload, concurrent delete/recreate conflict detection, refresh,
+  explicit missing-target overwrite, and owned-cache teardown across all five
+  supported protocol surfaces. One-shot FTP and SFTP promotion faults also
+  prove that the prior verified backup is restored, staging debris is removed,
+  and the edit remains retryable.
 - Managed copies open only in `%SystemRoot%\System32\notepad.exe` with shell
-  execution disabled and the complete managed path passed as one argument.
+  execution disabled and the complete managed path passed as one argument. The
+  App independently requires that target to be a present regular non-reparse
+  file inside the package-owned remote-edit cache before starting Notepad.
   Upload approval creates an opaque remote sibling, verifies its content,
   freshly revalidates the live target, then uses reviewed backup/promotion and
   fail-closed rollback. Remote editing never applies `put -e` to the live path.
@@ -178,9 +186,6 @@ still needs real servers, signed packages, or additional product development.
 
 ## Still required before 1.0 acceptance
 
-- Exercise managed-cache editing, concurrent target changes, staging promotion,
-  rollback recovery, and the trusted Notepad boundary against the controlled
-  SFTP and FTP-family server matrix.
 - Add richer folder transfer controls such as reusable filters and per-tree
   parallelism.
 - Independently review and stage the exact native and managed third-party

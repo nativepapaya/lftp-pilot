@@ -4,6 +4,7 @@ using LFTPPilot.App.Services;
 using LFTPPilot.App.ViewModels;
 using LFTPPilot.Core;
 using LFTPPilot.Windows.Shell;
+using LFTPPilot.Windows.Storage;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -124,7 +125,9 @@ public sealed partial class SessionWorkspaceView : UserControl
             // supplies only the verified package-scoped managed path, which is
             // passed as one ArgumentList item to the trusted Windows Notepad.
             // Managed content is never handed to ShellExecute or a file association.
-            var start = TrustedEditorLauncher.CreateStartInfo(edit.LocalPath);
+            var start = TrustedEditorLauncher.CreateStartInfo(
+                edit.LocalPath,
+                PackageDataPaths.CreateDefault().RemoteEdits);
             _ = Process.Start(start) ?? throw new InvalidOperationException("Windows did not start Notepad for the managed copy.");
         }
         catch (Exception exception)

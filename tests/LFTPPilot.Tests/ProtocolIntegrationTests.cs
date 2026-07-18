@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 using LFTPPilot.Agent;
 using LFTPPilot.Core;
 using LFTPPilot.Engine;
+using LFTPPilot.Windows.Shell;
 
 namespace LFTPPilot.Tests;
 
@@ -426,6 +427,322 @@ public sealed class ProtocolIntegrationTests
         }
     }
 
+    [Fact]
+    [Trait("Category", "ProtocolIntegration")]
+    public async Task ManagedRemoteEditUsesReviewedCacheAndTransactionalPromotionAcrossEveryProtocol()
+    {
+        var configPath = Environment.GetEnvironmentVariable(ConfigVariable);
+        var executablePath = Environment.GetEnvironmentVariable(RuntimeVariable);
+        if (string.IsNullOrWhiteSpace(configPath) || string.IsNullOrWhiteSpace(executablePath)) return;
+        var config = await LoadConfigAsync(configPath);
+
+        var endpoints = new[]
+        {
+            (ConnectionProtocol.Ftp, config.Endpoints.Ftp),
+            (ConnectionProtocol.FtpOpportunisticTls, config.Endpoints.FtpOpportunisticTls),
+            (ConnectionProtocol.FtpsExplicit, config.Endpoints.FtpsExplicit),
+            (ConnectionProtocol.FtpsImplicit, config.Endpoints.FtpsImplicit),
+            (ConnectionProtocol.Sftp, config.Endpoints.Sftp),
+        };
+        foreach (var (protocol, port) in endpoints)
+        {
+            try
+            {
+                await ExerciseManagedRemoteEditAsync(config, executablePath, protocol, port);
+            }
+            catch (Exception exception)
+            {
+                throw new InvalidOperationException($"The controlled {protocol} managed-edit matrix failed.", exception);
+            }
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "ProtocolIntegration")]
+    public async Task ManagedRemoteEditRestoresBackupAfterRealFtpAndSftpPromotionFailures()
+    {
+        var configPath = Environment.GetEnvironmentVariable(ConfigVariable);
+        var executablePath = Environment.GetEnvironmentVariable(RuntimeVariable);
+        if (string.IsNullOrWhiteSpace(configPath) || string.IsNullOrWhiteSpace(executablePath)) return;
+        var config = await LoadConfigAsync(configPath);
+
+        await ExerciseRemoteEditRollbackAsync(
+            config, executablePath, ConnectionProtocol.Ftp, config.Endpoints.Ftp,
+            config.RemoteEditPromotionFailurePaths.Ftp);
+        await ExerciseRemoteEditRollbackAsync(
+            config, executablePath, ConnectionProtocol.Sftp, config.Endpoints.Sftp,
+            config.RemoteEditPromotionFailurePaths.Sftp);
+    }
+
+    private static async Task ExerciseManagedRemoteEditAsync(
+        ProtocolLabConfig config,
+        string executablePath,
+        ConnectionProtocol protocol,
+        int port)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"lftp-pilot-edit-{protocol}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var (service, jobs, profile, session, options) = await CreateConnectedServiceAsync(
+                config, executablePath, protocol, port, root);
+            await using (service)
+            {
+                var remotePath = $"/managed-edit-{profile.Id:N}.txt";
+                var original = $"original {protocol} {Guid.NewGuid():N}\n";
+                await UploadTextAsync(service, jobs, session, profile, root, remotePath, original, protocol, "original");
+
+                var edit = await service.StartRemoteEditAsync(
+                    new(session.SessionId, remotePath), TestContext.Current.CancellationToken);
+                var managedRoot = Path.Combine(options.CacheRoot, "remote-edits");
+                Assert.Equal(original, await File.ReadAllTextAsync(edit.LocalPath, TestContext.Current.CancellationToken));
+                var editor = TrustedEditorLauncher.CreateStartInfo(edit.LocalPath, managedRoot);
+                Assert.Equal(Path.Combine(Environment.SystemDirectory, "notepad.exe"), editor.FileName);
+                Assert.Collection(editor.ArgumentList, value => Assert.Equal(edit.LocalPath, value));
+
+                var mine = $"my first edit {protocol} {Guid.NewGuid():N}\n";
+                await File.WriteAllTextAsync(edit.LocalPath, mine, TestContext.Current.CancellationToken);
+                var ready = await service.ReviewRemoteEditAsync(
+                    new(edit.EditId), TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditReviewState.ReadyToUpload, ready.State);
+                var uploaded = await service.ResolveRemoteEditAsync(
+                    new(edit.EditId, ready.ReviewToken, RemoteEditResolution.Upload),
+                    TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditActionOutcome.Uploaded, uploaded.Outcome);
+                Assert.False(uploaded.Session.Dirty);
+                Assert.Equal(mine, await DownloadTextAsync(
+                    service, jobs, session, profile, root, remotePath, protocol, "uploaded"));
+                await AssertNoRemoteEditArtifactsAsync(service, session);
+
+                var mineAfterConflict = $"my conflicting edit {protocol} {Guid.NewGuid():N}\n";
+                await File.WriteAllTextAsync(edit.LocalPath, mineAfterConflict, TestContext.Current.CancellationToken);
+                var beforeConflict = await service.ReviewRemoteEditAsync(
+                    new(edit.EditId), TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditReviewState.ReadyToUpload, beforeConflict.State);
+                var otherWriter = $"other writer {protocol} {Guid.NewGuid():N}\n";
+                await service.DeleteEntriesAsync(
+                    new(PaneKind.Remote, [remotePath], session.SessionId, Confirmed: true),
+                    TestContext.Current.CancellationToken);
+                await UploadTextAsync(service, jobs, session, profile, root, remotePath, otherWriter, protocol, "other-writer");
+
+                var conflict = await service.ResolveRemoteEditAsync(
+                    new(edit.EditId, beforeConflict.ReviewToken, RemoteEditResolution.Upload),
+                    TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditActionOutcome.ReviewRequired, conflict.Outcome);
+                var conflictReview = Assert.IsType<RemoteEditReview>(conflict.Review);
+                Assert.Equal(RemoteEditConflictKind.RemoteChanged, conflictReview.Conflict);
+                Assert.Equal(otherWriter, await DownloadTextAsync(
+                    service, jobs, session, profile, root, remotePath, protocol, "conflict-preserved"));
+
+                var refreshed = await service.ResolveRemoteEditAsync(
+                    new(edit.EditId, conflictReview.ReviewToken, RemoteEditResolution.RefreshLocal),
+                    TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditActionOutcome.Refreshed, refreshed.Outcome);
+                Assert.Equal(otherWriter, await File.ReadAllTextAsync(edit.LocalPath, TestContext.Current.CancellationToken));
+
+                var afterDelete = $"explicit overwrite {protocol} {Guid.NewGuid():N}\n";
+                await File.WriteAllTextAsync(edit.LocalPath, afterDelete, TestContext.Current.CancellationToken);
+                await service.DeleteEntriesAsync(
+                    new(PaneKind.Remote, [remotePath], session.SessionId, Confirmed: true),
+                    TestContext.Current.CancellationToken);
+                var missing = await service.ReviewRemoteEditAsync(
+                    new(edit.EditId), TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditReviewState.Conflict, missing.State);
+                Assert.Equal(RemoteEditConflictKind.RemoteMissingOrRenamed, missing.Conflict);
+                var overwritten = await service.ResolveRemoteEditAsync(
+                    new(edit.EditId, missing.ReviewToken, RemoteEditResolution.Overwrite),
+                    TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditActionOutcome.Uploaded, overwritten.Outcome);
+                Assert.Equal(afterDelete, await DownloadTextAsync(
+                    service, jobs, session, profile, root, remotePath, protocol, "overwrite"));
+                await AssertNoRemoteEditArtifactsAsync(service, session);
+
+                var editDirectory = Path.GetDirectoryName(edit.LocalPath)!;
+                Assert.True(await service.CompleteRemoteEditAsync(
+                    new(edit.EditId), TestContext.Current.CancellationToken));
+                Assert.False(Directory.Exists(editDirectory));
+                await service.DeleteEntriesAsync(
+                    new(PaneKind.Remote, [remotePath], session.SessionId, Confirmed: true),
+                    TestContext.Current.CancellationToken);
+                await service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken);
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ExerciseRemoteEditRollbackAsync(
+        ProtocolLabConfig config,
+        string executablePath,
+        ConnectionProtocol protocol,
+        int port,
+        string promotionFailurePath)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"lftp-pilot-edit-rollback-{protocol}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var (service, jobs, profile, session, _) = await CreateConnectedServiceAsync(
+                config, executablePath, protocol, port, root);
+            await using (service)
+            {
+                var remotePath = $"/rollback-edit-{profile.Id:N}.txt";
+                var original = $"rollback original {protocol} {Guid.NewGuid():N}\n";
+                await UploadTextAsync(service, jobs, session, profile, root, remotePath, original, protocol, "rollback-original");
+                var edit = await service.StartRemoteEditAsync(
+                    new(session.SessionId, remotePath), TestContext.Current.CancellationToken);
+                var replacement = $"rollback replacement {protocol} {Guid.NewGuid():N}\n";
+                await File.WriteAllTextAsync(edit.LocalPath, replacement, TestContext.Current.CancellationToken);
+                var review = await service.ReviewRemoteEditAsync(
+                    new(edit.EditId), TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditReviewState.ReadyToUpload, review.State);
+
+                await File.WriteAllTextAsync(promotionFailurePath, "fail once", TestContext.Current.CancellationToken);
+                _ = await Assert.ThrowsAnyAsync<Exception>(() => service.ResolveRemoteEditAsync(
+                    new(edit.EditId, review.ReviewToken, RemoteEditResolution.Upload),
+                    TestContext.Current.CancellationToken));
+                Assert.False(File.Exists(promotionFailurePath), "The controlled server did not consume the promotion fault.");
+                Assert.Equal(original, await DownloadTextAsync(
+                    service, jobs, session, profile, root, remotePath, protocol, "rollback-preserved"));
+                await AssertNoRemoteEditArtifactsAsync(service, session);
+
+                var retryReview = await service.ReviewRemoteEditAsync(
+                    new(edit.EditId), TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditReviewState.ReadyToUpload, retryReview.State);
+                var retry = await service.ResolveRemoteEditAsync(
+                    new(edit.EditId, retryReview.ReviewToken, RemoteEditResolution.Upload),
+                    TestContext.Current.CancellationToken);
+                Assert.Equal(RemoteEditActionOutcome.Uploaded, retry.Outcome);
+                Assert.Equal(replacement, await DownloadTextAsync(
+                    service, jobs, session, profile, root, remotePath, protocol, "rollback-retry"));
+
+                Assert.True(await service.CompleteRemoteEditAsync(
+                    new(edit.EditId), TestContext.Current.CancellationToken));
+                await service.DeleteEntriesAsync(
+                    new(PaneKind.Remote, [remotePath], session.SessionId, Confirmed: true),
+                    TestContext.Current.CancellationToken);
+                await service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken);
+            }
+        }
+        finally
+        {
+            if (File.Exists(promotionFailurePath)) File.Delete(promotionFailurePath);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task<(AgentWorkspaceService Service, JobCoordinator Jobs, ConnectionProfile Profile, SessionSnapshot Session, AgentWorkspaceOptions Options)>
+        CreateConnectedServiceAsync(
+            ProtocolLabConfig config,
+            string executablePath,
+            ConnectionProtocol protocol,
+            int port,
+            string root)
+    {
+        var profiles = new MemoryProfileStore();
+        var secrets = new MemorySecretStore();
+        var hostKeys = new MemoryHostKeyStore();
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), $"Managed edit {protocol}", protocol, config.Host, port,
+            config.Username, AuthenticationKind.Password,
+            InitialRemotePath: "/", InitialLocalPath: root);
+        if (protocol == ConnectionProtocol.Sftp)
+        {
+            await hostKeys.SaveAsync(new(
+                SftpHostKeyManager.CreateBinding(profile),
+                config.SftpHostKeyAlgorithm,
+                config.SftpHostKeyBase64,
+                config.SftpHostKeyFingerprint),
+                TestContext.Current.CancellationToken);
+        }
+        var jobs = new JobCoordinator();
+        var options = AgentWorkspaceOptions.CreateDefault(Path.Combine(root, "agent")) with
+        {
+            ConnectTimeout = TimeSpan.FromSeconds(20),
+            BrowseTimeout = TimeSpan.FromSeconds(20),
+            TransferTimeout = TimeSpan.FromMinutes(2),
+        };
+        var service = new AgentWorkspaceService(
+            profiles,
+            secrets,
+            new SftpHostKeyManager(hostKeys, new UnexpectedHostKeyProbe()),
+            new TlsCaProcessHost(new LftpProcessHost(), config.TlsCaPath),
+            PackagedLftpRuntimeProvider.CreateTestOverride(executablePath),
+            jobs,
+            new MirrorPlanner(),
+            options);
+        try
+        {
+            if (protocol == ConnectionProtocol.Sftp)
+                await service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+            await service.SaveProfileAsync(new(profile, config.Password), TestContext.Current.CancellationToken);
+            var session = await service.ConnectAsync(
+                new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+            return (service, jobs, profile, session, options);
+        }
+        catch
+        {
+            await service.DisposeAsync();
+            throw;
+        }
+    }
+
+    private static async Task UploadTextAsync(
+        AgentWorkspaceService service,
+        JobCoordinator jobs,
+        SessionSnapshot session,
+        ConnectionProfile profile,
+        string root,
+        string remotePath,
+        string content,
+        ConnectionProtocol protocol,
+        string suffix)
+    {
+        var localPath = Path.Combine(root, $"{suffix}-{Guid.NewGuid():N}.txt");
+        await File.WriteAllTextAsync(localPath, content, TestContext.Current.CancellationToken);
+        var queued = await service.EnqueueTransferAsync(new(
+            session.SessionId,
+            new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Upload,
+                localPath, remotePath, TransferMode.Overwrite)),
+            TestContext.Current.CancellationToken);
+        await WaitForCompletedAsync(jobs, queued.Job.Id, protocol);
+    }
+
+    private static async Task<string> DownloadTextAsync(
+        AgentWorkspaceService service,
+        JobCoordinator jobs,
+        SessionSnapshot session,
+        ConnectionProfile profile,
+        string root,
+        string remotePath,
+        ConnectionProtocol protocol,
+        string suffix)
+    {
+        var localPath = Path.Combine(root, $"{suffix}-{Guid.NewGuid():N}.txt");
+        var queued = await service.EnqueueTransferAsync(new(
+            session.SessionId,
+            new TransferPlan(Guid.NewGuid(), profile.Id, TransferDirection.Download,
+                remotePath, localPath, TransferMode.Overwrite)),
+            TestContext.Current.CancellationToken);
+        await WaitForCompletedAsync(jobs, queued.Job.Id, protocol);
+        return await File.ReadAllTextAsync(localPath, TestContext.Current.CancellationToken);
+    }
+
+    private static async Task AssertNoRemoteEditArtifactsAsync(
+        AgentWorkspaceService service,
+        SessionSnapshot session)
+    {
+        var listing = await service.BrowseRemoteAsync(
+            new(session.SessionId, "/", Fresh: true), TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(listing.Entries, entry =>
+            entry.Name.StartsWith(".lftp-pilot-", StringComparison.Ordinal) &&
+            (entry.Name.EndsWith(".upload", StringComparison.Ordinal) ||
+             entry.Name.EndsWith(".backup", StringComparison.Ordinal) ||
+             entry.Name.EndsWith(".failed", StringComparison.Ordinal)));
+    }
+
     private static async Task ExerciseEndpointAsync(
         ProtocolLabConfig config,
         string executablePath,
@@ -661,11 +978,23 @@ public sealed class ProtocolIntegrationTests
         Assert.Fail(failureMessage);
     }
 
-    private static async Task<ProtocolLabConfig> LoadConfigAsync(string configPath) =>
-        JsonSerializer.Deserialize<ProtocolLabConfig>(
-            await File.ReadAllTextAsync(configPath, TestContext.Current.CancellationToken),
-            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-        ?? throw new InvalidDataException("The controlled protocol-lab configuration is empty.");
+    private static async Task<ProtocolLabConfig> LoadConfigAsync(string configPath)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return JsonSerializer.Deserialize<ProtocolLabConfig>(
+                    await File.ReadAllTextAsync(configPath, TestContext.Current.CancellationToken),
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                    ?? throw new InvalidDataException("The controlled protocol-lab configuration is empty.");
+            }
+            catch (IOException) when (attempt < 10)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(20 * attempt), TestContext.Current.CancellationToken);
+            }
+        }
+    }
 
     private sealed record ProtocolLabConfig(
         string Host,
@@ -684,9 +1013,11 @@ public sealed class ProtocolIntegrationTests
         [property: JsonPropertyName("sftp_host_key_generation")] int SftpHostKeyGeneration,
         [property: JsonPropertyName("sftp_rotate_host_key_path")] string SftpRotateHostKeyPath,
         [property: JsonPropertyName("fxp_rejection_paths")] ProtocolLabFxpRejectionPaths FxpRejectionPaths,
+        [property: JsonPropertyName("remote_edit_promotion_failure_paths")] ProtocolLabRemoteEditPromotionFailurePaths RemoteEditPromotionFailurePaths,
         ProtocolLabEndpoints Endpoints);
 
     private sealed record ProtocolLabFxpRejectionPaths(string Source, string Destination);
+    private sealed record ProtocolLabRemoteEditPromotionFailurePaths(string Ftp, string Sftp);
 
     private sealed record ProtocolLabEndpoints(
         int Ftp,

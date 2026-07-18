@@ -129,6 +129,27 @@ class NoFxpFTPHandler(FTPHandler):
         self._reject_fxp()
 
 
+class RemoteEditFaultFTPHandler(FTPHandler):
+    """Fail one staged remote-edit promotion after its backup was created."""
+
+    promotion_failure_path = ""
+
+    def ftp_RNTO(self, path: str) -> None:
+        source = self._rnfr
+        marker = pathlib.Path(self.promotion_failure_path)
+        if (
+            source
+            and marker.exists()
+            and pathlib.Path(source).name.startswith(".lftp-pilot-")
+            and pathlib.Path(source).name.endswith(".upload")
+        ):
+            marker.unlink()
+            self._rnfr = None
+            self.respond("550 Controlled remote-edit promotion failure")
+            return
+        super().ftp_RNTO(path)
+
+
 class FtpEndpoint:
     def __init__(
         self,
@@ -206,9 +227,17 @@ class LabSshServer(paramiko.ServerInterface):
 
 
 class RootedSftpServer(paramiko.SFTPServerInterface):
-    def __init__(self, server: paramiko.ServerInterface, *args: Any, root: str, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        server: paramiko.ServerInterface,
+        *args: Any,
+        root: str,
+        promotion_failure_path: str,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(server, *args, **kwargs)
         self._root = pathlib.Path(root).resolve()
+        self._promotion_failure_path = pathlib.Path(promotion_failure_path)
 
     def _local(self, remote_path: str) -> pathlib.Path:
         normalized = posixpath.normpath("/" + remote_path.lstrip("/"))
@@ -282,7 +311,20 @@ class RootedSftpServer(paramiko.SFTPServerInterface):
         except OSError as exception:
             return self._error(exception)
 
+    def _should_fail_promotion(self, oldpath: str) -> bool:
+        source_name = posixpath.basename(oldpath)
+        if (
+            self._promotion_failure_path.exists()
+            and source_name.startswith(".lftp-pilot-")
+            and source_name.endswith(".upload")
+        ):
+            self._promotion_failure_path.unlink()
+            return True
+        return False
+
     def rename(self, oldpath: str, newpath: str) -> int:
+        if self._should_fail_promotion(oldpath):
+            return paramiko.SFTP_PERMISSION_DENIED
         try:
             os.rename(self._local(oldpath), self._local(newpath))
             return paramiko.SFTP_OK
@@ -290,6 +332,8 @@ class RootedSftpServer(paramiko.SFTPServerInterface):
             return self._error(exception)
 
     def posix_rename(self, oldpath: str, newpath: str) -> int:
+        if self._should_fail_promotion(oldpath):
+            return paramiko.SFTP_PERMISSION_DENIED
         try:
             os.replace(self._local(oldpath), self._local(newpath))
             return paramiko.SFTP_OK
@@ -320,8 +364,14 @@ class RootedSftpServer(paramiko.SFTPServerInterface):
 
 
 class SftpEndpoint:
-    def __init__(self, root: pathlib.Path, identity_root: pathlib.Path) -> None:
+    def __init__(
+        self,
+        root: pathlib.Path,
+        identity_root: pathlib.Path,
+        promotion_failure_path: pathlib.Path,
+    ) -> None:
         self._root = root
+        self._promotion_failure_path = promotion_failure_path
         self._host_key_lock = threading.Lock()
         self._host_key = paramiko.RSAKey.generate(2048)
         self._client_key = paramiko.RSAKey.generate(2048)
@@ -382,7 +432,11 @@ class SftpEndpoint:
                 host_key = self._host_key
             transport.add_server_key(host_key)
             transport.set_subsystem_handler(
-                "sftp", paramiko.SFTPServer, RootedSftpServer, root=str(self._root)
+                "sftp",
+                paramiko.SFTPServer,
+                RootedSftpServer,
+                root=str(self._root),
+                promotion_failure_path=str(self._promotion_failure_path),
             )
             transport.start_server(server=LabSshServer(self._client_key))
             while transport.is_active() and not self._stopping.wait(0.1):
@@ -434,8 +488,14 @@ def main() -> int:
 
     no_fxp_source_marker = root / "no-fxp-source-rejected"
     no_fxp_destination_marker = root / "no-fxp-destination-rejected"
+    ftp_promotion_failure_path = root / "fail-next-ftp-remote-edit-promotion"
+    sftp_promotion_failure_path = root / "fail-next-sftp-remote-edit-promotion"
     endpoints: list[Any] = [
-        FtpEndpoint(endpoint_roots["ftp"], FTPHandler),
+        FtpEndpoint(
+            endpoint_roots["ftp"],
+            RemoteEditFaultFTPHandler,
+            handler_attributes={"promotion_failure_path": str(ftp_promotion_failure_path)},
+        ),
         FtpEndpoint(endpoint_roots["ftp_peer"], FTPHandler),
         FtpEndpoint(
             endpoint_roots["ftp_no_fxp_source"],
@@ -451,7 +511,7 @@ def main() -> int:
         FtpEndpoint(endpoint_roots["ftps_explicit"], TLS_FTPHandler, certificate_path, tls_key_path, require_tls=True),
         FtpEndpoint(endpoint_roots["ftps_implicit"], ImplicitTLSFTPHandler, certificate_path, tls_key_path, require_tls=True),
     ]
-    sftp = SftpEndpoint(endpoint_roots["sftp"], root)
+    sftp = SftpEndpoint(endpoint_roots["sftp"], root, sftp_promotion_failure_path)
     endpoints.append(sftp)
     for endpoint in endpoints:
         endpoint.start()
@@ -477,6 +537,10 @@ def main() -> int:
         "fxp_rejection_paths": {
             "source": str(no_fxp_source_marker),
             "destination": str(no_fxp_destination_marker),
+        },
+        "remote_edit_promotion_failure_paths": {
+            "ftp": str(ftp_promotion_failure_path),
+            "sftp": str(sftp_promotion_failure_path),
         },
         "endpoints": {
             "ftp": endpoints[0].port,

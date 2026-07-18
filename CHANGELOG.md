@@ -9,6 +9,12 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- Managed remote editing now has a real-runtime acceptance matrix across FTP,
+  opportunistic TLS, FTPES, implicit FTPS, and SFTP. It proves reviewed cache
+  uploads, concurrent delete/recreate conflicts, refresh, explicit overwrite,
+  cleanup, and forced FTP/SFTP promotion rollback with a retryable edit. The
+  App now also refuses to launch Notepad unless the Agent-returned file is a
+  present regular non-reparse entry inside the package-owned edit cache.
 - The controlled real-runtime matrix now proves interrupted segmented resume,
   recoverable failed-transfer retry, active rate-limited cancellation and
   isolated-process cleanup across every supported protocol. Dedicated FTP

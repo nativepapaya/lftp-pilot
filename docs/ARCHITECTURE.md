@@ -71,6 +71,10 @@ the App while keeping both package trees read-only.
   before backup and rename-based promotion. Rollback preserves a backup or
   quarantined concurrent version rather than deleting ambiguous remote data;
   the live path is never overwritten with `put -e`.
+- Before the App starts the trusted System32 Notepad executable, it independently
+  verifies that the Agent-returned path resolves to a present regular
+  non-reparse file beneath the package-owned managed-edit cache. The path is
+  passed as one `ArgumentList` item with shell execution disabled.
 - Remote-to-remote transfers between two plain FTP endpoints use one LFTP
   process that prefers FXP and can fall back to LFTP's client copy. TLS-protected
   FTP, SFTP, and mixed-protocol routes use two sequential, endpoint-specific
