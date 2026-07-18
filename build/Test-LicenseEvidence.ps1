@@ -147,18 +147,19 @@ foreach ($item in $evidence.managedPackages) {
         $seenFiles[$fileKey] = $file.sha256
     }
     $distribution = $item.distributionArchive
-    if ($null -eq $distribution -or $distribution.kind -cne 'nupkg' -or $distribution.sha512 -cne $expected.Sha512 -or
+    if ($null -eq $distribution -or $distribution.kind -cne 'nupkg' -or
+        [string]$distribution.sha512 -notmatch '^[a-f0-9]{128}$' -or
         -not ([string]$distribution.path).StartsWith('managed-packages/', [StringComparison]::Ordinal)) {
-        throw "Managed distribution archive for '$key' is incomplete or differs from its locked SHA-512."
+        throw "Managed distribution archive evidence for '$key' is incomplete."
     }
     $distributionPath = Resolve-EvidenceFile $base ([string]$distribution.path) "$key managed distribution"
     Assert-PublicSourceUrl ([string]$distribution.url) ([IO.Path]::GetFileName($distributionPath)) $key
-    if ((Get-FileHash -LiteralPath $distributionPath -Algorithm SHA512).Hash.ToLowerInvariant() -cne $expected.Sha512) {
+    if ((Get-FileHash -LiteralPath $distributionPath -Algorithm SHA512).Hash.ToLowerInvariant() -cne [string]$distribution.sha512) {
         throw "Managed distribution archive for '$key' has the wrong digest."
     }
     $distributionKey = ([string]$distribution.path).ToLowerInvariant()
-    if ($seenFiles.ContainsKey($distributionKey) -and $seenFiles[$distributionKey] -cne $expected.Sha512) { throw "Evidence path '$($distribution.path)' has conflicting hashes." }
-    $seenFiles[$distributionKey] = $expected.Sha512
+    if ($seenFiles.ContainsKey($distributionKey) -and $seenFiles[$distributionKey] -cne [string]$distribution.sha512) { throw "Evidence path '$($distribution.path)' has conflicting hashes." }
+    $seenFiles[$distributionKey] = [string]$distribution.sha512
     $obligations = $item.PSObject.Properties['reviewedObligations']
     if ($null -eq $obligations -or $null -eq $obligations.Value.PSObject.Properties['sourceCodeRequired'] -or
         $obligations.Value.sourceCodeRequired -isnot [bool] -or ([string]$obligations.Value.reviewNote).Trim().Length -lt 10) {

@@ -61,6 +61,6 @@ LFTP Pilot application code is MIT licensed. LFTP, OpenSSH, MSYS2 runtime
 components, CA data, the self-contained .NET runtime, WinUI/Windows App SDK,
 WebView2, and other managed production dependencies have their own license and
 redistribution requirements. See `THIRD_PARTY_NOTICES.md`,
-`docs/LFTP-RUNTIME.md`, and `third-party-licenses/README.md`. The committed
-managed-evidence template is intentionally incomplete, so this source tree does
-not yet authorize a public binary release.
+`docs/LFTP-RUNTIME.md`, and `third-party-licenses/README.md`. The reviewed
+schema 3 manifest covers the exact native and managed production graph; release
+tooling rechecks every referenced hash and stages only its allowlisted files.

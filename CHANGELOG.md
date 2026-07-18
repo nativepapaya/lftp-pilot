@@ -9,6 +9,13 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- Complete schema 3 redistribution evidence now covers all 43 locked native
+  runtime packages and all 17 managed production dependencies, with reviewed
+  licenses, exact corresponding-source or public distribution archives,
+  deterministic allowlisted staging, and explicit source-delivery decisions.
+- NuGet evidence now records the locked normalized content hash separately
+  from the raw SHA-512 of the signed public `.nupkg`; a regression fixture
+  prevents release validation from conflating those distinct digests.
 - Folder transfers now expose reusable package-scoped presets, ordered include
   and exclude globs, per-tree parallelism, and segmented-download controls in
   the native transfer dialog. The Agent validates and persists only bounded

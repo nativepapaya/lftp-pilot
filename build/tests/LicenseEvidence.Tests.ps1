@@ -6,6 +6,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 function Get-Sha([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Get-Sha512([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA512).Hash.ToLowerInvariant() }
 function Get-Base64Sha512([string]$Path) { $h=[Security.Cryptography.SHA512]::Create();$s=[IO.File]::OpenRead($Path);try{return [Convert]::ToBase64String($h.ComputeHash($s))}finally{$s.Dispose();$h.Dispose()} }
+function Get-Sha512Bytes([byte[]]$Bytes) { $h=[Security.Cryptography.SHA512]::Create();try{return $h.ComputeHash($Bytes)}finally{$h.Dispose()} }
 function Write-Utf8([string]$Path,[string]$Text) { [IO.Directory]::CreateDirectory((Split-Path $Path -Parent))|Out-Null;[IO.File]::WriteAllText($Path,$Text,[Text.UTF8Encoding]::new($false)) }
 function Write-Bytes([string]$Path,[byte[]]$Bytes) { [IO.Directory]::CreateDirectory((Split-Path $Path -Parent))|Out-Null;[IO.File]::WriteAllBytes($Path,$Bytes) }
 function Assert-Throws([scriptblock]$Action,[string]$Label){try{&$Action;throw "$Label did not throw."}catch{if($_.Exception.Message-eq"$Label did not throw."){throw}}}
@@ -19,7 +20,11 @@ try {
 
     $managedArchive=Join-Path $root 'managed-packages/managed.fixture/managed.fixture.1.2.3.nupkg'
     Write-Bytes $managedArchive ([Text.Encoding]::UTF8.GetBytes('managed-fixture-package'))
-    $managedContentHash=Get-Base64Sha512 $managedArchive;$managedSha=Get-Sha512 $managedArchive
+    $managedRawSha=Get-Sha512 $managedArchive
+    $normalizedBytes=[Text.Encoding]::UTF8.GetBytes('nuget-normalized-content-hash')
+    $normalizedHash=Get-Sha512Bytes $normalizedBytes
+    $managedContentHash=[Convert]::ToBase64String($normalizedHash)
+    $managedLockedSha=([BitConverter]::ToString($normalizedHash)).Replace('-','').ToLowerInvariant()
     $managedLicense=Join-Path $root 'licenses/managed.fixture/LICENSE.txt';Write-Utf8 $managedLicense 'managed fixture license'
     $managedSource=Join-Path $root 'sources/managed/managed.fixture.src.zip';Write-Utf8 $managedSource 'managed source fixture'
     $nugetLock=[ordered]@{version=1;dependencies=[ordered]@{'net10.0-windows10.0.26100'=[ordered]@{
@@ -54,9 +59,9 @@ try {
             licenseFiles=@([ordered]@{path='licenses/fixture/LICENSE.txt';sha256=Get-Sha $license});
             correspondingSource=[ordered]@{kind='archive';path='sources/fixture/fixture.src.tar.zst';url='https://repo.msys2.org/sources/fixture.src.tar.zst';sha256=Get-Sha $source}}
     );managedPackages=@(
-        [ordered]@{name='Managed.Fixture';version='1.2.3';sha512=$managedSha;category='nuget';
+        [ordered]@{name='Managed.Fixture';version='1.2.3';sha512=$managedLockedSha;category='nuget';
             licenseFiles=@([ordered]@{path='licenses/managed.fixture/LICENSE.txt';sha256=Get-Sha $managedLicense});
-            distributionArchive=[ordered]@{kind='nupkg';path='managed-packages/managed.fixture/managed.fixture.1.2.3.nupkg';url='https://api.nuget.org/v3-flatcontainer/managed.fixture/1.2.3/managed.fixture.1.2.3.nupkg';sha512=$managedSha};
+            distributionArchive=[ordered]@{kind='nupkg';path='managed-packages/managed.fixture/managed.fixture.1.2.3.nupkg';url='https://api.nuget.org/v3-flatcontainer/managed.fixture/1.2.3/managed.fixture.1.2.3.nupkg';sha512=$managedRawSha};
             reviewedObligations=[ordered]@{sourceCodeRequired=$true;reviewNote='Fixture obligations independently reviewed.'};
             correspondingSource=[ordered]@{kind='archive';path='sources/managed/managed.fixture.src.zip';url='https://github.com/nativepapaya/license-fixtures/releases/download/v1/managed.fixture.src.zip';sha256=Get-Sha $managedSource}},
         [ordered]@{name='Microsoft.NETCore.App.Runtime.win-x64';version='10.0.10';sha512=$runtimeSha;category='dotnet-runtime-pack';
