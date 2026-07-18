@@ -8,6 +8,26 @@ namespace LFTPPilot.Tests;
 public sealed class AgentTests
 {
     [Fact]
+    public async Task NotificationObserverFailureCannotUnwindAgentJobPublication()
+    {
+        using var directory = new TemporaryDirectory();
+        await using var host = new AgentHost(
+            Path.Combine(directory.Path, "state.json"),
+            jobObserver: _ => throw new InvalidOperationException("simulated notification failure"));
+        var coordinatorField = typeof(AgentHost).GetField(
+            "_coordinator",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The Agent job coordinator field was not found.");
+        var coordinator = Assert.IsType<JobCoordinator>(coordinatorField.GetValue(host));
+        var now = DateTimeOffset.UtcNow;
+        var job = new JobSnapshot(
+            Guid.NewGuid(), JobKind.Transfer, Guid.NewGuid(), "notification test",
+            JobState.Queued, now, now);
+
+        Assert.Equal(job, coordinator.Enqueue(job));
+    }
+
+    [Fact]
     public async Task DurableStoreAtomicallyRoundTripsJobs()
     {
         using var directory = new TemporaryDirectory();

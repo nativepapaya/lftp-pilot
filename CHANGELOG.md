@@ -9,6 +9,15 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- Native Windows shell integration is now connected end to end: the Agent owns
+  terminal job notifications even after the App closes, notification clicks
+  can only open the allowlisted Transfers route, active work drives taskbar
+  state/progress, and Jump Lists expose Transfers, Settings, and bounded saved
+  profile activations. Settings can also create a bounded sanitized support ZIP.
+- Support-bundle generation now redacts quoted JSON secrets as well as text
+  assignments and uses the ZIP format's deterministic 1980 timestamp floor;
+  the previously unused builder could not write an archive with Unix epoch
+  timestamps.
 - SFTP and mixed-protocol remote-to-remote transfers now use an Agent-owned
   client relay with distinct source and destination LFTP processes, preserving
   each endpoint's credential redaction and pinned host-key configuration. The

@@ -1,4 +1,5 @@
 using Windows.UI.StartScreen;
+using LFTPPilot.Windows.Activation;
 
 namespace LFTPPilot.Windows.Shell;
 
@@ -15,14 +16,24 @@ public sealed class JumpListService
         foreach (JumpListEntry entry in entries.Take(12))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (string.IsNullOrWhiteSpace(entry.DisplayName) || entry.DisplayName.Length > 80 ||
-                string.IsNullOrWhiteSpace(entry.GroupName) || entry.GroupName.Length > 80 ||
-                string.IsNullOrWhiteSpace(entry.Arguments) || entry.Arguments.Length > 512)
-                throw new ArgumentException("Jump List entries must have bounded display names and arguments.", nameof(entries));
+            ValidateEntry(entry);
             JumpListItem item = JumpListItem.CreateWithArguments(entry.Arguments, entry.DisplayName);
             item.GroupName = entry.GroupName;
             jumpList.Items.Add(item);
         }
         await jumpList.SaveAsync().AsTask(cancellationToken);
+    }
+
+    internal static void ValidateEntry(JumpListEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        if (string.IsNullOrWhiteSpace(entry.DisplayName) || entry.DisplayName.Length > 80 ||
+            string.IsNullOrWhiteSpace(entry.GroupName) || entry.GroupName.Length > 80 ||
+            string.IsNullOrWhiteSpace(entry.Arguments) || entry.Arguments.Length > 512 ||
+            !Uri.TryCreate(entry.Arguments, UriKind.Absolute, out var uri) ||
+            !ProtocolActivationParser.TryParse(uri, out _))
+        {
+            throw new ArgumentException("Jump List entries must use bounded labels and an allowlisted LFTP Pilot activation.", nameof(entry));
+        }
     }
 }

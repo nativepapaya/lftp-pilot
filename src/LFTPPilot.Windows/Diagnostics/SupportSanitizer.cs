@@ -8,6 +8,7 @@ public static partial class SupportSanitizer
     {
         if (string.IsNullOrEmpty(value)) return value;
         string sanitized = UriCredentials().Replace(value, "${scheme}://<redacted>@");
+        sanitized = JsonSensitiveAssignment().Replace(sanitized, "${key}\"<redacted>\"");
         sanitized = SensitiveQuery().Replace(sanitized, "${key}<redacted>");
         sanitized = SensitiveAssignment().Replace(sanitized, "${key}=<redacted>");
         sanitized = AuthorizationHeader().Replace(sanitized, "${prefix}<redacted>");
@@ -26,6 +27,9 @@ public static partial class SupportSanitizer
 
     [GeneratedRegex(@"(?<key>\b(?:password|passwd|passphrase|secret|token|api[_-]?key|private[_-]?key))\s*[=:]\s*[^\s,;]+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SensitiveAssignment();
+
+    [GeneratedRegex("(?<key>\\\"(?:password|passwd|passphrase|secret|token|api[_-]?key|private[_-]?key)\\\"\\s*:\\s*)\\\"(?:\\\\.|[^\\\"\\\\])*\\\"", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex JsonSensitiveAssignment();
 
     [GeneratedRegex(@"(?<prefix>\bAuthorization\s*:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9+/=_-]+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex AuthorizationHeader();

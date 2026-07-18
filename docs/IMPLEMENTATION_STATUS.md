@@ -142,6 +142,16 @@ still needs real servers, signed packages, or additional product development.
   Upload approval creates an opaque remote sibling, verifies its content,
   freshly revalidates the live target, then uses reviewed backup/promotion and
   fail-closed rollback. Remote editing never applies `put -e` to the live path.
+- Terminal completed, failed, and missed jobs produce native notifications from
+  the Agent even after the App window closes. The package binds notification
+  activation to the Agent executable, which ignores notification payload input
+  and opens only `lftp-pilot://transfers`. The App aggregates active work into
+  taskbar progress/state and maintains allowlisted Jump List entries for
+  Transfers, Settings, and up to ten saved profiles.
+- Settings creates a bounded sanitized support ZIP containing current workspace
+  and Activity diagnostics without credential values, private-key material, or
+  the literal user-profile root. Quoted JSON secrets and text assignments are
+  both redacted, and deterministic ZIP timestamps remain within format bounds.
 - App Installer update status/UI and stable-feed generation with a quiet
   24-hour on-launch check plus background checks. CI builds and attests unsigned
   packages; local release tooling enforces byte-identical decoded package
@@ -162,8 +172,7 @@ still needs real servers, signed packages, or additional product development.
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.
 - Extend live progress to guarded directory transfers, reviewed mirrors, and
-  remote-to-remote jobs, and wire notifications, taskbar progress, Jump Lists,
-  and support-bundle UI.
+  remote-to-remote jobs.
 - Complete outbound Explorer drag/drop for remote files and add richer folder
   transfer controls such as reusable filters and per-tree parallelism.
 - Independently review and stage the exact native and managed third-party

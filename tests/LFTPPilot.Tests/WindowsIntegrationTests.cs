@@ -1,4 +1,8 @@
 using System.Diagnostics;
+using System.IO.Compression;
+using System.Text.Json;
+using LFTPPilot.App.Services;
+using LFTPPilot.Core;
 using LFTPPilot.Engine;
 using LFTPPilot.Windows.Activation;
 using LFTPPilot.Windows.Diagnostics;
@@ -72,6 +76,61 @@ public sealed class WindowsIntegrationTests
     }
 
     [Fact]
+    public void JumpListsAcceptOnlyAllowlistedProtocolActivations()
+    {
+        JumpListService.ValidateEntry(new("Transfers", "lftp-pilot://transfers"));
+        JumpListService.ValidateEntry(new("Profile", $"lftp-pilot://open-profile?id={Guid.NewGuid():D}"));
+
+        Assert.Throws<ArgumentException>(() => JumpListService.ValidateEntry(new("Unsafe", "cmd.exe /c whoami")));
+        Assert.Throws<ArgumentException>(() => JumpListService.ValidateEntry(new("Unsafe", "lftp-pilot://settings?command=quit")));
+    }
+
+    [Fact]
+    public void JumpListCommandLineFallbackRequiresOneAllowlistedActivation()
+    {
+        Assert.True(ProtocolActivationRouter.TryParseCommandLine(
+            ["lftp-pilot://transfers"], out var request));
+        Assert.Equal(ProtocolActivationAction.ShowTransfers, request?.Action);
+        Assert.False(ProtocolActivationRouter.TryParseCommandLine(
+            ["lftp-pilot://transfers", "--unexpected"], out request));
+        Assert.Null(request);
+        Assert.False(ProtocolActivationRouter.TryParseCommandLine(
+            ["https://example.test"], out request));
+        Assert.Null(request);
+    }
+
+    [Fact]
+    public void TaskbarProgressAggregatesKnownWorkAndUsesIndeterminateForUnknownWork()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = new JobSnapshot(Guid.NewGuid(), JobKind.Transfer, Guid.NewGuid(), "One", JobState.Running, now, now, Progress: 0.25);
+        var second = new JobSnapshot(Guid.NewGuid(), JobKind.Mirror, Guid.NewGuid(), "Two", JobState.Running, now, now, Progress: 0.75);
+
+        Assert.Equal(new(TaskbarProgressState.Normal, 5_000, 10_000), TaskbarProgressPolicy.Summarize([first, second]));
+        Assert.Equal(TaskbarProgressState.Indeterminate, TaskbarProgressPolicy.Summarize([first with { Progress = null }]).State);
+        Assert.Equal(TaskbarProgressState.Paused, TaskbarProgressPolicy.Summarize([first with { State = JobState.Paused }]).State);
+        Assert.Equal(TaskbarProgressState.None, TaskbarProgressPolicy.Summarize([first with { State = JobState.Completed }]).State);
+    }
+
+    [Theory]
+    [InlineData(JobState.Completed, "Transfer activity completed")]
+    [InlineData(JobState.Failed, "Transfer activity failed")]
+    [InlineData(JobState.Missed, "Scheduled transfer missed")]
+    public void JobNotificationsAreCreatedOnlyForAttentionWorthyTerminalOutcomes(JobState state, string title)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var error = state == JobState.Failed ? new EngineError("failed", "Permission denied") : null;
+        var job = new JobSnapshot(Guid.NewGuid(), JobKind.Transfer, Guid.NewGuid(), "archive.zip", state, now, now,
+            Status: "Finished", Error: error);
+
+        var notification = Assert.IsType<JobNotification>(JobNotificationPolicy.Create(job));
+        Assert.Equal(title, notification.Title);
+        Assert.Contains("archive.zip", notification.Message, StringComparison.Ordinal);
+        Assert.Equal(job.Id.ToString("N"), notification.Tag);
+        Assert.Null(JobNotificationPolicy.Create(job with { State = JobState.Cancelled, Error = null }));
+    }
+
+    [Fact]
     public void SupportBundleSanitizerRedactsCredentialsTokensAndPrivateKeys()
     {
         var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -97,6 +156,40 @@ public sealed class WindowsIntegrationTests
         {
             Assert.DoesNotContain(profile, output, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("%USERPROFILE%", output, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task SupportBundleWritesOnlySanitizedBoundedTextEntries()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"lftp-pilot-support-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var bundle = Path.Combine(root, "support.zip");
+        try
+        {
+            await new SupportBundleBuilder().CreateAsync(
+                bundle,
+                new Dictionary<string, object?> { ["token"] = "secret-token" },
+                [new("activity/log.txt", "password=hunter2")],
+                TestContext.Current.CancellationToken);
+
+            using var archive = ZipFile.OpenRead(bundle);
+            Assert.Equal(["activity/log.txt", "metadata.json"], archive.Entries.Select(static entry => entry.FullName).Order().ToArray());
+            foreach (var entry in archive.Entries)
+            {
+                Assert.Equal(new DateTime(1980, 1, 1, 0, 0, 0), entry.LastWriteTime.DateTime);
+                using var reader = new StreamReader(entry.Open());
+                var content = await reader.ReadToEndAsync(TestContext.Current.CancellationToken);
+                Assert.DoesNotContain("secret-token", content, StringComparison.Ordinal);
+                Assert.DoesNotContain("hunter2", content, StringComparison.Ordinal);
+            }
+            using var metadataReader = new StreamReader(archive.GetEntry("metadata.json")!.Open());
+            using JsonDocument metadata = JsonDocument.Parse(await metadataReader.ReadToEndAsync(TestContext.Current.CancellationToken));
+            Assert.Equal("<redacted>", metadata.RootElement.GetProperty("token").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
 

@@ -2,8 +2,10 @@
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap rescap">
+  IgnorableNamespaces="uap desktop com rescap">
   <Identity Name="LFTPPilot.Desktop" Publisher="CN=LFTPPilot.Dev" Version="1.0.0.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>LFTP Pilot</DisplayName>
@@ -33,6 +35,19 @@
             <uap:DisplayName>LFTP Pilot</uap:DisplayName>
           </uap:Protocol>
         </uap:Extension>
+        <desktop:Extension Category="windows.toastNotificationActivation">
+          <desktop:ToastNotificationActivation ToastActivatorCLSID="D4C07989-AD6A-4F7A-AE58-FA5BBFD07611" />
+        </desktop:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer
+              Executable="agent\LFTPPilot.Agent.exe"
+              Arguments="----AppNotificationActivated:"
+              DisplayName="LFTP Pilot background agent">
+              <com:Class Id="D4C07989-AD6A-4F7A-AE58-FA5BBFD07611" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
       </Extensions>
     </Application>
   </Applications>
