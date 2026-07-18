@@ -28,7 +28,7 @@ public sealed class ProtocolTests
         var json = JsonSerializer.Serialize(page, FramedJsonStream.SerializerOptions);
         var actual = JsonSerializer.Deserialize<RemoteSearchPage>(json, FramedJsonStream.SerializerOptions);
 
-        Assert.Equal(8, AgentProtocol.CurrentVersion);
+        Assert.Equal(9, AgentProtocol.CurrentVersion);
         Assert.Equal("remoteSearch.start", WorkspaceMethods.RemoteSearchStart);
         Assert.Equal("remoteSearch.get", WorkspaceMethods.RemoteSearchGet);
         Assert.Equal("remoteSearch.cancel", WorkspaceMethods.RemoteSearchCancel);

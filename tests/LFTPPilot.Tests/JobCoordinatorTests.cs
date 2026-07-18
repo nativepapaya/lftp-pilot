@@ -20,6 +20,18 @@ public sealed class JobCoordinatorTests
     }
 
     [Fact]
+    public void CompletedTransitionSetsProgressToOne()
+    {
+        var coordinator = new JobCoordinator();
+        var queued = coordinator.Enqueue(Job(JobState.Queued));
+        coordinator.Transition(queued.Id, JobState.Running);
+
+        var completed = coordinator.Transition(queued.Id, JobState.Completed, "Done");
+
+        Assert.Equal(1, completed.Progress);
+    }
+
+    [Fact]
     public void InvalidTransitionAndFailureWithoutErrorAreRejected()
     {
         var coordinator = new JobCoordinator();

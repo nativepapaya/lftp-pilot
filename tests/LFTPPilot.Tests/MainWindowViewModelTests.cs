@@ -605,6 +605,39 @@ public sealed class MainWindowViewModelTests
         Assert.Empty(viewModel.Activity.Log);
     }
 
+    [Fact]
+    public async Task ProgressEventUpdatesTheMatchingRunningTransfer()
+    {
+        var profile = Profile();
+        var agent = new RecordingSessionAgent(profile, []);
+        var now = DateTimeOffset.UtcNow;
+        var job = new JobSnapshot(
+            Guid.NewGuid(),
+            JobKind.Transfer,
+            profile.Id,
+            "Large download",
+            JobState.Running,
+            now.AddMinutes(-1),
+            now,
+            Status: "Running");
+        agent.Jobs.Add(job);
+        var viewModel = CreateViewModelWithoutUiContext(agent);
+        await viewModel.InitializeAsync();
+        var applyEvent = typeof(MainWindowViewModel).GetMethod(
+            "ApplyAgentEvent",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The Agent event application method was not found.");
+        var progress = new TransferProgressSnapshot(job.Id, 262_144, 1_048_576, 65_536, now.AddSeconds(1));
+
+        applyEvent.Invoke(viewModel, [new EngineEvent(
+            22, EngineEventKind.Job, "job.progress", progress.ObservedAt, progress, JobId: job.Id)]);
+
+        var updated = Assert.Single(viewModel.Activity.Jobs);
+        Assert.Equal(0.25, updated.Progress);
+        Assert.Equal("256 KB of 1 MB · 64 KB/s", updated.Status);
+        Assert.Empty(viewModel.Activity.Log);
+    }
+
     private static ConnectionProfile Profile() => new(
         Guid.NewGuid(), "FTP test", ConnectionProtocol.Ftp, "example.test", 21, "alice", AuthenticationKind.Password);
 
