@@ -6,6 +6,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 function Get-Sha([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Get-Sha512([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA512).Hash.ToLowerInvariant() }
 function Get-Base64Sha512([string]$Path) { $h=[Security.Cryptography.SHA512]::Create();$s=[IO.File]::OpenRead($Path);try{return [Convert]::ToBase64String($h.ComputeHash($s))}finally{$s.Dispose();$h.Dispose()} }
+function Get-Sha512Bytes([byte[]]$Bytes) { $h=[Security.Cryptography.SHA512]::Create();try{return $h.ComputeHash($Bytes)}finally{$h.Dispose()} }
 function Write-Utf8([string]$Path,[string]$Text) { [IO.Directory]::CreateDirectory((Split-Path $Path -Parent))|Out-Null;[IO.File]::WriteAllText($Path,$Text,[Text.UTF8Encoding]::new($false)) }
 function Write-Bytes([string]$Path,[byte[]]$Bytes) { [IO.Directory]::CreateDirectory((Split-Path $Path -Parent))|Out-Null;[IO.File]::WriteAllBytes($Path,$Bytes) }
 function Assert-Throws([scriptblock]$Action,[string]$Label){try{&$Action;throw "$Label did not throw."}catch{if($_.Exception.Message-eq"$Label did not throw."){throw}}}
@@ -21,8 +22,9 @@ try {
     Write-Bytes $managedArchive ([Text.Encoding]::UTF8.GetBytes('managed-fixture-package'))
     $managedRawSha=Get-Sha512 $managedArchive
     $normalizedBytes=[Text.Encoding]::UTF8.GetBytes('nuget-normalized-content-hash')
-    $managedContentHash=[Convert]::ToBase64String(([Security.Cryptography.SHA512]::HashData($normalizedBytes)))
-    $managedLockedSha=([BitConverter]::ToString([Security.Cryptography.SHA512]::HashData($normalizedBytes))).Replace('-','').ToLowerInvariant()
+    $normalizedHash=Get-Sha512Bytes $normalizedBytes
+    $managedContentHash=[Convert]::ToBase64String($normalizedHash)
+    $managedLockedSha=([BitConverter]::ToString($normalizedHash)).Replace('-','').ToLowerInvariant()
     $managedLicense=Join-Path $root 'licenses/managed.fixture/LICENSE.txt';Write-Utf8 $managedLicense 'managed fixture license'
     $managedSource=Join-Path $root 'sources/managed/managed.fixture.src.zip';Write-Utf8 $managedSource 'managed source fixture'
     $nugetLock=[ordered]@{version=1;dependencies=[ordered]@{'net10.0-windows10.0.26100'=[ordered]@{
