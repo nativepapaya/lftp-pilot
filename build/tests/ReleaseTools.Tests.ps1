@@ -219,6 +219,7 @@ if ($releaseToolsScript.Contains('2>&1') -or -not $releaseToolsScript.Contains('
 }
 $signScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Sign-Release.ps1') -Raw
 $publishScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Publish-Release.ps1') -Raw
+$packagedLftpScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Test-PackagedLftp.ps1') -Raw
 $certificateInitializationScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Initialize-DevCertificate.ps1') -Raw
 if (-not $certificateInitializationScript.Contains('Cert:\LocalMachine\TrustedPeople') -or
     $certificateInitializationScript.Contains('Cert:\CurrentUser\TrustedPeople')) {
@@ -241,6 +242,10 @@ if (-not $publishScript.Contains('$publicationWhatIf = [bool]$WhatIfPreference')
     -not $publishScript.Contains('$WhatIfPreference = $false') -or
     -not $publishScript.Contains('$WhatIfPreference = $publicationWhatIf')) {
     throw 'Publication -WhatIf must stage reviewable local assets while suppressing only the final GitHub release mutation.'
+}
+if (-not $packagedLftpScript.Contains('Test-PackagedRuntime.ps1') -or
+    $packagedLftpScript.Contains('$LASTEXITCODE')) {
+    throw 'The packaged-LFTP compatibility wrapper must rely on terminating runtime-validation errors instead of reading stale native exit state.'
 }
 $tagScript = Get-Content -LiteralPath (Join-Path $buildRoot 'Test-ReleaseTag.ps1') -Raw
 if ($tagScript -notmatch 'repos/nativepapaya/lftp-pilot/git/ref/tags/\$Tag' -or

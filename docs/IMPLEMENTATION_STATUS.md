@@ -1,11 +1,11 @@
 # Implementation status
 
-LFTP Pilot is an engineering preview, not a 1.0 release. The repository is a
-fresh native Windows codebase with no Git history or data migration from LFTP
-Commander. This page separates working foundations from acceptance work that
-still needs real servers, signed packages, or additional product development.
+LFTP Pilot 1.0 is available as an immutable, signed trusted-tester release. The
+repository is a fresh native Windows codebase with no Git history or data
+migration from LFTP Commander. This page separates the shipped implementation
+from the final independent-machine acceptance work.
 
-## Implemented in the bootstrap
+## Implemented in 1.0
 
 - Native WinUI 3 session tabs and virtualized dual file panes with sorting,
   multi-selection, synchronized resizable columns, keyboard actions, native
@@ -192,11 +192,18 @@ still needs real servers, signed packages, or additional product development.
   raw public `.nupkg` digest, and deterministic staging includes only the
   manifest allowlist.
 
-## Still required before 1.0 acceptance
+## Release validation
 
-- Produce the signed immutable trusted-tester release from an attested `main`
-  package, validate an increasing App Installer update locally, and repeat the
-  install/update smoke test on clean tester machines.
+- The immutable `v1.0.0.16` trusted-tester release was produced from the
+  attested `main` package. Its certificate, MSIX signature and payload,
+  provenance, SBOM, checksums, complete third-party evidence, tag binding, and
+  published GitHub asset digests passed the release gates.
+- The public stable App Installer feed upgraded the local signed installation
+  from `1.0.0.15` to `1.0.0.16`. Windows reports quiet on-launch and background
+  checks at the configured 24-hour interval, and the installed app reports the
+  correct package version and authenticated packaged LFTP runtime.
+- Repeat the signed install/update smoke test on independent clean Windows 11
+  x64 tester machines before closing the final cross-machine acceptance item.
 
 Recurring schedules, Windows 10, ARM64, portable ZIP distribution, FISH, HTTP
 browsing, and torrent support remain deliberately deferred.
