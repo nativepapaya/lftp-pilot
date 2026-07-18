@@ -20,15 +20,25 @@ public sealed class WindowsIntegrationTests
     [InlineData(".url")]
     public void TrustedEditorUsesSystemNotepadAndOneLiteralArgument(string extension)
     {
-        var managedPath = Path.Combine(Path.GetTempPath(), $"managed copy & untrusted{extension}");
+        var root = Path.Combine(Path.GetTempPath(), "LFTPPilot.TrustedEditorTests", Guid.NewGuid().ToString("N"));
+        var ownedDirectory = Path.Combine(root, "opaque-edit");
+        var managedPath = Path.Combine(ownedDirectory, $"managed copy & untrusted{extension}");
+        Directory.CreateDirectory(ownedDirectory);
+        File.WriteAllText(managedPath, "managed content");
+        try
+        {
+            var start = TrustedEditorLauncher.CreateStartInfo(managedPath, root);
 
-        var start = TrustedEditorLauncher.CreateStartInfo(managedPath);
-
-        Assert.Equal(Path.Combine(Environment.SystemDirectory, "notepad.exe"), start.FileName);
-        Assert.False(start.UseShellExecute);
-        Assert.Equal(string.Empty, start.Verb);
-        Assert.Equal(string.Empty, start.Arguments);
-        Assert.Collection(start.ArgumentList, argument => Assert.Equal(managedPath, argument));
+            Assert.Equal(Path.Combine(Environment.SystemDirectory, "notepad.exe"), start.FileName);
+            Assert.False(start.UseShellExecute);
+            Assert.Equal(string.Empty, start.Verb);
+            Assert.Equal(string.Empty, start.Arguments);
+            Assert.Collection(start.ArgumentList, argument => Assert.Equal(managedPath, argument));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Theory]
@@ -36,7 +46,57 @@ public sealed class WindowsIntegrationTests
     [InlineData("relative-file.txt")]
     public void TrustedEditorRejectsMissingOrRelativeManagedPaths(string managedPath)
     {
-        Assert.ThrowsAny<ArgumentException>(() => TrustedEditorLauncher.CreateStartInfo(managedPath));
+        Assert.ThrowsAny<ArgumentException>(() => TrustedEditorLauncher.CreateStartInfo(managedPath, Path.GetTempPath()));
+    }
+
+    [Fact]
+    public void TrustedEditorRejectsTargetsOutsideManagedRootOrMissingFromIt()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "LFTPPilot.TrustedEditorTests", Guid.NewGuid().ToString("N"));
+        var outside = Path.Combine(Path.GetTempPath(), $"outside-{Guid.NewGuid():N}.txt");
+        Directory.CreateDirectory(root);
+        File.WriteAllText(outside, "outside");
+        try
+        {
+            Assert.Throws<InvalidDataException>(() => TrustedEditorLauncher.CreateStartInfo(outside, root));
+            Assert.Throws<FileNotFoundException>(() => TrustedEditorLauncher.CreateStartInfo(Path.Combine(root, "missing.txt"), root));
+        }
+        finally
+        {
+            File.Delete(outside);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TrustedEditorRejectsReparsePointsInsideManagedRoot()
+    {
+        var outer = Path.Combine(Path.GetTempPath(), "LFTPPilot.TrustedEditorTests", Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(outer, "managed");
+        var external = Path.Combine(outer, "external");
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(external);
+        File.WriteAllText(Path.Combine(external, "content.txt"), "external");
+        var link = Path.Combine(root, "opaque-edit");
+        try
+        {
+            Directory.CreateSymbolicLink(link, external);
+        }
+        catch (IOException) when (!Directory.Exists(link))
+        {
+            Directory.Delete(outer, recursive: true);
+            return; // The current test token does not hold Windows symlink creation privilege.
+        }
+        try
+        {
+            Assert.Throws<InvalidDataException>(() =>
+                TrustedEditorLauncher.CreateStartInfo(Path.Combine(link, "content.txt"), root));
+        }
+        finally
+        {
+            Directory.Delete(link);
+            Directory.Delete(outer, recursive: true);
+        }
     }
 
     [Theory]
