@@ -42,7 +42,8 @@ public static class Program
             workspaceOptions: AgentWorkspaceOptions.CreateDefault(paths.RuntimeHome, paths.LocalCache, paths.Temporary),
             clientAuthorizer: AgentClientAuthorization.Create(paths),
             mirrorDefinitionStore: new JsonMirrorDefinitionStore(
-                Path.Combine(paths.MirrorDefinitions, JsonMirrorDefinitionStore.FileName))))
+                Path.Combine(paths.MirrorDefinitions, JsonMirrorDefinitionStore.FileName)),
+            historyStore: new JsonHistoryStore(Path.Combine(paths.History, "history.json"))))
         {
             try { await host.RunAsync(shutdown.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }

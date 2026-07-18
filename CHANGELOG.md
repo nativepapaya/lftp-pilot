@@ -37,6 +37,10 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   preserves session tabs while job state changes. Persistence failures are
   reported without leaking state paths, and shutdown still cleans up the
   workspace and LFTP processes before surfacing them.
+- Completed, failed, cancelled, and missed jobs now enter a bounded durable
+  Activity history. The Agent validates and atomically persists terminal
+  records, replays them on reconnect, publishes live updates, and backfills
+  terminal durable jobs after an Agent restart without duplicating entries.
 - SFTP and mixed-protocol remote-to-remote jobs now fail closed instead of
   sharing LFTP's process-global SFTP connect program across two independently
   pinned endpoints. FTP-family FXP remains available; secure SFTP relay will

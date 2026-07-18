@@ -97,6 +97,10 @@ still needs real servers, signed packages, or additional product development.
   change cannot redirect an earlier route review.
 - Run-once transfer scheduling while the same Agent remains alive. A stopped or
   restarted Agent marks pending schedules missed and never executes them late.
+- Bounded durable Activity history for completed, failed, cancelled, and missed
+  jobs. Terminal records are validated, atomically persisted, replayed on App
+  reconnect, published as live events, and idempotently backfilled from durable
+  job state after an Agent restart.
 - Managed-cache editing for regular remote files. The Agent alone chooses the
   package-scoped path, watches debounced local saves, and binds review tokens to
   strong remote path/size/mtime/SHA-256 and local SHA-256 identities. Dirty and
@@ -129,8 +133,8 @@ still needs real servers, signed packages, or additional product development.
 - Implement SFTP/mixed remote-to-remote client relay with distinct source and
   destination processes so each endpoint retains its own pinned host-key
   configuration.
-- Add the tray surface, idle-exit policy, transfer progress/history plumbing,
-  and wire notifications, taskbar progress, Jump Lists, and support-bundle UI.
+- Add the tray surface, idle-exit policy, live byte/progress plumbing, and wire
+  notifications, taskbar progress, Jump Lists, and support-bundle UI.
 - Complete outbound Explorer drag/drop for remote files and add richer folder
   transfer controls such as reusable filters and per-tree parallelism.
 - Independently review and stage the exact native and managed third-party
