@@ -836,11 +836,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.netcore.app.runtime.win-x64-10.0.10/LICENSE.TXT",
-          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+          "sha256": "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310"
         },
         {
           "path": "licenses/managed/microsoft.netcore.app.runtime.win-x64-10.0.10/THIRD-PARTY-NOTICES.TXT",
-          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+          "sha256": "66f1d4e44973185519bb4aa8a9718eb22fc7af2cc532e3ae9cfc4c127ee7fc54"
         }
       ],
       "distributionArchive": {
@@ -888,11 +888,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windows.ai.machinelearning-2.1.70/license.txt",
-          "sha256": "66395f8cb219087fae2bd025010bd9076b736c14f03b48f20295471c0c376814"
+          "sha256": "4ddee4712b37a42e8ef6f583b11bd4655c50b25423c65b56bdee62c78e22631c"
         },
         {
           "path": "licenses/managed/microsoft.windows.ai.machinelearning-2.1.70/ThirdPartyNotices.txt",
-          "sha256": "fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866"
+          "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2"
         }
       ],
       "distributionArchive": {
@@ -914,7 +914,7 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windows.sdk.buildtools-10.0.28000.2270/sdk_license.txt",
-          "sha256": "a7a5c7e7ff998558983d6aca2702117c328aeb0c6404d298cb275f5623c6fd13"
+          "sha256": "707cc5cc686f19c0a58a8cbafa73ed2c4656cf16ae8726b6d80b469db91cd3e2"
         }
       ],
       "distributionArchive": {
@@ -936,11 +936,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windows.sdk.buildtools.msix-1.7.251221100/sdk_license.txt",
-          "sha256": "a7a5c7e7ff998558983d6aca2702117c328aeb0c6404d298cb275f5623c6fd13"
+          "sha256": "707cc5cc686f19c0a58a8cbafa73ed2c4656cf16ae8726b6d80b469db91cd3e2"
         },
         {
           "path": "licenses/managed/microsoft.windows.sdk.buildtools.msix-1.7.251221100/NOTICE.txt",
-          "sha256": "f09ebf5de6a5c8e7ebc900bb2e52af2f75e13610a1cf91e1514530e448d956c3"
+          "sha256": "218a78a64e36cb64ec7dec9a943ff3d5c06573f0bcfa67441f3d6e8b965d6c61"
         }
       ],
       "distributionArchive": {
@@ -962,11 +962,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk-2.2.0/license.txt",
-          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+          "sha256": "ee72e062ba4afb3420bc3439a1e86f4d775f8e4a0daabdc35a72b6ee379359f2"
         },
         {
           "path": "licenses/managed/microsoft.windowsappsdk-2.2.0/NOTICE.txt",
-          "sha256": "572b43d41dea717dae7dc5de69acb20a74df025e8f5a3c0aa6f7bca02615e23c"
+          "sha256": "0d58793a293c3b7cc61db9a94cdeb76d48c0442722bbed30a22105b57ed43599"
         }
       ],
       "distributionArchive": {
@@ -988,7 +988,7 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk.ai-2.2.3/license.txt",
-          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+          "sha256": "ee72e062ba4afb3420bc3439a1e86f4d775f8e4a0daabdc35a72b6ee379359f2"
         }
       ],
       "distributionArchive": {
@@ -1010,11 +1010,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk.base-2.0.4/license.txt",
-          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+          "sha256": "ee72e062ba4afb3420bc3439a1e86f4d775f8e4a0daabdc35a72b6ee379359f2"
         },
         {
           "path": "licenses/managed/microsoft.windowsappsdk.base-2.0.4/NOTICE.txt",
-          "sha256": "572b43d41dea717dae7dc5de69acb20a74df025e8f5a3c0aa6f7bca02615e23c"
+          "sha256": "0d58793a293c3b7cc61db9a94cdeb76d48c0442722bbed30a22105b57ed43599"
         }
       ],
       "distributionArchive": {
@@ -1036,7 +1036,7 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk.dwrite-2.1.0/license.txt",
-          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+          "sha256": "ee72e062ba4afb3420bc3439a1e86f4d775f8e4a0daabdc35a72b6ee379359f2"
         }
       ],
       "distributionArchive": {
@@ -1058,7 +1058,7 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk.foundation-2.1.0/license.txt",
-          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+          "sha256": "ee72e062ba4afb3420bc3439a1e86f4d775f8e4a0daabdc35a72b6ee379359f2"
         }
       ],
       "distributionArchive": {
@@ -1080,7 +1080,7 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk.interactiveexperiences-2.0.15/license.txt",
-          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+          "sha256": "ee72e062ba4afb3420bc3439a1e86f4d775f8e4a0daabdc35a72b6ee379359f2"
         }
       ],
       "distributionArchive": {
@@ -1102,11 +1102,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk.ml-2.1.70/license.txt",
-          "sha256": "656aab74c15aa9f9964bcdcc993eb2755cbdb4822d5e0e3bc61d2e281897f758"
+          "sha256": "565060abe8a387da186d9ca15dc94e3cbff135c8c5be78a7fd5a9e825054d49f"
         },
         {
           "path": "licenses/managed/microsoft.windowsappsdk.ml-2.1.70/ThirdPartyNotices.txt",
-          "sha256": "fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866"
+          "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2"
         }
       ],
       "distributionArchive": {
@@ -1128,11 +1128,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk.runtime-2.2.0/license.txt",
-          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+          "sha256": "ee72e062ba4afb3420bc3439a1e86f4d775f8e4a0daabdc35a72b6ee379359f2"
         },
         {
           "path": "licenses/managed/microsoft.windowsappsdk.runtime-2.2.0/NOTICE.txt",
-          "sha256": "572b43d41dea717dae7dc5de69acb20a74df025e8f5a3c0aa6f7bca02615e23c"
+          "sha256": "0d58793a293c3b7cc61db9a94cdeb76d48c0442722bbed30a22105b57ed43599"
         }
       ],
       "distributionArchive": {
@@ -1154,7 +1154,7 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk.widgets-2.0.5/license.txt",
-          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+          "sha256": "ee72e062ba4afb3420bc3439a1e86f4d775f8e4a0daabdc35a72b6ee379359f2"
         }
       ],
       "distributionArchive": {
@@ -1176,11 +1176,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/microsoft.windowsappsdk.winui-2.2.1/license.txt",
-          "sha256": "c2f1d9efba5864366335c007d51cab1d5b07005e9f1a67d7ca90b7b2a01fd615"
+          "sha256": "abd109a1807f1f42a47fb6439eef196907ad73e829bbb8d9ee58760c5c897724"
         },
         {
           "path": "licenses/managed/microsoft.windowsappsdk.winui-2.2.1/NOTICE.txt",
-          "sha256": "e25393c0d340a1821827b093fa4dbbfcccd8feb7bf769e7fa773e3955cd5314b"
+          "sha256": "0accced98d7ccb2f97f442a521ec3a0c5fc0d787539f5216e169cb7c55ff3df1"
         }
       ],
       "distributionArchive": {
@@ -1202,11 +1202,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/system.numerics.tensors-9.0.0/LICENSE.TXT",
-          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+          "sha256": "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310"
         },
         {
           "path": "licenses/managed/system.numerics.tensors-9.0.0/THIRD-PARTY-NOTICES.TXT",
-          "sha256": "40686c6447a7d5b5d3693068e4571b5f483d7ed335aeee773ef662440de4c5d5"
+          "sha256": "fa3e9d0a2c52476f04fe798d7dc4f6e7edb7b68a3d2f4d5f59a39bce957eedc8"
         }
       ],
       "distributionArchive": {
@@ -1228,11 +1228,11 @@
       "licenseFiles": [
         {
           "path": "licenses/managed/system.security.cryptography.protecteddata-10.0.0/LICENSE.TXT",
-          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+          "sha256": "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310"
         },
         {
           "path": "licenses/managed/system.security.cryptography.protecteddata-10.0.0/THIRD-PARTY-NOTICES.TXT",
-          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+          "sha256": "66f1d4e44973185519bb4aa8a9718eb22fc7af2cc532e3ae9cfc4c127ee7fc54"
         }
       ],
       "distributionArchive": {

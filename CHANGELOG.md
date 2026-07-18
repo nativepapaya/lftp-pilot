@@ -9,6 +9,10 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Fixed
 
+- Third-party license evidence now uses repository-pinned LF bytes on every
+  platform, and the release-tool suite checks every committed license hash
+  after checkout. Windows line-ending conversion could previously invalidate
+  an otherwise reviewed manifest only when the publication gate staged it.
 - Release publication dry runs now create and validate the complete local
   staging set while suppressing only the final GitHub upload. PowerShell's
   inherited `-WhatIf` preference previously skipped nested provenance writes
