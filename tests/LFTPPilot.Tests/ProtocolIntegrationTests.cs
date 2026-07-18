@@ -152,8 +152,18 @@ public sealed class ProtocolIntegrationTests
                 Guid.NewGuid(), "Relay FTP", ConnectionProtocol.Ftp, config.Host,
                 config.Endpoints.Ftp, config.Username, AuthenticationKind.Password,
                 InitialRemotePath: "/", InitialLocalPath: root);
+            var sftpPeer = new ConnectionProfile(
+                Guid.NewGuid(), "Relay SFTP peer", ConnectionProtocol.Sftp, config.Host,
+                config.Endpoints.Sftp, config.Username, AuthenticationKind.Password,
+                InitialRemotePath: "/", InitialLocalPath: root);
             await hostKeys.SaveAsync(new(
                 SftpHostKeyManager.CreateBinding(sftp),
+                config.SftpHostKeyAlgorithm,
+                config.SftpHostKeyBase64,
+                config.SftpHostKeyFingerprint),
+                TestContext.Current.CancellationToken);
+            await hostKeys.SaveAsync(new(
+                SftpHostKeyManager.CreateBinding(sftpPeer),
                 config.SftpHostKeyAlgorithm,
                 config.SftpHostKeyBase64,
                 config.SftpHostKeyFingerprint),
@@ -182,11 +192,15 @@ public sealed class ProtocolIntegrationTests
 
             await service.SaveProfileAsync(new(sftp), TestContext.Current.CancellationToken);
             await service.SaveProfileAsync(new(sftp, config.Password), TestContext.Current.CancellationToken);
+            await service.SaveProfileAsync(new(sftpPeer), TestContext.Current.CancellationToken);
+            await service.SaveProfileAsync(new(sftpPeer, config.Password), TestContext.Current.CancellationToken);
             await service.SaveProfileAsync(new(ftp, config.Password), TestContext.Current.CancellationToken);
             var sftpSession = await service.ConnectAsync(
                 new(ConnectionIdentity.FromProfile(sftp)), TestContext.Current.CancellationToken);
             var ftpSession = await service.ConnectAsync(
                 new(ConnectionIdentity.FromProfile(ftp)), TestContext.Current.CancellationToken);
+            var sftpPeerSession = await service.ConnectAsync(
+                new(ConnectionIdentity.FromProfile(sftpPeer)), TestContext.Current.CancellationToken);
 
             const string ftpTarget = "/relay-from-sftp-雪.txt";
             var outbound = await service.PlanRemoteTransferAsync(
@@ -208,6 +222,14 @@ public sealed class ProtocolIntegrationTests
             Assert.Contains(progressUpdates, job => job.Id == inboundJob.Job.Id && job.Progress == 0.65);
             Assert.Contains(progressUpdates, job => job.Id == inboundJob.Job.Id && job.Progress == 0.98);
 
+            const string sftpPeerTarget = "/relay-sftp-peer-雪.txt";
+            var sftpPeerPlan = await service.PlanRemoteTransferAsync(
+                new(sftp.Id, sftpPeer.Id, "/seed-雪.txt", sftpPeerTarget), TestContext.Current.CancellationToken);
+            Assert.Equal(RemoteTransferMode.ClientRelay, sftpPeerPlan.Mode);
+            var sftpPeerJob = await service.EnqueueRemoteTransferAsync(
+                new(sftpPeerPlan), TestContext.Current.CancellationToken);
+            await WaitForCompletedAsync(jobs, sftpPeerJob.Job.Id, ConnectionProtocol.Sftp);
+
             var verificationPath = Path.Combine(root, "relay-verification.txt");
             var verification = await service.EnqueueTransferAsync(new(
                 sftpSession.SessionId,
@@ -223,8 +245,24 @@ public sealed class ProtocolIntegrationTests
                     Convert.ToHexStringLower(await SHA256.HashDataAsync(
                         verificationStream, TestContext.Current.CancellationToken)));
             }
+            var peerVerificationPath = Path.Combine(root, "relay-peer-verification.txt");
+            var peerVerification = await service.EnqueueTransferAsync(new(
+                sftpPeerSession.SessionId,
+                new TransferPlan(
+                    Guid.NewGuid(), sftpPeer.Id, TransferDirection.Download,
+                    sftpPeerTarget, peerVerificationPath, TransferMode.Overwrite)),
+                TestContext.Current.CancellationToken);
+            await WaitForCompletedAsync(jobs, peerVerification.Job.Id, ConnectionProtocol.Sftp);
+            await using (var verificationStream = File.OpenRead(peerVerificationPath))
+            {
+                Assert.Equal(
+                    config.SeedSha256,
+                    Convert.ToHexStringLower(await SHA256.HashDataAsync(
+                        verificationStream, TestContext.Current.CancellationToken)));
+            }
             Assert.False(Directory.Exists(Path.Combine(options.TemporaryRoot, "remote-relays", outbound.Id.ToString("N"))));
             Assert.False(Directory.Exists(Path.Combine(options.TemporaryRoot, "remote-relays", inbound.Id.ToString("N"))));
+            Assert.False(Directory.Exists(Path.Combine(options.TemporaryRoot, "remote-relays", sftpPeerPlan.Id.ToString("N"))));
 
             await service.DeleteEntriesAsync(
                 new(PaneKind.Remote, [ftpTarget], ftpSession.SessionId, Confirmed: true),
@@ -232,8 +270,155 @@ public sealed class ProtocolIntegrationTests
             await service.DeleteEntriesAsync(
                 new(PaneKind.Remote, [sftpTarget], sftpSession.SessionId, Confirmed: true),
                 TestContext.Current.CancellationToken);
+            await service.DeleteEntriesAsync(
+                new(PaneKind.Remote, [sftpPeerTarget], sftpPeerSession.SessionId, Confirmed: true),
+                TestContext.Current.CancellationToken);
+            await service.DisconnectAsync(new(sftpPeerSession.SessionId), TestContext.Current.CancellationToken);
             await service.DisconnectAsync(new(ftpSession.SessionId), TestContext.Current.CancellationToken);
             await service.DisconnectAsync(new(sftpSession.SessionId), TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "ProtocolIntegration")]
+    public async Task FtpFamilyRemoteTransfersCompleteThroughFxpAndLftpClientFallback()
+    {
+        var configPath = Environment.GetEnvironmentVariable(ConfigVariable);
+        var executablePath = Environment.GetEnvironmentVariable(RuntimeVariable);
+        if (string.IsNullOrWhiteSpace(configPath) || string.IsNullOrWhiteSpace(executablePath)) return;
+        var config = await LoadConfigAsync(configPath);
+        var root = Path.Combine(Path.GetTempPath(), $"lftp-pilot-fxp-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var profiles = new MemoryProfileStore();
+            var secrets = new MemorySecretStore();
+            var hostKeys = new MemoryHostKeyStore();
+            ConnectionProfile Profile(string name, int port) => new(
+                Guid.NewGuid(), name, ConnectionProtocol.Ftp, config.Host, port,
+                config.Username, AuthenticationKind.Password,
+                InitialRemotePath: "/", InitialLocalPath: root);
+            var fxpSource = Profile("FXP source", config.Endpoints.Ftp);
+            var fxpDestination = Profile("FXP destination", config.Endpoints.FtpPeer);
+            var fallbackSource = Profile("FXP-disabled source", config.Endpoints.FtpNoFxpSource);
+            var fallbackDestination = Profile("FXP-disabled destination", config.Endpoints.FtpNoFxpDestination);
+            var tlsSource = new ConnectionProfile(
+                Guid.NewGuid(), "FTPES source", ConnectionProtocol.FtpsExplicit, config.Host,
+                config.Endpoints.FtpsExplicit, config.Username, AuthenticationKind.Password,
+                InitialRemotePath: "/", InitialLocalPath: root);
+            var tlsDestination = new ConnectionProfile(
+                Guid.NewGuid(), "Implicit FTPS destination", ConnectionProtocol.FtpsImplicit, config.Host,
+                config.Endpoints.FtpsImplicit, config.Username, AuthenticationKind.Password,
+                InitialRemotePath: "/", InitialLocalPath: root);
+            var allProfiles = new[]
+            {
+                fxpSource,
+                fxpDestination,
+                fallbackSource,
+                fallbackDestination,
+                tlsSource,
+                tlsDestination,
+            };
+            var jobs = new JobCoordinator();
+            var processHost = new TrackingProcessHost(
+                new TlsCaProcessHost(new LftpProcessHost(), config.TlsCaPath));
+            var options = AgentWorkspaceOptions.CreateDefault(Path.Combine(root, "agent")) with
+            {
+                ConnectTimeout = TimeSpan.FromSeconds(20),
+                BrowseTimeout = TimeSpan.FromSeconds(20),
+                TransferTimeout = TimeSpan.FromMinutes(2),
+            };
+            await using var service = new AgentWorkspaceService(
+                profiles,
+                secrets,
+                new SftpHostKeyManager(hostKeys, new UnexpectedHostKeyProbe()),
+                processHost,
+                PackagedLftpRuntimeProvider.CreateTestOverride(executablePath),
+                jobs,
+                new MirrorPlanner(),
+                options);
+
+            foreach (var profile in allProfiles)
+                await service.SaveProfileAsync(new(profile, config.Password), TestContext.Current.CancellationToken);
+            var sessions = new Dictionary<Guid, SessionSnapshot>();
+            foreach (var profile in allProfiles)
+            {
+                sessions[profile.Id] = await service.ConnectAsync(
+                    new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+            }
+
+            const string fxpTarget = "/fxp-direct-雪.txt";
+            var fxpPlan = await service.PlanRemoteTransferAsync(
+                new(fxpSource.Id, fxpDestination.Id, "/seed-雪.txt", fxpTarget),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(RemoteTransferMode.Fxp, fxpPlan.Mode);
+            var fxpJob = await service.EnqueueRemoteTransferAsync(
+                new(fxpPlan), TestContext.Current.CancellationToken);
+            await WaitForCompletedAsync(jobs, fxpJob.Job.Id, ConnectionProtocol.Ftp);
+
+            const string fallbackTarget = "/fxp-fallback-雪.txt";
+            var fallbackPlan = await service.PlanRemoteTransferAsync(
+                new(fallbackSource.Id, fallbackDestination.Id, "/seed-雪.txt", fallbackTarget),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(RemoteTransferMode.Fxp, fallbackPlan.Mode);
+            var fallbackJob = await service.EnqueueRemoteTransferAsync(
+                new(fallbackPlan), TestContext.Current.CancellationToken);
+            Assert.Contains("relay through this client", fallbackJob.RoutingNote, StringComparison.OrdinalIgnoreCase);
+            await WaitForCompletedAsync(jobs, fallbackJob.Job.Id, ConnectionProtocol.Ftp);
+
+            const string encryptedTarget = "/encrypted-ftp-family-雪.txt";
+            var encryptedPlan = await service.PlanRemoteTransferAsync(
+                new(tlsSource.Id, tlsDestination.Id, "/seed-雪.txt", encryptedTarget),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(RemoteTransferMode.ClientRelay, encryptedPlan.Mode);
+            var encryptedJob = await service.EnqueueRemoteTransferAsync(
+                new(encryptedPlan), TestContext.Current.CancellationToken);
+            Assert.Contains("does not use direct FXP", encryptedJob.RoutingNote, StringComparison.OrdinalIgnoreCase);
+            await WaitForCompletedAsync(jobs, encryptedJob.Job.Id, ConnectionProtocol.FtpsExplicit);
+
+            Assert.True(File.Exists(config.FxpRejectionPaths.Source),
+                "The controlled source server did not reject either FXP active-mode disposition.");
+            Assert.True(File.Exists(config.FxpRejectionPaths.Destination),
+                "The controlled destination server did not reject either FXP active-mode disposition.");
+            Assert.True(processHost.Commands.Count(item =>
+                item.Role == "remote-transfer" &&
+                item.Command.Contains("set ftp:use-fxp true", StringComparison.Ordinal)) >= 2);
+
+            async Task VerifyAsync(ConnectionProfile profile, string remotePath, string name)
+            {
+                var localPath = Path.Combine(root, name);
+                var transfer = await service.EnqueueTransferAsync(new(
+                    sessions[profile.Id].SessionId,
+                    new TransferPlan(
+                        Guid.NewGuid(), profile.Id, TransferDirection.Download,
+                        remotePath, localPath, TransferMode.Overwrite)),
+                    TestContext.Current.CancellationToken);
+                await WaitForCompletedAsync(jobs, transfer.Job.Id, ConnectionProtocol.Ftp);
+                await using var stream = File.OpenRead(localPath);
+                Assert.Equal(
+                    config.SeedSha256,
+                    Convert.ToHexStringLower(await SHA256.HashDataAsync(
+                        stream, TestContext.Current.CancellationToken)));
+            }
+
+            await VerifyAsync(fxpDestination, fxpTarget, "verified-fxp.txt");
+            await VerifyAsync(fallbackDestination, fallbackTarget, "verified-fallback.txt");
+            await VerifyAsync(tlsDestination, encryptedTarget, "verified-encrypted-route.txt");
+            await service.DeleteEntriesAsync(
+                new(PaneKind.Remote, [fxpTarget], sessions[fxpDestination.Id].SessionId, Confirmed: true),
+                TestContext.Current.CancellationToken);
+            await service.DeleteEntriesAsync(
+                new(PaneKind.Remote, [fallbackTarget], sessions[fallbackDestination.Id].SessionId, Confirmed: true),
+                TestContext.Current.CancellationToken);
+            await service.DeleteEntriesAsync(
+                new(PaneKind.Remote, [encryptedTarget], sessions[tlsDestination.Id].SessionId, Confirmed: true),
+                TestContext.Current.CancellationToken);
+            foreach (var session in sessions.Values.Reverse())
+                await service.DisconnectAsync(new(session.SessionId), TestContext.Current.CancellationToken);
         }
         finally
         {
@@ -280,6 +465,8 @@ public sealed class ProtocolIntegrationTests
             }
 
             var jobs = new JobCoordinator();
+            var processHost = new TrackingProcessHost(
+                new TlsCaProcessHost(new LftpProcessHost(), config.TlsCaPath));
             var options = AgentWorkspaceOptions.CreateDefault(Path.Combine(root, "agent")) with
             {
                 ConnectTimeout = TimeSpan.FromSeconds(20),
@@ -292,7 +479,7 @@ public sealed class ProtocolIntegrationTests
                 profiles,
                 secrets,
                 new SftpHostKeyManager(hostKeys, new UnexpectedHostKeyProbe()),
-                new TlsCaProcessHost(new LftpProcessHost(), config.TlsCaPath),
+                processHost,
                 PackagedLftpRuntimeProvider.CreateTestOverride(executablePath),
                 jobs,
                 new MirrorPlanner(),
@@ -336,9 +523,27 @@ public sealed class ProtocolIntegrationTests
                 new(session.SessionId, remoteDirectory, Fresh: true), TestContext.Current.CancellationToken);
             Assert.Contains(remoteDirectoryListing.Entries, entry => entry.Name == "upload-雪.bin");
 
+            var retrySource = Path.Combine(root, "retry-after-failure.bin");
+            const string retryTarget = "/roundtrip-雪/retried-雪.bin";
+            var retryPlan = new TransferPlan(
+                Guid.NewGuid(), profile.Id, TransferDirection.Upload,
+                retrySource, retryTarget, TransferMode.Overwrite);
+            var failed = await service.EnqueueTransferAsync(
+                new(session.SessionId, retryPlan), TestContext.Current.CancellationToken);
+            Assert.Equal(JobState.Failed, failed.Job.State);
+            Assert.True(failed.Job.RetryAvailable);
+            await File.WriteAllBytesAsync(retrySource, payload, TestContext.Current.CancellationToken);
+            var retried = await service.RetryJobAsync(new(failed.Job.Id), TestContext.Current.CancellationToken);
+            Assert.Equal(failed.Job.Id, retried.Job.Id);
+            await WaitForCompletedAsync(jobs, retried.Job.Id, protocol);
+
             var downloadDirectory = Path.Combine(root, "download");
             Directory.CreateDirectory(downloadDirectory);
             var downloadTarget = Path.Combine(downloadDirectory, "download-雪.bin");
+            await File.WriteAllBytesAsync(
+                downloadTarget,
+                payload.AsMemory(0, payload.Length / 4),
+                TestContext.Current.CancellationToken);
             var download = await service.EnqueueTransferAsync(new(
                 session.SessionId,
                 new TransferPlan(
@@ -347,6 +552,47 @@ public sealed class ProtocolIntegrationTests
                 TestContext.Current.CancellationToken);
             await WaitForCompletedAsync(jobs, download.Job.Id, protocol);
             Assert.Equal(payload, await File.ReadAllBytesAsync(downloadTarget, TestContext.Current.CancellationToken));
+
+            var cancelledTarget = Path.Combine(downloadDirectory, "cancelled-雪.bin");
+            var cancellationSourcePath = $"/cancel-source-{profile.Id:N}.bin";
+            var cancellationSource = await service.EnqueueTransferAsync(new(
+                session.SessionId,
+                new TransferPlan(
+                    Guid.NewGuid(), profile.Id, TransferDirection.Upload,
+                    uploadSource, cancellationSourcePath, TransferMode.Overwrite)),
+                TestContext.Current.CancellationToken);
+            await WaitForCompletedAsync(jobs, cancellationSource.Job.Id, protocol);
+            var cancelled = await service.EnqueueTransferAsync(new(
+                session.SessionId,
+                new TransferPlan(
+                    Guid.NewGuid(), profile.Id, TransferDirection.Download,
+                    cancellationSourcePath, cancelledTarget, TransferMode.Resume,
+                    Segments: 2,
+                    RateLimitBytesPerSecond: 64 * 1024)),
+                TestContext.Current.CancellationToken);
+            await WaitUntilAsync(
+                () => processHost.Commands.Any(item =>
+                    item.Role == $"transfer-policy-{cancelled.Job.Id:N}" &&
+                    item.Command.Contains("pget -n 2", StringComparison.Ordinal) &&
+                    item.Command.Contains(cancellationSourcePath, StringComparison.Ordinal)),
+                $"{protocol} rate-limited transfer never entered its isolated LFTP process.");
+            Assert.True(service.TryCancelOperation(cancelled.Job.Id, "Controlled active cancellation."));
+            await WaitForStateAsync(jobs, cancelled.Job.Id, JobState.Cancelled, protocol);
+            await WaitUntilAsync(
+                () => processHost.DisposedRoles.Contains($"transfer-policy-{cancelled.Job.Id:N}"),
+                $"{protocol} cancelled transfer process was not disposed.");
+            if (File.Exists(cancelledTarget))
+                Assert.True(new FileInfo(cancelledTarget).Length < payload.Length);
+
+            var postCancellationTarget = Path.Combine(downloadDirectory, "after-cancel-雪.bin");
+            var afterCancellation = await service.EnqueueTransferAsync(new(
+                session.SessionId,
+                new TransferPlan(
+                    Guid.NewGuid(), profile.Id, TransferDirection.Download,
+                    uploadedPath, postCancellationTarget, TransferMode.Overwrite)),
+                TestContext.Current.CancellationToken);
+            await WaitForCompletedAsync(jobs, afterCancellation.Job.Id, protocol);
+            Assert.Equal(payload, await File.ReadAllBytesAsync(postCancellationTarget, TestContext.Current.CancellationToken));
 
             await service.MoveEntryAsync(
                 new(PaneKind.Remote, uploadedPath, renamedPath, session.SessionId), TestContext.Current.CancellationToken);
@@ -361,7 +607,7 @@ public sealed class ProtocolIntegrationTests
             Assert.False(File.Exists(exportedPath));
 
             await service.DeleteEntriesAsync(
-                new(PaneKind.Remote, [renamedPath], session.SessionId, Confirmed: true), TestContext.Current.CancellationToken);
+                new(PaneKind.Remote, [renamedPath, retryTarget], session.SessionId, Confirmed: true), TestContext.Current.CancellationToken);
             await service.DeleteEntriesAsync(
                 new(PaneKind.Remote, [remoteDirectory], session.SessionId, Confirmed: true), TestContext.Current.CancellationToken);
             var final = await service.BrowseRemoteAsync(
@@ -392,6 +638,29 @@ public sealed class ProtocolIntegrationTests
         Assert.Fail($"{protocol} job {jobId} did not complete within two minutes.");
     }
 
+    private static async Task WaitForStateAsync(
+        JobCoordinator jobs,
+        Guid jobId,
+        JobState expectedState,
+        ConnectionProtocol protocol)
+    {
+        await WaitUntilAsync(
+            () => jobs.GetJobs().Single(candidate => candidate.Id == jobId).State == expectedState,
+            $"{protocol} job {jobId} did not reach {expectedState}.");
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string failureMessage)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (DateTime.UtcNow < deadline)
+        {
+            TestContext.Current.CancellationToken.ThrowIfCancellationRequested();
+            if (condition()) return;
+            await Task.Delay(100, TestContext.Current.CancellationToken);
+        }
+        Assert.Fail(failureMessage);
+    }
+
     private static async Task<ProtocolLabConfig> LoadConfigAsync(string configPath) =>
         JsonSerializer.Deserialize<ProtocolLabConfig>(
             await File.ReadAllTextAsync(configPath, TestContext.Current.CancellationToken),
@@ -414,10 +683,16 @@ public sealed class ProtocolIntegrationTests
         [property: JsonPropertyName("sftp_host_key_fingerprint")] string SftpHostKeyFingerprint,
         [property: JsonPropertyName("sftp_host_key_generation")] int SftpHostKeyGeneration,
         [property: JsonPropertyName("sftp_rotate_host_key_path")] string SftpRotateHostKeyPath,
+        [property: JsonPropertyName("fxp_rejection_paths")] ProtocolLabFxpRejectionPaths FxpRejectionPaths,
         ProtocolLabEndpoints Endpoints);
+
+    private sealed record ProtocolLabFxpRejectionPaths(string Source, string Destination);
 
     private sealed record ProtocolLabEndpoints(
         int Ftp,
+        [property: JsonPropertyName("ftp_peer")] int FtpPeer,
+        [property: JsonPropertyName("ftp_no_fxp_source")] int FtpNoFxpSource,
+        [property: JsonPropertyName("ftp_no_fxp_destination")] int FtpNoFxpDestination,
         [property: JsonPropertyName("ftp_opportunistic_tls")] int FtpOpportunisticTls,
         [property: JsonPropertyName("ftps_explicit")] int FtpsExplicit,
         [property: JsonPropertyName("ftps_implicit")] int FtpsImplicit,
@@ -506,6 +781,79 @@ public sealed class ProtocolIntegrationTests
             LftpProcessStartOptions options,
             CancellationToken cancellationToken = default) =>
             new TlsCaSession(await inner.StartAsync(options, cancellationToken), _preamble);
+    }
+
+    private sealed class TrackingProcessHost(ILftpProcessHost inner) : ILftpProcessHost
+    {
+        public ConcurrentBag<string> DisposedRoles { get; } = [];
+        public ConcurrentBag<(string Role, string Command)> Commands { get; } = [];
+
+        public async Task<ILftpSession> StartAsync(
+            LftpProcessStartOptions options,
+            CancellationToken cancellationToken = default) =>
+            new TrackingSession(
+                await inner.StartAsync(options, cancellationToken),
+                options.Tag,
+                DisposedRoles,
+                Commands);
+    }
+
+    private sealed class TrackingSession : ILftpSession
+    {
+        private readonly ConcurrentBag<string> _disposedRoles;
+        private readonly ILftpSession _inner;
+        private readonly string _role;
+        private readonly ConcurrentBag<(string Role, string Command)> _commands;
+        private int _disposed;
+
+        public TrackingSession(
+            ILftpSession inner,
+            string role,
+            ConcurrentBag<string> disposedRoles,
+            ConcurrentBag<(string Role, string Command)> commands)
+        {
+            _inner = inner;
+            _role = role;
+            _disposedRoles = disposedRoles;
+            _commands = commands;
+            _inner.OutputReceived += ForwardOutput;
+            _inner.UnsolicitedOutput += ForwardUnsolicitedOutput;
+        }
+
+        public int ProcessId => _inner.ProcessId;
+        public bool IsRunning => _inner.IsRunning;
+        public event EventHandler<LftpOutputLine>? OutputReceived;
+        public event EventHandler<LftpOutputLine>? UnsolicitedOutput;
+        public Task<LftpCommandResult> ExecuteAsync(
+            string command,
+            TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            _commands.Add((_role, command));
+            return _inner.ExecuteAsync(command, timeout, cancellationToken);
+        }
+        public Task<LftpCommandResult> ExecuteToExitAsync(
+            string command,
+            TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            _commands.Add((_role, command));
+            return _inner.ExecuteToExitAsync(command, timeout, cancellationToken);
+        }
+        public Task StopAsync(bool force = false, CancellationToken cancellationToken = default) =>
+            _inner.StopAsync(force, cancellationToken);
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            _inner.OutputReceived -= ForwardOutput;
+            _inner.UnsolicitedOutput -= ForwardUnsolicitedOutput;
+            try { await _inner.DisposeAsync(); }
+            finally { _disposedRoles.Add(_role); }
+        }
+
+        private void ForwardOutput(object? sender, LftpOutputLine line) => OutputReceived?.Invoke(this, line);
+        private void ForwardUnsolicitedOutput(object? sender, LftpOutputLine line) => UnsolicitedOutput?.Invoke(this, line);
     }
 
     private sealed class TlsCaSession : ILftpSession

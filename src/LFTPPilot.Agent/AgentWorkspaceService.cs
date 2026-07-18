@@ -1450,7 +1450,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
 
         var routingNote = expectedMode == RemoteTransferMode.Fxp
             ? "FXP preferred between FTP-family servers; LFTP will relay through this client if FXP is unavailable."
-            : "Managed client relay uses two isolated LFTP processes; FXP is unavailable for this protocol combination.";
+            : "Managed client relay uses two isolated LFTP processes; this protocol combination does not use direct FXP.";
         var job = _jobs.Enqueue(new(
             request.Plan.Id,
             JobKind.RemoteTransfer,
@@ -2631,7 +2631,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     }
 
     private static RemoteTransferMode ComputeRemoteTransferMode(ConnectionProtocol source, ConnectionProtocol destination) =>
-        source != ConnectionProtocol.Sftp && destination != ConnectionProtocol.Sftp
+        source == ConnectionProtocol.Ftp && destination == ConnectionProtocol.Ftp
             ? RemoteTransferMode.Fxp
             : RemoteTransferMode.ClientRelay;
 

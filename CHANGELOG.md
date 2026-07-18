@@ -9,6 +9,12 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- The controlled real-runtime matrix now proves interrupted segmented resume,
+  recoverable failed-transfer retry, active rate-limited cancellation and
+  isolated-process cleanup across every supported protocol. Dedicated FTP
+  peers also verify direct FXP and LFTP's client-side fallback when both FXP
+  arrangements are rejected, while SFTP/mixed and TLS-protected FTP routes use
+  the explicit two-process managed relay.
 - Remote files can now be dragged from a native pane to Explorer. Windows'
   delayed `StorageItems` request starts a bounded Agent-owned export only when
   Explorer accepts the drop; LFTP prepares freshly validated segmented

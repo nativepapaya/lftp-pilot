@@ -1,4 +1,4 @@
-"""Disposable loopback FTP-family and SFTP servers for LFTP Pilot acceptance.
+"""Disposable loopback FTP-family and SFTP endpoints for LFTP Pilot acceptance.
 
 This process is deliberately test-only. It binds every listener to loopback,
 generates fresh identities in the caller-provided root, and exits when stdin is
@@ -111,6 +111,24 @@ class ImplicitTLSFTPHandler(TLS_FTPHandler):
         super().handle()
 
 
+class NoFxpFTPHandler(FTPHandler):
+    """Allow ordinary passive transfers while rejecting both FXP active commands."""
+
+    fxp_rejection_path = ""
+
+    def _reject_fxp(self) -> None:
+        pathlib.Path(self.fxp_rejection_path).touch()
+        self.respond("502 FXP disabled by controlled test endpoint")
+
+    def ftp_PORT(self, line: str) -> None:
+        del line
+        self._reject_fxp()
+
+    def ftp_EPRT(self, line: str) -> None:
+        del line
+        self._reject_fxp()
+
+
 class FtpEndpoint:
     def __init__(
         self,
@@ -119,6 +137,7 @@ class FtpEndpoint:
         certificate_path: pathlib.Path | None = None,
         key_path: pathlib.Path | None = None,
         require_tls: bool = False,
+        handler_attributes: dict[str, Any] | None = None,
     ) -> None:
         authorizer = DummyAuthorizer()
         authorizer.add_user(LAB_USER, LAB_PASSWORD, str(root), perm="elradfmwMT")
@@ -138,6 +157,8 @@ class FtpEndpoint:
                 # A distinct context is required for every generated identity.
                 "ssl_context": None,
             })
+        if handler_attributes is not None:
+            attributes.update(handler_attributes)
         handler = type(f"Lab{handler_base.__name__}", (handler_base,), attributes)
         self._ioloop = IOLoop()
         self._server = FTPServer(("127.0.0.1", 0), handler, ioloop=self._ioloop)
@@ -397,13 +418,35 @@ def main() -> int:
 
     certificate_path, tls_key_path = _write_tls_identity(root)
     endpoint_roots: dict[str, pathlib.Path] = {}
-    for name in ["ftp", "ftp_opportunistic_tls", "ftps_explicit", "ftps_implicit", "sftp"]:
+    for name in [
+        "ftp",
+        "ftp_peer",
+        "ftp_no_fxp_source",
+        "ftp_no_fxp_destination",
+        "ftp_opportunistic_tls",
+        "ftps_explicit",
+        "ftps_implicit",
+        "sftp",
+    ]:
         endpoint_root = root / "roots" / name
         _seed(endpoint_root)
         endpoint_roots[name] = endpoint_root
 
+    no_fxp_source_marker = root / "no-fxp-source-rejected"
+    no_fxp_destination_marker = root / "no-fxp-destination-rejected"
     endpoints: list[Any] = [
         FtpEndpoint(endpoint_roots["ftp"], FTPHandler),
+        FtpEndpoint(endpoint_roots["ftp_peer"], FTPHandler),
+        FtpEndpoint(
+            endpoint_roots["ftp_no_fxp_source"],
+            NoFxpFTPHandler,
+            handler_attributes={"fxp_rejection_path": str(no_fxp_source_marker)},
+        ),
+        FtpEndpoint(
+            endpoint_roots["ftp_no_fxp_destination"],
+            NoFxpFTPHandler,
+            handler_attributes={"fxp_rejection_path": str(no_fxp_destination_marker)},
+        ),
         FtpEndpoint(endpoint_roots["ftp_opportunistic_tls"], TLS_FTPHandler, certificate_path, tls_key_path),
         FtpEndpoint(endpoint_roots["ftps_explicit"], TLS_FTPHandler, certificate_path, tls_key_path, require_tls=True),
         FtpEndpoint(endpoint_roots["ftps_implicit"], ImplicitTLSFTPHandler, certificate_path, tls_key_path, require_tls=True),
@@ -431,11 +474,18 @@ def main() -> int:
         "sftp_host_key_fingerprint": sftp.host_key_fingerprint,
         "sftp_host_key_generation": host_key_generation,
         "sftp_rotate_host_key_path": str(rotate_host_key_path),
+        "fxp_rejection_paths": {
+            "source": str(no_fxp_source_marker),
+            "destination": str(no_fxp_destination_marker),
+        },
         "endpoints": {
             "ftp": endpoints[0].port,
-            "ftp_opportunistic_tls": endpoints[1].port,
-            "ftps_explicit": endpoints[2].port,
-            "ftps_implicit": endpoints[3].port,
+            "ftp_peer": endpoints[1].port,
+            "ftp_no_fxp_source": endpoints[2].port,
+            "ftp_no_fxp_destination": endpoints[3].port,
+            "ftp_opportunistic_tls": endpoints[4].port,
+            "ftps_explicit": endpoints[5].port,
+            "ftps_implicit": endpoints[6].port,
             "sftp": sftp.port,
         },
     }
