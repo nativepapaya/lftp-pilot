@@ -217,7 +217,7 @@ function Assert-ReleaseCertificate {
     }
     if ($RequireNonExportablePrivateKey) {
         if (-not $Certificate.HasPrivateKey) { throw 'The release certificate has no private key.' }
-        $rsa = $Certificate.GetRSAPrivateKey()
+        $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
         try {
             if ($rsa -isnot [Security.Cryptography.RSACng] -or $rsa.KeySize -lt 3072 -or
                 $rsa.Key.ExportPolicy -ne [Security.Cryptography.CngExportPolicies]::None) {
