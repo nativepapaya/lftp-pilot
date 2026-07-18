@@ -7,6 +7,13 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ## Unreleased
 
+### Fixed
+
+- Release publication dry runs now create and validate the complete local
+  staging set while suppressing only the final GitHub upload. PowerShell's
+  inherited `-WhatIf` preference previously skipped nested provenance writes
+  and made the documented review step fail before assets could be inspected.
+
 ### Added
 
 - Complete schema 3 redistribution evidence now covers all 43 locked native
