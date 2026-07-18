@@ -1600,6 +1600,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             _jobs.Transition(jobId, JobState.Running, "Waiting for a reserved per-site LFTP transfer slot.");
             await session.ExecuteQueuedTransferAsync(
                 plan,
+                jobId,
                 async (_, token) =>
                 {
                     _jobs.Transition(jobId, JobState.Running, "Reserved an LFTP transfer slot; revalidating source and destination.");
@@ -1619,7 +1620,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                         }
                         return true;
                     }, token).ConfigureAwait(false);
+                    return await GetTransferSourceLengthAsync(session, plan, token).ConfigureAwait(false);
                 },
+                progress => _publish?.Invoke(EngineEventKind.Job, "job.progress", progress, progress.JobId, session.Snapshot.SessionId),
                 cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             _jobs.Transition(jobId, JobState.Completed, "Completed through the per-site LFTP transfer queue.");
@@ -1636,6 +1639,24 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         {
             TryFailJob(jobId, exception);
         }
+    }
+
+    private async Task<long?> GetTransferSourceLengthAsync(
+        WorkspaceSession session,
+        TransferPlan plan,
+        CancellationToken cancellationToken)
+    {
+        if (plan.SourceKind != TransferSourceKind.File) return null;
+        if (plan.Direction == TransferDirection.Upload)
+        {
+            RequireLocalSourceKind(plan.SourcePath, TransferSourceKind.File);
+            return new FileInfo(plan.SourcePath).Length;
+        }
+        return await session.WithValidationSessionAsync(async validation =>
+        {
+            var source = await TryStatRemoteAsync(validation, plan.SourcePath, cancellationToken).ConfigureAwait(false);
+            return source is { Kind: EntryKind.File, Size: > 0 } ? source.Size : null;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task RunScheduledTransferAsync(

@@ -8,6 +8,7 @@ namespace LFTPPilot.Agent;
 internal sealed class NativeTransferQueue : IAsyncDisposable
 {
     private static readonly TimeSpan ProcessHealthInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan DefaultProgressInterval = TimeSpan.FromSeconds(1);
     private readonly ILftpSession _session;
     private readonly TimeSpan _commandTimeout;
     private readonly TimeSpan _transferTimeout;
@@ -15,9 +16,12 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
     private readonly SemaphoreSlim _slots;
     private readonly SemaphoreSlim _submissionGate = new(1, 1);
     private readonly CancellationTokenSource _availability = new();
+    private readonly CancellationTokenSource _progressLifetime = new();
     private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ConcurrentDictionary<Guid, PendingTransfer> _pending = [];
     private readonly ConcurrentDictionary<string, CompletionMarker> _markers = new(StringComparer.Ordinal);
+    private readonly TimeSpan _progressInterval;
+    private readonly Task _progressTask;
     private int _retired;
     private int _disposed;
     private int _activeExecutions;
@@ -27,14 +31,17 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
         int parallelism,
         TimeSpan commandTimeout,
         TimeSpan transferTimeout,
-        bool isolatedSettings)
+        bool isolatedSettings,
+        TimeSpan progressInterval)
     {
         _session = session;
         _commandTimeout = commandTimeout;
         _transferTimeout = transferTimeout;
         _isolatedSettings = isolatedSettings;
+        _progressInterval = progressInterval;
         _slots = new(parallelism, parallelism);
         _session.OutputReceived += OnOutputReceived;
+        _progressTask = PollProgressAsync(_progressLifetime.Token);
     }
 
     public bool IsAvailable => Volatile.Read(ref _retired) == 0 && Volatile.Read(ref _disposed) == 0 && _session.IsRunning;
@@ -45,14 +52,18 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
         TimeSpan commandTimeout,
         TimeSpan transferTimeout,
         bool isolatedSettings,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? progressInterval = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         if (parallelism is < 1 or > 8) throw new ArgumentOutOfRangeException(nameof(parallelism));
         if (commandTimeout <= TimeSpan.Zero || transferTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(commandTimeout), "Queue timeouts must be positive.");
+        var effectiveProgressInterval = progressInterval ?? DefaultProgressInterval;
+        if (effectiveProgressInterval < TimeSpan.FromMilliseconds(100) || effectiveProgressInterval > TimeSpan.FromMinutes(1))
+            throw new ArgumentOutOfRangeException(nameof(progressInterval), "The progress interval must be between 100 milliseconds and one minute.");
 
-        var queue = new NativeTransferQueue(session, parallelism, commandTimeout, transferTimeout, isolatedSettings);
+        var queue = new NativeTransferQueue(session, parallelism, commandTimeout, transferTimeout, isolatedSettings, effectiveProgressInterval);
         try
         {
             var configured = await session.ExecuteAsync(
@@ -71,7 +82,9 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
 
     public async Task ExecuteAsync(
         TransferPlan plan,
-        Func<ILftpSession, CancellationToken, Task> preSubmit,
+        Guid jobId,
+        Func<ILftpSession, CancellationToken, Task<long?>> preSubmit,
+        Action<TransferProgressSnapshot>? progress,
         CancellationToken cancellationToken)
     {
         EnterExecution();
@@ -93,7 +106,8 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
                 {
                     if (!IsAvailable)
                         throw new NativeTransferQueueRetiredException("The per-profile LFTP transfer queue is not available.");
-                    await preSubmit(_session, cancellationToken).ConfigureAwait(false);
+                    var totalBytes = await preSubmit(_session, cancellationToken).ConfigureAwait(false);
+                    if (totalBytes is <= 0) totalBytes = null;
                     if (!IsAvailable)
                         throw new NativeTransferQueueRetiredException("The per-profile LFTP transfer queue was retired during validation.");
 
@@ -105,7 +119,11 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
                         $"__LFTPPILOT_QUEUE_{token}_OK",
                         $"__LFTPPILOT_QUEUE_{token}_FAILED",
                         $"__LFTPPILOT_QUEUE_{token}_SUBMIT_OK",
-                        $"__LFTPPILOT_QUEUE_{token}_SUBMIT_FAILED");
+                        $"__LFTPPILOT_QUEUE_{token}_SUBMIT_FAILED",
+                        plan,
+                        jobId,
+                        totalBytes,
+                        progress);
                     Register(pending);
 
                     try
@@ -175,11 +193,15 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _progressLifetime.Cancel();
         await RetireAsync(new NativeTransferQueueRetiredException("The per-profile LFTP transfer queue was closed.")).ConfigureAwait(false);
+        try { await _progressTask.ConfigureAwait(false); }
+        catch (OperationCanceledException) when (_progressLifetime.IsCancellationRequested) { }
         if (Volatile.Read(ref _activeExecutions) == 0) _drained.TrySetResult();
         await _drained.Task.ConfigureAwait(false);
         await _session.DisposeAsync().ConfigureAwait(false);
         _availability.Dispose();
+        _progressLifetime.Dispose();
         _submissionGate.Dispose();
         _slots.Dispose();
     }
@@ -268,6 +290,50 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
         if (marker.Pending.Completion.TrySetResult(marker.Succeeded)) Cleanup(marker.Pending);
     }
 
+    private async Task PollProgressAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (_pending.IsEmpty)
+                {
+                    await Task.Delay(_progressInterval, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                var result = await _session.ExecuteAsync("jobs -vv", _commandTimeout, cancellationToken).ConfigureAwait(false);
+                if (!result.TimedOut && !result.Truncated && result.Failure is null)
+                {
+                    var observations = LftpJobProgressParser.Parse(result.Lines
+                        .Where(static line => string.Equals(line.Stream, "stdout", StringComparison.OrdinalIgnoreCase))
+                        .Select(static line => line.Line));
+                    PublishProgress(observations);
+                }
+                if (!_session.IsRunning) return;
+                await Task.Delay(_progressInterval, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception) when (!IsFatalRuntimeException(exception))
+            {
+                if (!_session.IsRunning) return;
+                await Task.Delay(_progressInterval, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private void PublishProgress(IEnumerable<LftpTransferProgressObservation> observations)
+    {
+        foreach (var observation in observations)
+        {
+            var matches = _pending.Values.Where(pending => pending.Matches(observation)).Take(2).ToArray();
+            if (matches.Length != 1) continue;
+            matches[0].TryPublish(observation);
+        }
+    }
+
     private void Cleanup(PendingTransfer pending)
     {
         _pending.TryRemove(pending.Id, out _);
@@ -279,6 +345,7 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref _retired, 1) != 0) return;
         _availability.Cancel();
+        _progressLifetime.Cancel();
         _session.OutputReceived -= OnOutputReceived;
         foreach (var pending in _pending.Values) pending.Completion.TrySetException(reason);
         _pending.Clear();
@@ -290,15 +357,60 @@ internal sealed class NativeTransferQueue : IAsyncDisposable
 
     private sealed record CompletionMarker(PendingTransfer Pending, bool Succeeded);
 
-    private sealed record PendingTransfer(
+    private sealed class PendingTransfer(
         Guid Id,
         string AliasName,
         string SuccessMarker,
         string FailureMarker,
         string SubmissionSuccessMarker,
-        string SubmissionFailureMarker)
+        string SubmissionFailureMarker,
+        TransferPlan Plan,
+        Guid JobId,
+        long? TotalBytes,
+        Action<TransferProgressSnapshot>? Progress)
     {
+        private long _lastPublishedBytes = -1;
+
+        public Guid Id { get; } = Id;
+        public string AliasName { get; } = AliasName;
+        public string SuccessMarker { get; } = SuccessMarker;
+        public string FailureMarker { get; } = FailureMarker;
+        public string SubmissionSuccessMarker { get; } = SubmissionSuccessMarker;
+        public string SubmissionFailureMarker { get; } = SubmissionFailureMarker;
         public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool Matches(LftpTransferProgressObservation observation)
+        {
+            if (Progress is null || TotalBytes is not > 0) return false;
+            var segmented = Plan.Direction == TransferDirection.Download && Plan.Segments > 1 && Plan.Mode != TransferMode.Overwrite;
+            if (observation.IsSegmented != segmented) return false;
+            if (observation.TotalBytes is { } observedTotal && observedTotal != TotalBytes.Value) return false;
+            var expectedPercent = (int)Math.Floor((double)observation.BytesTransferred / TotalBytes.Value * 100);
+            if (observation.Percent != expectedPercent) return false;
+            var expectedPath = Plan.Direction == TransferDirection.Download
+                ? Plan.SourcePath
+                : LftpCommandBuilder.ToMsysPath(Plan.SourcePath);
+            return string.Equals(expectedPath, observation.SourcePath, StringComparison.Ordinal);
+        }
+
+        public void TryPublish(LftpTransferProgressObservation observation)
+        {
+            var totalBytes = TotalBytes ?? 0;
+            if (observation.BytesTransferred > totalBytes ||
+                Interlocked.Exchange(ref _lastPublishedBytes, observation.BytesTransferred) == observation.BytesTransferred)
+            {
+                return;
+            }
+            var snapshot = new TransferProgressSnapshot(
+                JobId,
+                observation.BytesTransferred,
+                totalBytes,
+                observation.BytesPerSecond,
+                DateTimeOffset.UtcNow);
+            TransferProgressPolicy.Validate(snapshot);
+            try { Progress?.Invoke(snapshot); }
+            catch (Exception exception) when (!IsFatalRuntimeException(exception)) { }
+        }
     }
 }
 

@@ -69,6 +69,11 @@ still needs real servers, signed packages, or additional product development.
   waits for prior scheduled/active attempt cleanup, prevents duplicate
   submission, and clears stale retry capability after an Agent restart rather
   than persisting executable paths as job history.
+- Queued `get`, `put`, and segmented `pget` file transfers publish live byte,
+  total, percentage, and rate observations from LFTP's own bounded `jobs -vv`
+  status. The Agent correlates status only when one pending transfer has the
+  exact source path, segmented mode, and validated total; ambiguous or malformed
+  output is ignored and progress observers cannot unwind queue execution.
 - Fresh mirror dry runs, bounded case-exact structured action parsing, explicit
   deletion approval, definition binding, expiry, and an immediate matching
   second dry run plus endpoint validation before every execution. Dry-run
@@ -133,7 +138,8 @@ still needs real servers, signed packages, or additional product development.
 - Implement SFTP/mixed remote-to-remote client relay with distinct source and
   destination processes so each endpoint retains its own pinned host-key
   configuration.
-- Add the tray surface, idle-exit policy, live byte/progress plumbing, and wire
+- Add the tray surface and idle-exit policy, extend live progress to guarded
+  directory transfers, reviewed mirrors, and remote-to-remote jobs, and wire
   notifications, taskbar progress, Jump Lists, and support-bundle UI.
 - Complete outbound Explorer drag/drop for remote files and add richer folder
   transfer controls such as reusable filters and per-tree parallelism.

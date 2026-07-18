@@ -65,6 +65,10 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   the App in an unresolved state.
 - Native LFTP transfer queues, segmented downloads, rate controls, safe mirror
   previews/execution, cancellation, and run-once transfer scheduling.
+- Native queued file transfers now report live bytes, total size, percentage,
+  and transfer rate from bounded LFTP `jobs -vv` status. Status observations
+  are matched only to one exact pending source and transfer mode; ambiguous or
+  malformed output is ignored without affecting queue completion or safety.
 - Per-session non-modal recursive remote name search with depth and case
   controls, literal Unicode basename matching, cancellable isolated LFTP
   processes, bounded snapshot paging, and fresh navigation from results.

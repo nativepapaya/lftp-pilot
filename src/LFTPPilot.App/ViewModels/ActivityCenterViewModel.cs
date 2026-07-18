@@ -64,6 +64,22 @@ public sealed class ActivityCenterViewModel : ObservableObject
             History.RemoveAt(History.Count - 1);
     }
 
+    public bool ApplyProgress(TransferProgressSnapshot progress)
+    {
+        var existing = Jobs.FirstOrDefault(candidate => candidate.Id == progress.JobId);
+        if (existing is not { State: JobState.Running }) return false;
+        var status = $"{FormatBytes(progress.BytesTransferred)} of {FormatBytes(progress.TotalBytes)}";
+        if (progress.BytesPerSecond is { } rate) status += $" · {FormatBytes(rate)}/s";
+        var updated = existing with
+        {
+            Progress = progress.Progress,
+            Status = status,
+            UpdatedAt = progress.ObservedAt > existing.UpdatedAt ? progress.ObservedAt : existing.UpdatedAt,
+        };
+        Jobs[Jobs.IndexOf(existing)] = updated;
+        return true;
+    }
+
     private static bool CanCancelJob(object? parameter) =>
         parameter is JobSnapshot { State: JobState.Queued or JobState.Running or JobState.Paused or JobState.Scheduled };
 
@@ -84,6 +100,18 @@ public sealed class ActivityCenterViewModel : ObservableObject
 
     private void ReportError(Exception exception) =>
         Log.Insert(0, new(DateTimeOffset.Now, "Error", "Agent", exception.Message));
+
+    private static string FormatBytes(double value)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB", "PB"];
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+        return $"{value:0.#} {units[unit]}";
+    }
 
     private static void Replace<T>(ObservableCollection<T> target, IEnumerable<T> source)
     {

@@ -318,6 +318,17 @@ public sealed record HistoryRecord(
     long? BytesTransferred = null,
     string? Detail = null);
 
+public sealed record TransferProgressSnapshot(
+    Guid JobId,
+    long BytesTransferred,
+    long TotalBytes,
+    double? BytesPerSecond,
+    DateTimeOffset ObservedAt)
+{
+    [JsonIgnore]
+    public double Progress => TotalBytes == 0 ? 0 : (double)BytesTransferred / TotalBytes;
+}
+
 public sealed record EngineEvent(
     long Sequence,
     EngineEventKind Kind,

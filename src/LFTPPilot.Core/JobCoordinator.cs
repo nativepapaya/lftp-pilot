@@ -55,6 +55,7 @@ public sealed class JobCoordinator : IJobCoordinator
             updated = current with
             {
                 State = state,
+                Progress = state == JobState.Completed ? 1 : current.Progress,
                 Status = status ?? current.Status,
                 Error = error,
                 UpdatedAt = NextUpdatedAt(current),

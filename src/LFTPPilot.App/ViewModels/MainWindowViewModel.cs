@@ -362,6 +362,19 @@ public sealed class MainWindowViewModel : ObservableObject
                 Activity.AddHistory(record);
             }
         }
+        else if (engineEvent.Name == "job.progress")
+        {
+            var progress = DeserializePayload<TransferProgressSnapshot>(engineEvent.Payload);
+            if (progress is null || !IsValidTransferProgress(progress))
+            {
+                Activity.Log.Insert(0, new(engineEvent.Timestamp, "Warning", "Agent", "The Agent sent an invalid transfer progress event. Refreshing workspace state."));
+                RequestStateRefresh();
+            }
+            else
+            {
+                Activity.ApplyProgress(progress);
+            }
+        }
         else if (engineEvent.Name == "profile.saved" && DeserializePayload<ConnectionProfile>(engineEvent.Payload) is { } profile)
         {
             Connections.Upsert(profile);
@@ -427,6 +440,19 @@ public sealed class MainWindowViewModel : ObservableObject
         try
         {
             HistoryRecordPolicy.Validate(record);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsValidTransferProgress(TransferProgressSnapshot progress)
+    {
+        try
+        {
+            TransferProgressPolicy.Validate(progress);
             return true;
         }
         catch (ArgumentException)

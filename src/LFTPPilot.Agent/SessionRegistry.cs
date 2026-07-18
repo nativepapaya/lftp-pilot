@@ -925,7 +925,9 @@ internal sealed class WorkspaceSession : IAsyncDisposable
 
     public async Task ExecuteQueuedTransferAsync(
         TransferPlan plan,
-        Func<ILftpSession, CancellationToken, Task> preSubmit,
+        Guid jobId,
+        Func<ILftpSession, CancellationToken, Task<long?>> preSubmit,
+        Action<TransferProgressSnapshot>? progress,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(preSubmit);
@@ -936,11 +938,11 @@ internal sealed class WorkspaceSession : IAsyncDisposable
             plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip)
         {
             await using var isolated = await _registry.StartIsolatedTransferQueueAsync(this, plan.Id, cancellationToken).ConfigureAwait(false);
-            await isolated.ExecuteAsync(plan, preSubmit, cancellationToken).ConfigureAwait(false);
+            await isolated.ExecuteAsync(plan, jobId, preSubmit, progress, cancellationToken).ConfigureAwait(false);
             return;
         }
         var queue = await GetTransferQueueAsync(cancellationToken).ConfigureAwait(false);
-        await queue.ExecuteAsync(plan, preSubmit, cancellationToken).ConfigureAwait(false);
+        await queue.ExecuteAsync(plan, jobId, preSubmit, progress, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<T> WithTransferSessionAsync<T>(Func<ILftpSession, Task<T>> operation, CancellationToken cancellationToken)
