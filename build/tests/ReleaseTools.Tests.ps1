@@ -146,7 +146,9 @@ $now = [DateTimeOffset]::UtcNow
 $exportable = New-TestCertificate $now.AddDays(-1) $now.AddDays(1) -CodeSigning
 try {
     [void](Assert-ReleaseCertificate $exportable)
-    Assert-Throws { Assert-ReleaseCertificate $exportable -RequireNonExportablePrivateKey } 'Exportable certificate'
+    Assert-ThrowsLike {
+        Assert-ReleaseCertificate $exportable -RequireNonExportablePrivateKey
+    } '*non-exportable RSACng key*' 'Exportable certificate'
 }
 finally { $exportable.Dispose() }
 $expired = New-TestCertificate $now.AddDays(-3) $now.AddDays(-2) -CodeSigning
