@@ -1,7 +1,8 @@
 <UserControl
     x:Class="LFTPPilot.App.Views.Pages.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Loaded="SettingsPage_Loaded">
     <ScrollViewer Width="680" MinHeight="380" VerticalScrollBarVisibility="Auto">
         <StackPanel Spacing="18" Padding="0,0,8,0">
             <StackPanel Spacing="10">

@@ -9,6 +9,9 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Fixed
 
+- Settings now resolves the installed MSIX version as soon as the page opens
+  and reuses that package-aware value in support-bundle metadata. It previously
+  displayed the assembly fallback `1.0.0.0` until a manual update check.
 - Third-party license evidence now uses repository-pinned LF bytes on every
   platform, and the release-tool suite checks every committed license hash
   after checkout. Windows line-ending conversion could previously invalidate
