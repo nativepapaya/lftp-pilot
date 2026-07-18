@@ -428,6 +428,66 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task FolderTransferOptionsFlowIntoTheExactAgentPlan()
+    {
+        var profile = Profile();
+        var agent = new RecordingSessionAgent(profile, [Seed(profile)]);
+        var viewModel = CreateViewModelWithoutUiContext(agent);
+        await viewModel.InitializeAsync();
+        var session = Assert.Single(viewModel.Sessions);
+        var options = new TransferUiOptions(
+            TransferMode.Resume,
+            DownloadSegments: 8,
+            RateLimitBytesPerSecond: 4096,
+            RunAt: null,
+            Includes: ["*.zip", "docs/**"],
+            Excludes: ["cache/**"],
+            ParallelFiles: 6);
+
+        await session.QueueSourcesAsync(
+            TransferDirection.Download,
+            [new("/remote/folder", TransferSourceKind.Directory)],
+            options);
+
+        var plan = Assert.Single(agent.TransferPlans);
+        Assert.Equal(TransferSourceKind.Directory, plan.SourceKind);
+        Assert.Equal(8, plan.Segments);
+        Assert.Equal(6, plan.ParallelFiles);
+        Assert.Equal(options.Includes, plan.EffectiveIncludes);
+        Assert.Equal(options.Excludes, plan.EffectiveExcludes);
+        Assert.Equal(4096, plan.RateLimitBytesPerSecond);
+
+        await session.QueueSourcesAsync(
+            TransferDirection.Download,
+            [new("/remote/file.zip", TransferSourceKind.File)],
+            options);
+        var filePlan = agent.TransferPlans[1];
+        Assert.Empty(filePlan.EffectiveIncludes);
+        Assert.Empty(filePlan.EffectiveExcludes);
+        Assert.Equal(1, filePlan.ParallelFiles);
+    }
+
+    [Fact]
+    public async Task UnknownFolderPresetMutationRequestsAuthoritativeStateRefresh()
+    {
+        var profile = Profile();
+        var agent = new RecordingSessionAgent(profile, [Seed(profile)])
+        {
+            ThrowFolderPresetOutcomeUnknown = true,
+        };
+        var viewModel = CreateViewModelWithoutUiContext(agent);
+        await viewModel.InitializeAsync();
+        var session = Assert.Single(viewModel.Sessions);
+        var refreshRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        session.StateRefreshRequested += (_, _) => refreshRequested.TrySetResult();
+
+        await Assert.ThrowsAsync<AgentRequestOutcomeUnknownException>(() =>
+            session.SaveFolderTransferPresetAsync(new(Guid.NewGuid(), "Release", ["*.msix"])));
+        await refreshRequested.Task.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        Assert.Empty(session.FolderTransferPresets);
+    }
+
+    [Fact]
     public async Task TransferReconciliationNeverLoopsOrCreatesFreshIdAfterSecondUnknownOutcome()
     {
         var profile = Profile();
@@ -792,6 +852,7 @@ public sealed class MainWindowViewModelTests
         public bool ThrowAfterConnectMutation { get; init; }
         public bool DeferConnectMutationUntilPublish { get; init; }
         public bool ThrowRemoteTransferOutcomeUnknown { get; init; }
+        public bool ThrowFolderPresetOutcomeUnknown { get; init; }
         public int TransferUnknownResponses { get; init; }
         public bool CommitTransferBeforeUnknownReply { get; init; }
         public bool ReturnFailedTransfer { get; init; }
@@ -946,6 +1007,20 @@ public sealed class MainWindowViewModelTests
             if (Jobs.All(existing => existing.Id != job.Id)) Jobs.Add(job);
             return Task.FromResult(Jobs.Single(existing => existing.Id == job.Id));
         }
+        public Task<FolderTransferPreset> SaveFolderTransferPresetAsync(
+            FolderTransferPreset preset,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ThrowFolderPresetOutcomeUnknown
+                ? Task.FromException<FolderTransferPreset>(new AgentRequestOutcomeUnknownException(
+                    WorkspaceMethods.FolderTransferPresetSave,
+                    new IOException("folder preset reply lost")))
+                : Task.FromResult(preset);
+        }
+        public Task<bool> DeleteFolderTransferPresetAsync(
+            Guid presetId,
+            CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task<bool> CancelJobAsync(Guid jobId, CancellationToken cancellationToken = default) => Unsupported<bool>();
         public Task<JobSnapshot> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default) => Unsupported<JobSnapshot>();
         public Task<MirrorUiPreview> PreviewMirrorAsync(MirrorDefinition definition, CancellationToken cancellationToken = default) => Unsupported<MirrorUiPreview>();

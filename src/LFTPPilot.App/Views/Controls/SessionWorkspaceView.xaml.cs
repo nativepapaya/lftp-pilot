@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Diagnostics;
 using LFTPPilot.App.Models;
 using LFTPPilot.App.Services;
@@ -253,6 +254,59 @@ public sealed partial class SessionWorkspaceView : UserControl
         };
         AutomationProperties.SetName(segments, "Download segments per file, 1 to 16");
 
+        var preset = new ComboBox
+        {
+            Header = "Saved folder preset",
+            ItemsSource = viewModel.FolderTransferPresets,
+            DisplayMemberPath = nameof(FolderTransferPreset.Name),
+            PlaceholderText = "Custom folder options",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        AutomationProperties.SetName(preset, "Saved folder transfer preset");
+        var presetName = new TextBox
+        {
+            Header = "Preset name",
+            PlaceholderText = "Reusable folder filter name",
+            MaxLength = FolderTransferPolicy.MaximumNameLength,
+        };
+        AutomationProperties.SetName(presetName, "Folder transfer preset name");
+        var newPreset = new Button { Content = "New" };
+        var savePreset = new Button { Content = "Save preset" };
+        var deletePreset = new Button { Content = "Delete", IsEnabled = false };
+        var presetButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        presetButtons.Children.Add(newPreset);
+        presetButtons.Children.Add(savePreset);
+        presetButtons.Children.Add(deletePreset);
+        var includePatterns = new TextBox
+        {
+            Header = "Include globs (one per line)",
+            PlaceholderText = "*.zip\r\ndocs/**",
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            MinHeight = 70,
+        };
+        var excludePatterns = new TextBox
+        {
+            Header = "Exclude globs (one per line)",
+            PlaceholderText = "cache/**\r\n*.tmp",
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            MinHeight = 70,
+        };
+        AutomationProperties.SetName(includePatterns, "Folder include globs, one per line");
+        AutomationProperties.SetName(excludePatterns, "Folder exclude globs, one per line");
+        var parallelFiles = new NumberBox
+        {
+            Header = "Parallel files in each folder tree",
+            Minimum = 1,
+            Maximum = FolderTransferPolicy.MaximumParallelFiles,
+            Value = 2,
+            SmallChange = 1,
+            SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact,
+            Description = "LFTP transfers this many files concurrently inside each selected folder.",
+        };
+        AutomationProperties.SetName(parallelFiles, "Parallel files per folder tree, 1 to 16");
+
         var limitBandwidth = new CheckBox { Content = "Limit bandwidth per transfer" };
         AutomationProperties.SetName(limitBandwidth, "Limit bandwidth per transfer");
         var bandwidthValue = new NumberBox
@@ -353,6 +407,26 @@ public sealed partial class SessionWorkspaceView : UserControl
         });
         content.Children.Add(mode);
         if (isDownload) content.Children.Add(segments);
+        if (containsDirectory)
+        {
+            content.Children.Add(new TextBlock
+            {
+                Text = "Folder controls",
+                Style = Application.Current.Resources["BodyStrongTextBlockStyle"] as Style,
+            });
+            content.Children.Add(new TextBlock
+            {
+                Text = "Globs and parallelism apply only to selected folders. Every folder still receives a fresh non-destructive dry run before LFTP starts.",
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.72,
+            });
+            content.Children.Add(preset);
+            content.Children.Add(presetName);
+            content.Children.Add(presetButtons);
+            content.Children.Add(includePatterns);
+            content.Children.Add(excludePatterns);
+            content.Children.Add(parallelFiles);
+        }
         content.Children.Add(limitBandwidth);
         content.Children.Add(bandwidthGrid);
         content.Children.Add(schedule);
@@ -360,12 +434,81 @@ public sealed partial class SessionWorkspaceView : UserControl
         content.Children.Add(runOnceInfo);
         content.Children.Add(validation);
 
+        preset.SelectionChanged += (_, _) =>
+        {
+            if (preset.SelectedItem is not FolderTransferPreset selected) return;
+            presetName.Text = selected.Name;
+            includePatterns.Text = string.Join(Environment.NewLine, selected.EffectiveIncludes);
+            excludePatterns.Text = string.Join(Environment.NewLine, selected.EffectiveExcludes);
+            parallelFiles.Value = selected.ParallelFiles;
+            segments.Value = selected.DownloadSegmentsPerFile;
+            deletePreset.IsEnabled = true;
+            validation.IsOpen = false;
+        };
+        newPreset.Click += (_, _) =>
+        {
+            preset.SelectedItem = null;
+            presetName.Text = string.Empty;
+            includePatterns.Text = string.Empty;
+            excludePatterns.Text = string.Empty;
+            parallelFiles.Value = 2;
+            segments.Value = 4;
+            deletePreset.IsEnabled = false;
+            validation.IsOpen = false;
+        };
+        savePreset.Click += async (_, _) =>
+        {
+            if (!TryReadFolderOptions(
+                out var includes, out var excludes, out var parallel, out var presetSegments, out var error))
+            {
+                ShowValidation(error);
+                return;
+            }
+            var id = preset.SelectedItem is FolderTransferPreset selected ? selected.Id : Guid.NewGuid();
+            var candidate = new FolderTransferPreset(
+                id, presetName.Text.Trim(), includes, excludes, parallel, presetSegments);
+            try
+            {
+                PlanValidator.Validate(candidate);
+                preset.SelectedItem = await viewModel.SaveFolderTransferPresetAsync(candidate).ConfigureAwait(true);
+                validation.Title = "Folder preset saved";
+                validation.Message = $"{candidate.Name} is available in every session.";
+                validation.Severity = InfoBarSeverity.Success;
+                validation.IsOpen = true;
+            }
+            catch (Exception exception)
+            {
+                ShowValidation(exception.Message);
+            }
+        };
+        deletePreset.Click += async (_, _) =>
+        {
+            if (preset.SelectedItem is not FolderTransferPreset selected) return;
+            try
+            {
+                _ = await viewModel.DeleteFolderTransferPresetAsync(selected.Id).ConfigureAwait(true);
+                preset.SelectedItem = null;
+                presetName.Text = string.Empty;
+                deletePreset.IsEnabled = false;
+                validation.IsOpen = false;
+            }
+            catch (Exception exception)
+            {
+                ShowValidation(exception.Message);
+            }
+        };
+
         TransferUiOptions? selectedOptions = null;
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
             Title = $"{direction} transfer options",
-            Content = content,
+            Content = new ScrollViewer
+            {
+                Content = content,
+                MaxHeight = 680,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            },
             PrimaryButtonText = "Queue transfers",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
@@ -374,8 +517,7 @@ public sealed partial class SessionWorkspaceView : UserControl
         {
             if (!TryCreateOptions(out selectedOptions, out var error))
             {
-                validation.Message = error;
-                validation.IsOpen = true;
+                ShowValidation(error);
                 args.Cancel = true;
             }
         };
@@ -403,6 +545,58 @@ public sealed partial class SessionWorkspaceView : UserControl
             runOnceInfo.IsOpen = enabled;
         }
 
+        void ShowValidation(string message)
+        {
+            validation.Title = "Review these options";
+            validation.Message = message;
+            validation.Severity = InfoBarSeverity.Error;
+            validation.IsOpen = true;
+        }
+
+        bool TryReadFolderOptions(
+            out ImmutableArray<string> includes,
+            out ImmutableArray<string> excludes,
+            out int parallel,
+            out int downloadSegments,
+            out string error)
+        {
+            includes = SplitPatterns(includePatterns.Text);
+            excludes = SplitPatterns(excludePatterns.Text);
+            parallel = 1;
+            downloadSegments = 1;
+            error = string.Empty;
+            if (!containsDirectory) return true;
+            if (double.IsNaN(parallelFiles.Value) || parallelFiles.Value != Math.Truncate(parallelFiles.Value) ||
+                parallelFiles.Value is < 1 or > FolderTransferPolicy.MaximumParallelFiles)
+            {
+                error = $"Parallel files must be a whole number from 1 through {FolderTransferPolicy.MaximumParallelFiles}.";
+                return false;
+            }
+            parallel = (int)parallelFiles.Value;
+            if (double.IsNaN(segments.Value) || segments.Value != Math.Truncate(segments.Value) ||
+                segments.Value is < 1 or > FolderTransferPolicy.MaximumSegmentsPerFile)
+            {
+                error = $"Download segments must be a whole number from 1 through {FolderTransferPolicy.MaximumSegmentsPerFile}.";
+                return false;
+            }
+            downloadSegments = (int)segments.Value;
+            try
+            {
+                PlanValidator.Validate(new FolderTransferPreset(
+                    Guid.NewGuid(), "Current folder options", includes, excludes, parallel, downloadSegments));
+                return true;
+            }
+            catch (ModelValidationException exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+        }
+
+        static ImmutableArray<string> SplitPatterns(string value) =>
+            value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToImmutableArray();
+
         bool TryCreateOptions(out TransferUiOptions? options, out string error)
         {
             options = null;
@@ -424,6 +618,10 @@ public sealed partial class SessionWorkspaceView : UserControl
 
                 segmentCount = (int)segments.Value;
             }
+
+            if (!TryReadFolderOptions(
+                out var includes, out var excludes, out var parallel, out _, out error))
+                return false;
 
             long? bytesPerSecond = null;
             if (limitBandwidth.IsChecked == true)
@@ -470,7 +668,8 @@ public sealed partial class SessionWorkspaceView : UserControl
                 }
             }
 
-            options = new TransferUiOptions(selectedMode, segmentCount, bytesPerSecond, runAt);
+            options = new TransferUiOptions(
+                selectedMode, segmentCount, bytesPerSecond, runAt, includes, excludes, parallel);
             return true;
         }
     }

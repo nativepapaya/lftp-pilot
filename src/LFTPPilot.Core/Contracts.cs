@@ -58,6 +58,13 @@ public interface IMirrorDefinitionStore
     Task DeleteAsync(Guid definitionId, CancellationToken cancellationToken = default);
 }
 
+public interface IFolderTransferPresetStore
+{
+    Task<IReadOnlyList<FolderTransferPreset>> GetAllAsync(CancellationToken cancellationToken = default);
+    Task SaveAsync(FolderTransferPreset preset, CancellationToken cancellationToken = default);
+    Task DeleteAsync(Guid presetId, CancellationToken cancellationToken = default);
+}
+
 public interface IProfileStore
 {
     Task<IReadOnlyList<ConnectionProfile>> GetAllAsync(CancellationToken cancellationToken = default);

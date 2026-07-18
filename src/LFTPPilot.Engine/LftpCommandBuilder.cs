@@ -143,26 +143,31 @@ public static class LftpCommandBuilder
         if (background && plan.Mode == TransferMode.Skip)
             throw new InvalidOperationException("Skip-mode transfers require foreground collision enforcement.");
         var command = BuildTransferCore(plan);
+        var disableTemporaryDestination = RequiresDirectDestinationWrites(plan);
 
         if (background)
         {
+            if (disableTemporaryDestination)
+                command = $"( set xfer:use-temp-file no; {command}; set xfer:use-temp-file yes )";
             command = WithRateLimit(command, plan.RateLimitBytesPerSecond);
             return $"{command} &";
         }
 
         var commands = new List<string>();
         if (plan.RateLimitBytesPerSecond is { } rate) commands.Add($"set net:limit-rate {rate}:{rate}");
+        if (disableTemporaryDestination) commands.Add("set xfer:use-temp-file no");
         if (plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip)
         {
-            commands.Add("set xfer:use-temp-file no");
+            if (!disableTemporaryDestination) commands.Add("set xfer:use-temp-file no");
             commands.Add("set xfer:clobber no");
         }
         commands.Add(command);
         if (plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip)
         {
             commands.Add("set xfer:clobber yes");
-            commands.Add("set xfer:use-temp-file yes");
+            if (!disableTemporaryDestination) commands.Add("set xfer:use-temp-file yes");
         }
+        if (disableTemporaryDestination) commands.Add("set xfer:use-temp-file yes");
         if (plan.RateLimitBytesPerSecond is not null) commands.Add("set net:limit-rate 0:0");
         return string.Join("; ", commands);
     }
@@ -200,12 +205,18 @@ public static class LftpCommandBuilder
             setup.Add($"set net:limit-rate {rate}:{rate}");
             cleanup.Add("set net:limit-rate 0:0");
         }
-        if (plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip)
+        var disableTemporaryDestination = RequiresDirectDestinationWrites(plan);
+        if (disableTemporaryDestination)
         {
             setup.Add("set xfer:use-temp-file no");
+            cleanup.Add("set xfer:use-temp-file yes");
+        }
+        if (plan.Direction == TransferDirection.Download && plan.Mode == TransferMode.Skip)
+        {
+            if (!disableTemporaryDestination) setup.Add("set xfer:use-temp-file no");
             setup.Add("set xfer:clobber no");
             cleanup.Add("set xfer:clobber yes");
-            cleanup.Add("set xfer:use-temp-file yes");
+            if (!disableTemporaryDestination) cleanup.Add("set xfer:use-temp-file yes");
         }
 
         setup.Add(BuildTransferCore(plan));
@@ -235,8 +246,17 @@ public static class LftpCommandBuilder
         var source = definition.Direction == MirrorDirection.Download ? DashSafe(definition.RemoteRoot) : ToMsysMirrorRoot(definition.LocalRoot);
         var destination = definition.Direction == MirrorDirection.Download ? ToMsysMirrorRoot(definition.LocalRoot) : DashSafe(definition.RemoteRoot);
         builder.Append(' ').Append(Quote(source)).Append(' ').Append(Quote(destination));
-        if (definition.RateLimitBytesPerSecond is not { } rate) return builder.ToString();
-        return $"set net:limit-rate {rate}:{rate}; {builder}; set net:limit-rate 0:0";
+        var commands = new List<string>();
+        if (definition.RateLimitBytesPerSecond is { } rate)
+            commands.Add($"set net:limit-rate {rate}:{rate}");
+        if (!dryRun && definition.ParallelFiles > 1)
+            commands.Add("set xfer:use-temp-file no");
+        commands.Add(builder.ToString());
+        if (!dryRun && definition.ParallelFiles > 1)
+            commands.Add("set xfer:use-temp-file yes");
+        if (definition.RateLimitBytesPerSecond is not null)
+            commands.Add("set net:limit-rate 0:0");
+        return string.Join("; ", commands);
     }
 
     public static string BuildRemoteTransfer(RemoteTransferPlan plan)
@@ -335,13 +355,22 @@ public static class LftpCommandBuilder
         if (plan.Direction == TransferDirection.Upload) builder.Append(" --reverse");
         if (plan.Mode == TransferMode.Resume) builder.Append(" --continue");
         builder.Append(" --no-symlinks --overwrite");
+        if (plan.ParallelFiles > 1)
+            builder.Append(" --parallel=").Append(plan.ParallelFiles);
         if (plan.Direction == TransferDirection.Download && plan.Segments > 1)
             builder.Append(" --use-pget-n=").Append(plan.Segments);
+        foreach (var pattern in plan.EffectiveIncludes)
+            builder.Append(" --include-glob ").Append(Quote(pattern));
+        foreach (var pattern in plan.EffectiveExcludes)
+            builder.Append(" --exclude-glob ").Append(Quote(pattern));
 
         var source = plan.Direction == TransferDirection.Download ? DashSafe(plan.SourcePath) : ToMsysMirrorRoot(plan.SourcePath);
         var destination = plan.Direction == TransferDirection.Download ? ToMsysMirrorRoot(plan.DestinationPath) : DashSafe(plan.DestinationPath);
         return builder.Append(' ').Append(Quote(source)).Append(' ').Append(Quote(destination)).ToString();
     }
+
+    private static bool RequiresDirectDestinationWrites(TransferPlan plan) =>
+        plan.SourceKind == TransferSourceKind.Directory && plan.ParallelFiles > 1;
 
     private static string ToMsysMirrorRoot(string value)
     {

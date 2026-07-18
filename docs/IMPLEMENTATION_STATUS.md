@@ -78,7 +78,8 @@ still needs real servers, signed packages, or additional product development.
   TLS, FTPES, implicit FTPS, and SFTP servers. Password authentication, strict
   TLS and SFTP host trust, Unicode browse/mutation, upload, segmented download,
   interrupted resume, failed-transfer retry, active cancellation, outbound
-  Explorer export, move, delete, and process cleanup pass across all five
+  Explorer export, filtered parallel folder upload/download, move, delete, and
+  process cleanup pass across all five
   protocol surfaces without
   installing a system service or changing the user's certificate store. Its
   exact test-only Python dependency graph is version- and hash-pinned.
@@ -86,11 +87,14 @@ still needs real servers, signed packages, or additional product development.
   rate controls, per-profile native LFTP queues, cancellation-safe queue
   retirement, typed regular-file and directory transfers, explicit
   failed-transfer retry, mirror/reverse-mirror previews, and multi-session
-  concurrency. Folder transfers use non-pruning `mirror`/`mirror --reverse`
-  commands with no source or extraneous-target deletion options, skip nested
-  links, and replace changed plain files through LFTP temporary files without
-  timestamped backup debris or in-place hard-link writes. Skip and other
-  no-clobber jobs temporarily disable that mode so existing targets remain
+  concurrency. The native folder-transfer surface adds reusable package-scoped
+  presets, ordered include/exclude globs, per-tree parallelism, and segmented
+  download controls. Folder transfers use non-pruning `mirror`/`mirror
+  --reverse` commands with no source or extraneous-target deletion options and
+  skip nested links. Serial jobs retain LFTP temporary destination files;
+  parallel jobs scope that setting off around execution to avoid a reproduced
+  LFTP 4.9.3 protected-data stall, then restore it immediately. Skip and other
+  no-clobber file jobs also scope temporary files off so existing targets remain
   protected. Folder jobs freshly validate endpoint kinds for immediate,
   scheduled, and retried work. Each attempt receives an exact fresh dry run;
   deletion, type-collision replacement, and root-wide jobs are redirected to
@@ -186,8 +190,6 @@ still needs real servers, signed packages, or additional product development.
 
 ## Still required before 1.0 acceptance
 
-- Add richer folder transfer controls such as reusable filters and per-tree
-  parallelism.
 - Independently review and stage the exact native and managed third-party
   license/redistribution/corresponding-source evidence, create the trusted-test
   certificate, then validate an

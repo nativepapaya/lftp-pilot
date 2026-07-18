@@ -46,7 +46,8 @@ public sealed partial class AgentHost : IAsyncDisposable
         Func<int, bool>? clientAuthorizer = null,
         IMirrorDefinitionStore? mirrorDefinitionStore = null,
         IHistoryStore? historyStore = null,
-        Action<JobSnapshot>? jobObserver = null)
+        Action<JobSnapshot>? jobObserver = null,
+        IFolderTransferPresetStore? folderTransferPresetStore = null)
     {
         _idleExit = new(HasBackgroundWork, timeProvider);
         _coordinator = new();
@@ -74,7 +75,8 @@ public sealed partial class AgentHost : IAsyncDisposable
                 _scheduler,
                 _store,
                 mirrorDefinitionStore,
-                effectiveHistoryStore);
+                effectiveHistoryStore,
+                folderTransferPresetStore);
         }
     }
 

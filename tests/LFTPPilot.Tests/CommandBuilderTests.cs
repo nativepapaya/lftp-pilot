@@ -117,10 +117,12 @@ public sealed class CommandBuilderTests
     public void UploadMirrorUsesLocalThenRemoteAndDoesNotUsePget()
     {
         var command = LftpCommandBuilder.BuildMirror(CoreValidationTests.Mirror(MirrorDirection.Upload), dryRun: false);
+        Assert.StartsWith("set net:limit-rate 1024:1024; set xfer:use-temp-file no; mirror", command, StringComparison.Ordinal);
         Assert.Contains("--reverse", command, StringComparison.Ordinal);
         Assert.Contains("--no-symlinks --overwrite", command, StringComparison.Ordinal);
         Assert.DoesNotContain("--use-pget-n", command, StringComparison.Ordinal);
         Assert.Contains("\"/c/Data\" \"/srv/data\"", command, StringComparison.Ordinal);
+        Assert.Contains("; set xfer:use-temp-file yes; ", command, StringComparison.Ordinal);
         Assert.EndsWith("set net:limit-rate 0:0", command, StringComparison.Ordinal);
     }
 
@@ -263,6 +265,31 @@ public sealed class CommandBuilderTests
         Assert.Contains("--use-pget-n=8", downloadCommand, StringComparison.Ordinal);
         Assert.Contains("\"/c/Destination folder\"", downloadCommand, StringComparison.Ordinal);
         Assert.DoesNotContain("\"/c/Destination folder/\"", downloadCommand, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DirectoryTransferDryRunAndExecutionShareQuotedFiltersAndTreeParallelism()
+    {
+        var plan = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Download,
+            "/remote folder", @"C:\Out\local folder", TransferMode.Resume,
+            Segments: 8, SourceKind: TransferSourceKind.Directory,
+            Includes: ["*.zip", "docs/**"], Excludes: ["cache/**", "literal ; quit"],
+            ParallelFiles: 6);
+
+        var preview = LftpCommandBuilder.BuildDirectoryTransferPreview(plan);
+        var execution = LftpCommandBuilder.BuildTransfer(plan, background: false);
+
+        Assert.Equal(
+            "mirror --verbose=1 --dry-run --continue --no-symlinks --overwrite --parallel=6 --use-pget-n=8 --include-glob \"*.zip\" --include-glob \"docs/**\" --exclude-glob \"cache/**\" --exclude-glob \"literal ; quit\" \"/remote folder\" \"/c/Out/local folder\"",
+            preview);
+        var reviewedCore = preview.Replace(" --verbose=1 --dry-run", string.Empty, StringComparison.Ordinal);
+        Assert.Equal($"set xfer:use-temp-file no; {reviewedCore}; set xfer:use-temp-file yes", execution);
+        Assert.DoesNotContain("xfer:use-temp-file", preview, StringComparison.Ordinal);
+        Assert.Equal(
+            $"( set xfer:use-temp-file no; {reviewedCore}; set xfer:use-temp-file yes ) &",
+            LftpCommandBuilder.BuildTransfer(plan));
+        Assert.DoesNotContain("--script", preview, StringComparison.Ordinal);
     }
 
     [Fact]

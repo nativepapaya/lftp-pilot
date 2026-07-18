@@ -3108,7 +3108,8 @@ public sealed class WorkspaceTests
         Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
             item.Role == "transfer" &&
             item.Command.Contains("/gate-blocker", StringComparison.Ordinal) &&
-            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            item.Command.Contains("mirror --verbose=1", StringComparison.Ordinal) &&
+            item.Command.StartsWith("set xfer:use-temp-file no; ", StringComparison.Ordinal) &&
             !item.Command.Contains("--dry-run", StringComparison.Ordinal));
 
         fixture.ProcessHost.ReleaseTransferGate.TrySetResult(true);
@@ -3157,7 +3158,8 @@ public sealed class WorkspaceTests
         Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
             item.Role == "transfer" &&
             item.Command.Contains("/gate-blocker", StringComparison.Ordinal) &&
-            item.Command.StartsWith("mirror --verbose=1", StringComparison.Ordinal) &&
+            item.Command.Contains("mirror --verbose=1", StringComparison.Ordinal) &&
+            item.Command.StartsWith("set xfer:use-temp-file no; ", StringComparison.Ordinal) &&
             !item.Command.Contains("--dry-run", StringComparison.Ordinal));
     }
 
@@ -4230,6 +4232,74 @@ public sealed class WorkspaceTests
         Assert.Empty(fixture.Jobs.GetJobs());
         Assert.Empty(fixture.Secrets.GetCalls);
         Assert.Empty(fixture.HostKeyProbe.Calls);
+    }
+
+    [Fact]
+    public async Task FolderTransferReplayComparesFilterCollectionsByContent()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var plan = new TransferPlan(
+            Guid.NewGuid(), profile.Id, TransferDirection.Download,
+            "/remote/missing-transfer-source",
+            Path.Combine(fixture.Directory.Path, "missing-filtered-folder"),
+            TransferMode.Resume,
+            Segments: 4,
+            SourceKind: TransferSourceKind.Directory,
+            Includes: ["*/", "*.zip"],
+            Excludes: ["cache/**"],
+            ParallelFiles: 4);
+
+        var first = await fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, plan), TestContext.Current.CancellationToken);
+        var cloned = plan with
+        {
+            Includes = plan.EffectiveIncludes.ToArray().ToImmutableArray(),
+            Excludes = plan.EffectiveExcludes.ToArray().ToImmutableArray(),
+        };
+        var replay = await fixture.Service.EnqueueTransferAsync(
+            new(session.SessionId, cloned), TestContext.Current.CancellationToken);
+
+        Assert.Equal(first.Job.Id, replay.Job.Id);
+        Assert.Equal(JobState.Failed, replay.Job.State);
+        Assert.Single(fixture.Jobs.GetJobs(), job => job.Id == plan.Id);
+    }
+
+    [Fact]
+    public async Task FolderTransferPresetsProvideBoundedGlobalCrudAndBootstrapState()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var zulu = new FolderTransferPreset(
+            Guid.NewGuid(), "Zulu", ["*.zip"], ["cache/**"], 4, 8);
+        var alpha = new FolderTransferPreset(
+            Guid.NewGuid(), "Alpha", ["docs/**"], [], 2, 3);
+
+        Assert.Equal(zulu, await fixture.Service.SaveFolderTransferPresetAsync(
+            new(zulu), TestContext.Current.CancellationToken));
+        Assert.Equal(alpha, await fixture.Service.SaveFolderTransferPresetAsync(
+            new(alpha), TestContext.Current.CancellationToken));
+        Assert.Equal([alpha, zulu], await fixture.Service.ListFolderTransferPresetsAsync(
+            TestContext.Current.CancellationToken));
+        Assert.Equal([alpha, zulu], (await fixture.Service.BootstrapAsync(
+            TestContext.Current.CancellationToken)).FolderTransferPresets);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Service.SaveFolderTransferPresetAsync(
+                new(zulu with { Id = Guid.NewGuid(), Name = "zULU" }),
+                TestContext.Current.CancellationToken));
+        var updated = zulu with { Name = "Beta", ParallelFiles = 6 };
+        Assert.Equal(updated, await fixture.Service.SaveFolderTransferPresetAsync(
+            new(updated), TestContext.Current.CancellationToken));
+        Assert.True(await fixture.Service.DeleteFolderTransferPresetAsync(
+            new(alpha.Id), TestContext.Current.CancellationToken));
+        Assert.False(await fixture.Service.DeleteFolderTransferPresetAsync(
+            new(alpha.Id), TestContext.Current.CancellationToken));
+        Assert.Equal(updated, Assert.Single(await fixture.Service.ListFolderTransferPresetsAsync(
+            TestContext.Current.CancellationToken)));
+        Assert.Empty(fixture.Jobs.GetJobs());
     }
 
     [Fact]

@@ -170,6 +170,49 @@ public sealed class CoreValidationTests
     }
 
     [Fact]
+    public void FolderTransferOptionsAreBoundedAndRejectedForFiles()
+    {
+        var file = new TransferPlan(
+            Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Download, "/remote/file", @"C:\Local\file",
+            Includes: ["*.zip"], ParallelFiles: 2);
+        var fileError = Assert.Throws<ModelValidationException>(() => PlanValidator.Validate(file));
+        Assert.Contains(fileError.Issues, issue => issue.Field == "folderOptions");
+
+        var folder = file with
+        {
+            SourcePath = "/remote/folder",
+            DestinationPath = @"C:\Local\folder",
+            SourceKind = TransferSourceKind.Directory,
+            ParallelFiles = FolderTransferPolicy.MaximumParallelFiles + 1,
+            Includes = ["safe/**", "bad\npattern"],
+        };
+        var folderError = Assert.Throws<ModelValidationException>(() => PlanValidator.Validate(folder));
+        Assert.Contains(folderError.Issues, issue => issue.Field == "parallelFiles");
+        Assert.Contains(folderError.Issues, issue => issue.Field == "includes");
+    }
+
+    [Fact]
+    public void FolderTransferPresetRequiresBoundedIdentityPatternsAndControls()
+    {
+        var valid = new FolderTransferPreset(
+            Guid.NewGuid(), "Release files", ["*.msix", "docs/**"], ["cache/**"], 4, 8);
+        PlanValidator.Validate(valid);
+
+        var invalid = valid with
+        {
+            Id = Guid.Empty,
+            Name = "bad\nname",
+            ParallelFiles = 17,
+            DownloadSegmentsPerFile = 17,
+        };
+        var error = Assert.Throws<ModelValidationException>(() => PlanValidator.Validate(invalid));
+        Assert.Contains(error.Issues, issue => issue.Field == "id");
+        Assert.Contains(error.Issues, issue => issue.Field == "name");
+        Assert.Contains(error.Issues, issue => issue.Field == "parallelFiles");
+        Assert.Contains(error.Issues, issue => issue.Field == "downloadSegmentsPerFile");
+    }
+
+    [Fact]
     public void MirrorValidationRequiresAbsoluteRootsAndBoundedParallelism()
     {
         var definition = Mirror() with { LocalRoot = "relative", RemoteRoot = "relative", ParallelFiles = 99 };
