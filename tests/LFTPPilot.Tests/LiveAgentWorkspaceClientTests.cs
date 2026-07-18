@@ -985,6 +985,117 @@ public sealed class LiveAgentWorkspaceClientTests
         }
     }
 
+    [Fact]
+    public async Task RemoteSearchContinuationPageCanEndBeforeOverallTotal()
+    {
+        const int processId = 919;
+        var search = new RemoteSearchSpec(Guid.NewGuid(), Guid.NewGuid(), "/root", "file");
+        var now = DateTimeOffset.UtcNow;
+        var reply = new RemoteSearchPage(
+            search,
+            RemoteSearchState.Completed,
+            ImmutableArray.Create(new RemoteSearchMatch(
+                "file-03.txt", "/root/file-03.txt", RemoteSearchEntryKind.Other)),
+            null,
+            3,
+            3,
+            false,
+            now,
+            now);
+        var engine = new MutationReplyEngineClient(
+            processId, WorkspaceMethods.RemoteSearchGet, reply);
+        var client = CreateClient(engine, processId);
+        try
+        {
+            var page = await client.GetRemoteSearchAsync(
+                search,
+                $"{search.SearchId:N}:2",
+                pageSize: 2,
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(reply.Search, page.Search);
+            Assert.Equal(reply.State, page.State);
+            Assert.Equal(reply.TotalMatches, page.TotalMatches);
+            Assert.Equal(reply.Matches.ToArray(), page.Matches.ToArray());
+            Assert.Null(page.ContinuationToken);
+            Assert.Equal(1, engine.Attempts);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task MismatchedRemoteSearchStartReplyHasUnknownOutcomeAndIsNotRetried()
+    {
+        const int processId = 920;
+        var search = new RemoteSearchSpec(Guid.NewGuid(), Guid.NewGuid(), "/root", "file");
+        var now = DateTimeOffset.UtcNow;
+        var reply = new RemoteSearchPage(
+            search with { Query = "different" },
+            RemoteSearchState.Running,
+            [],
+            null,
+            null,
+            0,
+            false,
+            now,
+            now);
+        var engine = new MutationReplyEngineClient(
+            processId, WorkspaceMethods.RemoteSearchStart, reply);
+        var client = CreateClient(engine, processId);
+        var invalidations = 0;
+        client.StateInvalidated += (_, _) => invalidations++;
+        try
+        {
+            var exception = await Assert.ThrowsAsync<AgentRequestOutcomeUnknownException>(() =>
+                client.StartRemoteSearchAsync(search, TestContext.Current.CancellationToken));
+
+            Assert.Equal(WorkspaceMethods.RemoteSearchStart, exception.Method);
+            Assert.IsType<InvalidDataException>(exception.InnerException);
+            Assert.Equal(1, engine.Attempts);
+            Assert.Equal(1, invalidations);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task InvalidRemoteSearchGetMatchFailsClosedAsReadOnlyData()
+    {
+        const int processId = 921;
+        var search = new RemoteSearchSpec(Guid.NewGuid(), Guid.NewGuid(), "/root", "file");
+        var now = DateTimeOffset.UtcNow;
+        var reply = new RemoteSearchPage(
+            search,
+            RemoteSearchState.Completed,
+            ImmutableArray.Create(new RemoteSearchMatch(
+                "file.txt", "/outside/file.txt", RemoteSearchEntryKind.Other)),
+            null,
+            1,
+            1,
+            false,
+            now,
+            now);
+        var engine = new MutationReplyEngineClient(
+            processId, WorkspaceMethods.RemoteSearchGet, reply);
+        var client = CreateClient(engine, processId);
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() => client.GetRemoteSearchAsync(
+                search,
+                cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Equal(1, engine.Attempts);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
     private static LiveAgentWorkspaceClient CreateClient(IEngineClient engine, int processId) =>
         new(
             new StubUpdateService(),

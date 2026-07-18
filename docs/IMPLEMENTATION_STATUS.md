@@ -16,6 +16,11 @@ still needs real servers, signed packages, or additional product development.
 - Structured local and remote create-directory, rename/move, and permanently
   delete operations. Deletion is confirmation-gated, and recursive directory
   deletion has a separate warning and choice.
+- Non-modal recursive remote name search in every connected session tab. Each
+  search is an isolated, cancellable LFTP `find` process so delayed output
+  cannot contaminate the persistent browse session. Literal basename matching,
+  canonical root containment, depth/output/result limits, retained snapshot
+  paging, and fresh navigation keep large or hostile listings bounded.
 - A long-lived, single-instance Agent with bounded versioned JSON frames over
   separate current-user control/event pipes, kernel peer-PID checks, durable
   job snapshots, reconnect/resynchronization, and kill-on-close Job Objects.
@@ -121,7 +126,6 @@ still needs real servers, signed packages, or additional product development.
 - Exercise managed-cache editing, concurrent target changes, staging promotion,
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.
-- Add non-modal recursive remote search.
 - Implement SFTP/mixed remote-to-remote client relay with distinct source and
   destination processes so each endpoint retains its own pinned host-key
   configuration.

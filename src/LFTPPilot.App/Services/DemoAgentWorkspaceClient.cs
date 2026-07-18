@@ -9,6 +9,7 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
     private readonly IAppUpdateService _updates;
     private readonly Dictionary<Guid, JobSnapshot> _jobs = [];
     private readonly Dictionary<Guid, MirrorDefinition> _mirrorDefinitions = [];
+    private readonly Dictionary<Guid, RemoteSearchPage> _remoteSearches = [];
     private readonly ConnectionProfile _demoProfile = new(
         Guid.Parse("a4a9a7b7-f92c-455e-a4a0-6e0de2035c66"),
         "Demo server",
@@ -132,6 +133,82 @@ public sealed class DemoAgentWorkspaceClient : IAgentWorkspaceClient
     {
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult<IReadOnlyList<FileEntry>>(pane == PaneKind.Local ? CreateLocalEntries(path) : CreateRemoteEntries(path));
+    }
+
+    public Task<RemoteSearchPage> StartRemoteSearchAsync(
+        RemoteSearchSpec search,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        RemoteSearchPolicy.Validate(search);
+        if (_remoteSearches.TryGetValue(search.SearchId, out var existing))
+        {
+            if (existing.Search != search)
+                throw new InvalidOperationException("A demo remote-search identifier is already bound to different inputs.");
+            return Task.FromResult(existing);
+        }
+
+        var paths = new (string Path, RemoteSearchEntryKind Kind)[]
+        {
+            ($"{search.Root.TrimEnd('/')}/assets", RemoteSearchEntryKind.Directory),
+            ($"{search.Root.TrimEnd('/')}/assets/app-icon.png", RemoteSearchEntryKind.Other),
+            ($"{search.Root.TrimEnd('/')}/docs", RemoteSearchEntryKind.Directory),
+            ($"{search.Root.TrimEnd('/')}/docs/release-guide.pdf", RemoteSearchEntryKind.Other),
+            ($"{search.Root.TrimEnd('/')}/app-v1.0.0.msix", RemoteSearchEntryKind.Other),
+            ($"{search.Root.TrimEnd('/')}/SHA256SUMS.txt", RemoteSearchEntryKind.Other),
+        };
+        var rootDepth = search.Root.Split('/', StringSplitOptions.RemoveEmptyEntries).Length;
+        var matches = paths
+            .Where(item => item.Path.Split('/', StringSplitOptions.RemoveEmptyEntries).Length - rootDepth < search.MaxDepth)
+            .Select(static item => new RemoteSearchMatch(
+                item.Path[(item.Path.LastIndexOf('/') + 1)..], item.Path, item.Kind))
+            .Where(match => RemoteSearchPolicy.MatchesName(match.Name, search.Query, search.MatchCase))
+            .ToImmutableArray();
+        var now = DateTimeOffset.Now;
+        var page = new RemoteSearchPage(
+            search,
+            RemoteSearchState.Completed,
+            matches,
+            null,
+            matches.Length,
+            paths.Length,
+            false,
+            now,
+            now);
+        if (_remoteSearches.Count >= 8)
+        {
+            var oldest = _remoteSearches.MinBy(static pair => pair.Value.UpdatedAt).Key;
+            _remoteSearches.Remove(oldest);
+        }
+        _remoteSearches.Add(search.SearchId, page);
+        return Task.FromResult(page);
+    }
+
+    public Task<RemoteSearchPage> GetRemoteSearchAsync(
+        RemoteSearchSpec search,
+        string? continuationToken = null,
+        int pageSize = RemoteSearchPolicy.DefaultPageSize,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        RemoteSearchPolicy.Validate(search);
+        if (continuationToken is not null)
+            throw new InvalidDataException("The bounded demo search has no additional result page.");
+        if (!_remoteSearches.TryGetValue(search.SearchId, out var page) || page.Search != search)
+            throw new KeyNotFoundException("The demo remote search was not found.");
+        if (page.EffectiveMatches.Length > pageSize)
+            throw new InvalidDataException("The requested demo page is too small for its deterministic result set.");
+        return Task.FromResult(page);
+    }
+
+    public Task<bool> CancelRemoteSearchAsync(
+        Guid searchId,
+        Guid sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(_remoteSearches.TryGetValue(searchId, out var search) &&
+            search.Search.SessionId == sessionId && search.State == RemoteSearchState.Cancelled);
     }
 
     public Task<FileMutationResult> CreateDirectoryAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default)

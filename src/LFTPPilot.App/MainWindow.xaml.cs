@@ -459,6 +459,10 @@ public sealed partial class MainWindow : Window
     {
         try
         {
+            // Remote searches are transient App-owned work, unlike durable transfers and
+            // schedules. Cancel them before disconnecting the App so an isolated LFTP find
+            // process cannot continue invisibly when the user keeps the Agent running.
+            await ViewModel.CancelTransientOperationsAsync().ConfigureAwait(true);
             if (stopAgent && !AppServices.Agent.IsConnected && AppServices.ProcessManager.OwnsRunningAgent)
                 await AppServices.ForceStopOwnedAgentAsync().ConfigureAwait(true);
             await AppServices.ShutdownAsync(stopAgent).ConfigureAwait(true);

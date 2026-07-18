@@ -7,7 +7,7 @@ namespace LFTPPilot.App.ViewModels;
 
 public sealed record UnconfirmedTransferSubmission(Guid SessionId, TransferPlan Plan);
 
-public sealed class SessionViewModel : ObservableObject
+public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
 {
     private readonly IAgentWorkspaceClient _agent;
     private readonly HashSet<Guid> _unconfirmedTransferIds = [];
@@ -30,6 +30,12 @@ public sealed class SessionViewModel : ObservableObject
         _statusText = CreateConnectionStatus();
         LocalPane = new FilePaneViewModel(agent, SessionId, PaneKind.Local, seed.Snapshot.LocalLocation.Path, seed.LocalEntries);
         RemotePane = new FilePaneViewModel(agent, SessionId, PaneKind.Remote, seed.Snapshot.RemoteLocation.Path, seed.RemoteEntries, profile);
+        Search = new RemoteSearchViewModel(
+            agent,
+            SessionId,
+            () => RemotePane.Path,
+            NavigateToSearchMatchAsync,
+            _isConnected);
         DownloadCommand = new AsyncRelayCommand(
             _ => TransferAsync(TransferDirection.Download),
             _ => IsConnected && RemotePane.HasSelection && !HasUnconfirmedTransfers,
@@ -51,6 +57,7 @@ public sealed class SessionViewModel : ObservableObject
     public string DisplayName { get => _displayName; private set => SetProperty(ref _displayName, value); }
     public FilePaneViewModel LocalPane { get; }
     public FilePaneViewModel RemotePane { get; }
+    public RemoteSearchViewModel Search { get; }
     public AsyncRelayCommand DownloadCommand { get; }
     public AsyncRelayCommand UploadCommand { get; }
     public AsyncRelayCommand RefreshCommand { get; }
@@ -72,6 +79,7 @@ public sealed class SessionViewModel : ObservableObject
             RefreshCommand.NotifyCanExecuteChanged();
             UploadCommand.NotifyCanExecuteChanged();
             DownloadCommand.NotifyCanExecuteChanged();
+            Search.SetConnected(value);
         }
     }
 
@@ -219,6 +227,8 @@ public sealed class SessionViewModel : ObservableObject
         return edit;
     }
 
+    public ValueTask DisposeAsync() => Search.DisposeAsync();
+
     public async Task QueueSourcesAsync(
         TransferDirection direction,
         IReadOnlyList<FilePaneTransferSource> sources,
@@ -344,6 +354,26 @@ public sealed class SessionViewModel : ObservableObject
         var sources = GetSelectedSources(direction);
         if (sources.Count == 0) return;
         await QueueSourcesAsync(direction, sources, TransferUiOptions.Defaults(direction)).ConfigureAwait(true);
+    }
+
+    private async Task NavigateToSearchMatchAsync(RemoteSearchMatch match)
+    {
+        ArgumentNullException.ThrowIfNull(match);
+        if (!IsConnected)
+            throw new InvalidOperationException("Reconnect this saved tab before opening a remote-search result.");
+        var destination = match.IsDirectory ? match.FullPath : RemoteParent(match.FullPath);
+        await RemotePane.NavigateAsync(destination).ConfigureAwait(true);
+        StatusText = match.IsDirectory
+            ? $"Opened remote folder {match.FullPath}"
+            : $"Opened the current remote location of {match.Name}";
+    }
+
+    private static string RemoteParent(string path)
+    {
+        if (!ProfileValidator.IsCanonicalRemotePath(path) || path == "/")
+            throw new InvalidDataException("The remote-search result did not contain a canonical item path.");
+        var separator = path.LastIndexOf('/');
+        return separator <= 0 ? "/" : path[..separator];
     }
 
     private static string CombineRemote(string root, string name) =>

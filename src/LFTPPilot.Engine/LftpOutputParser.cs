@@ -1,12 +1,21 @@
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using LFTPPilot.Core;
 
 namespace LFTPPilot.Engine;
 
+public sealed record RemoteSearchParseResult(
+    ImmutableArray<RemoteSearchMatch> Matches,
+    int ScannedEntries,
+    bool WasLimited);
+
 public static partial class LftpOutputParser
 {
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
+
     public static ImmutableArray<FileEntry> ParseLongListing(IEnumerable<string> lines, string remoteRoot)
     {
         ArgumentNullException.ThrowIfNull(lines);
@@ -47,6 +56,97 @@ public static partial class LftpOutputParser
         }
         return entries.ToImmutable();
     }
+
+    public static RemoteSearchParseResult ParseRemoteFindOutput(
+        IEnumerable<string> lines,
+        RemoteSearchSpec search)
+    {
+        ArgumentNullException.ThrowIfNull(lines);
+        RemoteSearchPolicy.Validate(search);
+
+        var matches = ImmutableArray.CreateBuilder<RemoteSearchMatch>();
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        var outputLines = 0;
+        var scannedEntries = 0;
+        var outputBytes = 0L;
+        var storedMatchBytes = 0L;
+        var rootSeen = false;
+        var wasLimited = false;
+
+        foreach (var raw in lines)
+        {
+            if (raw is null) throw new InvalidDataException("Remote-search output contained a null line.");
+            outputLines++;
+            if (outputLines > RemoteSearchPolicy.MaximumOutputLines)
+                throw new InvalidDataException("Remote search produced too many paths to process safely.");
+            if (raw.Length is 0 or > RemoteSearchPolicy.MaximumOutputLineCharacters ||
+                raw.IndexOfAny(['\0', '\r', '\n']) >= 0)
+            {
+                throw new InvalidDataException("Remote-search output contained an invalid or oversized path line.");
+            }
+
+            try
+            {
+                outputBytes = checked(outputBytes + StrictUtf8.GetByteCount(raw) + 1L);
+            }
+            catch (EncoderFallbackException exception)
+            {
+                throw new InvalidDataException("Remote-search output was not valid Unicode.", exception);
+            }
+            catch (OverflowException exception)
+            {
+                throw new InvalidDataException("Remote-search output exceeded its byte accounting limit.", exception);
+            }
+            if (outputBytes > RemoteSearchPolicy.MaximumOutputBytes)
+                throw new InvalidDataException("Remote search produced more output than can be processed safely.");
+
+            var isDirectory = raw.Length > 1 && raw.EndsWith("/", StringComparison.Ordinal);
+            var fullPath = isDirectory ? raw[..^1] : raw;
+            if (string.Equals(fullPath, search.Root, StringComparison.Ordinal))
+            {
+                if (rootSeen) throw new InvalidDataException("Remote-search output repeated its root path.");
+                rootSeen = true;
+                continue;
+            }
+            if (!rootSeen)
+                throw new InvalidDataException("Remote-search output did not begin with the requested root.");
+            if (!ProfileValidator.IsCanonicalRemotePath(fullPath) ||
+                !RemoteSearchPolicy.IsWithinRoot(search.Root, fullPath))
+            {
+                throw new InvalidDataException("Remote-search output escaped its requested root or contained a non-canonical path.");
+            }
+            var relativeDepth = CountRemoteSegments(fullPath) - CountRemoteSegments(search.Root);
+            if (relativeDepth <= 0 || relativeDepth >= search.MaxDepth)
+                throw new InvalidDataException("Remote-search output exceeded the requested maximum depth.");
+            if (!paths.Add(fullPath))
+                throw new InvalidDataException("Remote-search output contained a duplicate path.");
+
+            scannedEntries++;
+            var separator = fullPath.LastIndexOf('/');
+            var name = fullPath[(separator + 1)..];
+            if (!RemoteSearchPolicy.MatchesName(name, search.Query, search.MatchCase)) continue;
+
+            var match = new RemoteSearchMatch(
+                name,
+                fullPath,
+                isDirectory ? RemoteSearchEntryKind.Directory : RemoteSearchEntryKind.Other);
+            var matchBytes = JsonSerializer.SerializeToUtf8Bytes(match, FramedJsonStream.SerializerOptions).Length + 1L;
+            if (matches.Count >= RemoteSearchPolicy.MaximumMatches ||
+                storedMatchBytes + matchBytes > RemoteSearchPolicy.MaximumStoredMatchBytes)
+            {
+                wasLimited = true;
+                continue;
+            }
+            storedMatchBytes += matchBytes;
+            matches.Add(match);
+        }
+
+        if (!rootSeen) throw new InvalidDataException("Remote-search output did not identify the requested root.");
+        return new(matches.ToImmutable(), scannedEntries, wasLimited);
+    }
+
+    private static int CountRemoteSegments(string path) =>
+        path.Split('/', StringSplitOptions.RemoveEmptyEntries).Length;
 
     public static string? FirstError(IEnumerable<LftpOutputLine> lines)
     {
@@ -93,7 +193,7 @@ public static partial class LftpOutputParser
     [GeneratedRegex("^([-dlcbpsD][rwxsStT+@.-]{9,11})\\s+(\\d+)\\s+(\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}(?::\\d{2})?)\\s(.+)$", RegexOptions.CultureInvariant)]
     private static partial Regex LongIsoMinimalRegex();
 
-    [GeneratedRegex("^(?:open|cd|ls|cls|recls|get|put|pget|mirror|rm|rmdir|mkdir|mv|chmod|rename|lcd|login|pwd)[^:]*:\\s*(.+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^(?:open|cd|ls|cls|recls|find|get|put|pget|mirror|rm|rmdir|mkdir|mv|chmod|rename|lcd|login|pwd)[^:]*:\\s*(.+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex CommandErrorRegex();
 
     [GeneratedRegex("fail|denied|no such|not found|refused|timed? ?out|cannot|unable|invalid|error|fatal|reset by peer|unreachable|not allowed|530|550|553|421|Login incorrect", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

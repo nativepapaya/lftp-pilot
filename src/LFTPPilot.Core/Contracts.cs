@@ -9,6 +9,12 @@ public interface ILftpSession : IAsyncDisposable
     event EventHandler<LftpOutputLine>? OutputReceived;
     event EventHandler<LftpOutputLine>? UnsolicitedOutput;
     Task<LftpCommandResult> ExecuteAsync(string command, TimeSpan timeout, CancellationToken cancellationToken = default);
+    Task<LftpCommandResult> ExecuteToExitAsync(
+        string command,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<LftpCommandResult>(new NotSupportedException(
+            "This LFTP session does not support capture-through-process-exit execution."));
     Task StopAsync(bool force = false, CancellationToken cancellationToken = default);
 }
 

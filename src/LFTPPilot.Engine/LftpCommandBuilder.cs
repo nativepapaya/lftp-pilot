@@ -95,6 +95,15 @@ public static class LftpCommandBuilder
     public static string BuildNameList(string remotePath, bool fresh = false) =>
         $"{(fresh ? "recls" : "cls")} -1FaB {Quote(DashSafe(EnsureRemoteDirectory(remotePath)))}";
 
+    public static string BuildRemoteFind(string remoteRoot, int maxDepth)
+    {
+        if (!ProfileValidator.IsCanonicalRemotePath(remoteRoot))
+            throw new ArgumentException("A bounded canonical remote-search root is required.", nameof(remoteRoot));
+        if (maxDepth is < 1 or > RemoteSearchPolicy.MaximumMaxDepth)
+            throw new ArgumentOutOfRangeException(nameof(maxDepth), $"Remote-search depth must be between 1 and {RemoteSearchPolicy.MaximumMaxDepth}.");
+        return $"command find -d {maxDepth} {Quote(remoteRoot)}";
+    }
+
     public static string BuildStat(string remotePath, bool fresh = false)
     {
         EnsureRemoteAbsolute(remotePath, nameof(remotePath));

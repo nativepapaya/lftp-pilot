@@ -35,6 +35,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private readonly Action<EngineEventKind, string, object?, Guid?, Guid?>? _publish;
     private readonly RunOnceScheduler? _scheduler;
     private readonly RemoteEditManager _remoteEdits;
+    private readonly RemoteSearchCoordinator _remoteSearches;
     private readonly DurableJobStore? _stateStore;
     private readonly ConcurrentDictionary<Guid, StoredMirrorPreview> _previews = [];
     private readonly Dictionary<Guid, StoredMirrorApproval> _mirrorApprovals = [];
@@ -83,6 +84,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         _scheduler = scheduler;
         _stateStore = stateStore;
         _sessions = new(processHost, runtimeProvider, hostKeys, options);
+        _remoteSearches = new(_sessions, options.RemoteSearchTimeout, publish);
         _remoteEdits = new(
             Path.Combine(options.CacheRoot, "remote-edits"),
             new LftpRemoteEditTransport(_sessions, options),
@@ -125,6 +127,9 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
                 WorkspaceMethods.SessionDisconnect => ToJson(await DisconnectAsync(Required<SessionDisconnectRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.BrowseLocal => ToJson(await BrowseLocalAsync(Required<BrowseRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.BrowseRemote => ToJson(await BrowseRemoteAsync(Required<BrowseRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.RemoteSearchStart => ToJson(await StartRemoteSearchAsync(Required<RemoteSearchStartRequest>(arguments), cancellationToken).ConfigureAwait(false)),
+                WorkspaceMethods.RemoteSearchGet => ToJson(GetRemoteSearch(Required<RemoteSearchGetRequest>(arguments))),
+                WorkspaceMethods.RemoteSearchCancel => ToJson(await CancelRemoteSearchAsync(Required<RemoteSearchCancelRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.FileCreateDirectory => ToJson(await CreateDirectoryAsync(Required<CreateDirectoryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.FileMove => ToJson(await MoveEntryAsync(Required<MoveEntryRequest>(arguments), cancellationToken).ConfigureAwait(false)),
                 WorkspaceMethods.FileDelete => ToJson(await DeleteEntriesAsync(Required<DeleteEntriesRequest>(arguments), cancellationToken).ConfigureAwait(false)),
@@ -501,6 +506,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             await _sessionStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                await _remoteSearches.CancelSessionAsync(request.SessionId, cancellationToken).ConfigureAwait(false);
                 await PersistSessionTabsCoreAsync(
                     _sessions.GetPersistedTabs().Where(tab => tab.SessionId != request.SessionId),
                     cancellationToken).ConfigureAwait(false);
@@ -538,6 +544,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         await _sessionStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            await _remoteSearches.CancelProfileAsync(profileId, cancellationToken).ConfigureAwait(false);
             preparations = _sessions.PrepareDisconnectProfile(profileId).ToArray();
             if (preparations.Length == 0) return;
             var removedIds = preparations.Select(static item => item.PersistedTab.SessionId).ToHashSet();
@@ -723,6 +730,29 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             await CommitSessionLocationAsync(session, PaneKind.Remote, request.Path, cancellationToken).ConfigureAwait(false);
         return page;
     }
+
+    public async Task<RemoteSearchPage> StartRemoteSearchAsync(
+        RemoteSearchStartRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await _sessionStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return _remoteSearches.Start(request);
+        }
+        finally
+        {
+            _sessionStateGate.Release();
+        }
+    }
+
+    public RemoteSearchPage GetRemoteSearch(RemoteSearchGetRequest request) =>
+        _remoteSearches.Get(request);
+
+    public Task<bool> CancelRemoteSearchAsync(
+        RemoteSearchCancelRequest request,
+        CancellationToken cancellationToken = default) =>
+        _remoteSearches.CancelAsync(request, cancellationToken);
 
     public async Task<FileMutationResult> CreateDirectoryAsync(CreateDirectoryRequest request, CancellationToken cancellationToken = default)
     {
@@ -1470,6 +1500,7 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         Task[] operations;
         lock (_operationGate) operations = _operations.ToArray();
         try { await Task.WhenAll(operations).ConfigureAwait(false); } catch (OperationCanceledException) { }
+        await _remoteSearches.DisposeAsync().ConfigureAwait(false);
         await _remoteEdits.DisposeAsync().ConfigureAwait(false);
         await _sessions.DisposeAsync().ConfigureAwait(false);
         if (_mirrorPlanner is IDisposable disposable) disposable.Dispose();

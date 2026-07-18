@@ -35,6 +35,7 @@ internal sealed partial class RedirectedLftpSession : ILftpSession
     private const int MaximumLineCharacters = 256 * 1024;
     private const int MaximumCaptureLines = 100_000;
     private const int MaximumCaptureCharacters = 32 * 1024 * 1024;
+    private const string LineTruncationSuffix = "... [line truncated]";
     private static readonly TimeSpan StderrDrainWindow = TimeSpan.FromMilliseconds(60);
     private readonly LftpProcessStartOptions _options;
     private readonly Process _process;
@@ -151,6 +152,67 @@ internal sealed partial class RedirectedLftpSession : ILftpSession
         }
     }
 
+    public async Task<LftpCommandResult> ExecuteToExitAsync(
+        string command,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (string.IsNullOrWhiteSpace(command)) throw new ArgumentException("An LFTP command is required.", nameof(command));
+        if (command.IndexOfAny(['\0', '\r', '\n']) >= 0) throw new ArgumentException("Only one LFTP command line may be executed.", nameof(command));
+        if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
+        await _commandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!IsRunning) return EmptyFailure("The LFTP session is not running.");
+            var capture = new CommandCapture(marker: null);
+            lock (_captureGate) _current = capture;
+            try
+            {
+                Task<int>? completion = null;
+                try
+                {
+                    await _process.StandardInput.WriteLineAsync(command.AsMemory(), cancellationToken).ConfigureAwait(false);
+                    await _process.StandardInput.WriteLineAsync("exit top kill".AsMemory(), cancellationToken).ConfigureAwait(false);
+                    await _process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
+
+                    completion = WaitForExitAndReadersAsync();
+                    var exitCode = await completion.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
+                    var failure = exitCode == 0
+                        ? null
+                        : $"The LFTP process exited with code {exitCode}.";
+                    return DetachCapture(capture, failure: failure);
+                }
+                catch (TimeoutException)
+                {
+                    await RetireAndObserveAsync(completion!).ConfigureAwait(false);
+                    return DetachCapture(
+                        capture,
+                        timedOut: true,
+                        failure: "The LFTP command timed out; the one-shot session was retired before returning its buffered output.");
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    if (completion is null) await RetireAsync().ConfigureAwait(false);
+                    else await RetireAndObserveAsync(completion).ConfigureAwait(false);
+                    _ = DetachCapture(capture);
+                    throw;
+                }
+            }
+            finally
+            {
+                lock (_captureGate)
+                {
+                    if (ReferenceEquals(_current, capture)) _current = null;
+                }
+            }
+        }
+        finally
+        {
+            _commandGate.Release();
+        }
+    }
+
     public async Task StopAsync(bool force = false, CancellationToken cancellationToken = default)
     {
         if (_disposed || _process.HasExited) return;
@@ -231,7 +293,7 @@ internal sealed partial class RedirectedLftpSession : ILftpSession
     private void EmitBufferedLine(string stream, StringBuilder builder, bool truncated)
     {
         var line = AnsiRegex().Replace(builder.ToString(), string.Empty);
-        if (truncated) line += "... [line truncated]";
+        if (truncated) line += LineTruncationSuffix;
         OnLine(new(stream, line));
     }
 
@@ -243,7 +305,7 @@ internal sealed partial class RedirectedLftpSession : ILftpSession
         {
             if (_current is { } capture)
             {
-                if (line.Stream == "stdout" && string.Equals(line.Line, capture.Marker, StringComparison.Ordinal))
+                if (capture.Marker is not null && line.Stream == "stdout" && string.Equals(line.Line, capture.Marker, StringComparison.Ordinal))
                 {
                     capture.MarkerSeen.TrySetResult(true);
                     return;
@@ -272,22 +334,59 @@ internal sealed partial class RedirectedLftpSession : ILftpSession
         try { await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch (TimeoutException) { }
     }
 
+    private async Task<int> WaitForExitAndReadersAsync()
+    {
+        await _process.WaitForExitAsync().ConfigureAwait(false);
+        var readers = new[] { _stdoutTask, _stderrTask }
+            .Where(static task => task is not null)
+            .Cast<Task>();
+        await Task.WhenAll(readers).ConfigureAwait(false);
+        return _process.ExitCode;
+    }
+
+    private async Task RetireAndObserveAsync(Task completion)
+    {
+        await RetireAsync().ConfigureAwait(false);
+        try
+        {
+            await completion.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is OperationCanceledException or TimeoutException or IOException or InvalidOperationException)
+        {
+            // The result already reports timeout or caller cancellation. This wait
+            // only drains and observes the process/readers after forced retirement.
+        }
+    }
+
+    private LftpCommandResult DetachCapture(
+        CommandCapture capture,
+        bool timedOut = false,
+        string? failure = null)
+    {
+        lock (_captureGate)
+        {
+            if (ReferenceEquals(_current, capture)) _current = null;
+            return capture.ToResult(_redactor, timedOut, failure);
+        }
+    }
+
     private static LftpCommandResult EmptyFailure(string failure) => new([], Failure: failure);
 
     [GeneratedRegex("\\x1b\\[[0-9;?]*[A-Za-z]|\\x1b\\][^\\x07]*\\x07", RegexOptions.CultureInvariant)]
     private static partial Regex AnsiRegex();
 
-    private sealed class CommandCapture(string marker)
+    private sealed class CommandCapture(string? marker)
     {
         private readonly List<LftpOutputLine> _lines = [];
         private int _characters;
         private bool _truncated;
 
-        public string Marker { get; } = marker;
+        public string? Marker { get; } = marker;
         public TaskCompletionSource<bool> MarkerSeen { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public void Add(LftpOutputLine line)
         {
+            if (line.Line.EndsWith(LineTruncationSuffix, StringComparison.Ordinal)) _truncated = true;
             if (_lines.Count >= MaximumCaptureLines || _characters + line.Line.Length > MaximumCaptureCharacters)
             {
                 _truncated = true;

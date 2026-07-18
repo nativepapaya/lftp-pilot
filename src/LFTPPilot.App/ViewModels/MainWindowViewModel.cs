@@ -199,6 +199,15 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public void RequestWorkspaceRefresh() => RequestStateRefresh();
 
+    public async Task CancelTransientOperationsAsync()
+    {
+        var searches = Sessions
+            .Where(static session => session.Search.IsSearching)
+            .Select(static session => session.Search.CancelAsync())
+            .ToArray();
+        if (searches.Length != 0) await Task.WhenAll(searches).ConfigureAwait(true);
+    }
+
     public async Task<bool> CompleteRemoteEditAsync(string editId)
     {
         var completed = await _agent.CompleteRemoteEditAsync(editId).ConfigureAwait(true);
@@ -276,7 +285,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
         for (var index = Sessions.Count - 1; index >= 0; index--)
         {
-            if (!desiredSessionIds.Contains(Sessions[index].SessionId)) Sessions.RemoveAt(index);
+            if (!desiredSessionIds.Contains(Sessions[index].SessionId)) RemoveSession(Sessions[index]);
         }
 
         SelectedSession = selectedSessionId is { } selectedId
@@ -375,6 +384,11 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             RemoveRemoteEdit(completed.EditId);
         }
+        else if (engineEvent.Name == "remoteSearch.changed")
+        {
+            // Search tabs poll the authoritative bounded snapshot. The event is only
+            // a sequencing hint and should not add one Activity entry per state change.
+        }
         else
         {
             Activity.Log.Insert(0, new(engineEvent.Timestamp, "Info", engineEvent.Kind.ToString(), engineEvent.Name));
@@ -437,11 +451,25 @@ public sealed class MainWindowViewModel : ObservableObject
         var index = Sessions.IndexOf(session);
         if (index < 0) return;
         Sessions.RemoveAt(index);
+        _ = DisposeSessionAsync(session);
         if (ReferenceEquals(SelectedSession, session))
         {
             SelectedSession = Sessions.ElementAtOrDefault(Math.Clamp(index - 1, 0, Math.Max(0, Sessions.Count - 1)));
         }
         Console.LoadSessions(Sessions);
+    }
+
+    private static async Task DisposeSessionAsync(SessionViewModel session)
+    {
+        try
+        {
+            await session.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not (
+            OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException))
+        {
+            System.Diagnostics.Debug.WriteLine(exception);
+        }
     }
 
     private void RememberUnconfirmedTransfer(UnconfirmedTransferSubmission submission)

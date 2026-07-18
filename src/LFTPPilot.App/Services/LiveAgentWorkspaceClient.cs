@@ -26,6 +26,8 @@ internal sealed class AgentRequestOutcomeUnknownException : IOException
             WorkspaceMethods.ProfileDelete => "The profile and its sessions may have been removed",
             WorkspaceMethods.MirrorDefinitionSave => "The saved mirror definition may have been created or updated",
             WorkspaceMethods.MirrorDefinitionDelete => "The saved mirror definition may have been removed",
+            WorkspaceMethods.RemoteSearchStart => "The idempotent remote search may have started",
+            WorkspaceMethods.RemoteSearchCancel => "The remote search may have been cancelled",
             _ => "The operation may have completed",
         };
         return $"The {method} request may have reached the Agent, but a complete and valid result was not available. {outcome}; the outcome is unknown. Workspace state is being refreshed.";
@@ -272,6 +274,46 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         throw new InvalidDataException("The directory exceeded the maximum number of browse pages.");
     }
 
+    public async Task<RemoteSearchPage> StartRemoteSearchAsync(
+        RemoteSearchSpec search,
+        CancellationToken cancellationToken = default)
+    {
+        RemoteSearchPolicy.Validate(search);
+        return await RequestAsync<RemoteSearchPage>(WorkspaceMethods.RemoteSearchStart,
+            new RemoteSearchStartRequest(search), cancellationToken, retryOnDisconnect: false,
+            semantics: RequestSemantics.Mutation,
+            responseValidator: page => ValidateRemoteSearchPage(
+                page, search, expectedMaximumMatches: RemoteSearchPolicy.DefaultPageSize,
+                isContinuationPage: false)).ConfigureAwait(false);
+    }
+
+    public async Task<RemoteSearchPage> GetRemoteSearchAsync(
+        RemoteSearchSpec search,
+        string? continuationToken = null,
+        int pageSize = RemoteSearchPolicy.DefaultPageSize,
+        CancellationToken cancellationToken = default)
+    {
+        RemoteSearchPolicy.Validate(search);
+        var request = new RemoteSearchGetRequest(search.SearchId, search.SessionId, continuationToken, pageSize);
+        RemoteSearchPolicy.ValidatePageRequest(request);
+        return await RequestAsync<RemoteSearchPage>(WorkspaceMethods.RemoteSearchGet,
+            request, cancellationToken, retryOnDisconnect: false,
+            responseValidator: page => ValidateRemoteSearchPage(
+                page, search, pageSize, isContinuationPage: continuationToken is not null)).ConfigureAwait(false);
+    }
+
+    public async Task<bool> CancelRemoteSearchAsync(
+        Guid searchId,
+        Guid sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new RemoteSearchCancelRequest(searchId, sessionId);
+        RemoteSearchPolicy.ValidateCancelRequest(request);
+        return await RequestAsync<bool>(WorkspaceMethods.RemoteSearchCancel,
+            request, cancellationToken, retryOnDisconnect: false,
+            semantics: RequestSemantics.Mutation).ConfigureAwait(false);
+    }
+
     public async Task<FileMutationResult> CreateDirectoryAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default) =>
         await RequestAsync<FileMutationResult>(WorkspaceMethods.FileCreateDirectory,
             new CreateDirectoryRequest(pane, path, sessionId), cancellationToken, retryOnDisconnect: false,
@@ -466,6 +508,85 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
 
     public Task<AppUpdateStatus> CheckForUpdatesAsync(CancellationToken cancellationToken = default) => _updates.CheckAsync(cancellationToken);
     public Task OpenUpdateInstallerAsync(CancellationToken cancellationToken = default) => _updates.OpenInstallerAsync(cancellationToken);
+
+    private static void ValidateRemoteSearchPage(
+        RemoteSearchPage page,
+        RemoteSearchSpec expectedSearch,
+        int expectedMaximumMatches,
+        bool isContinuationPage)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        RemoteSearchPolicy.Validate(expectedSearch);
+        RemoteSearchPolicy.Validate(page.Search);
+        if (page.Search != expectedSearch)
+            throw new InvalidDataException("The Agent returned a page for different remote-search inputs.");
+        if (!Enum.IsDefined(page.State))
+            throw new InvalidDataException("The Agent returned an unsupported remote-search state.");
+        if (page.StartedAt == default || page.UpdatedAt < page.StartedAt)
+            throw new InvalidDataException("The Agent returned invalid remote-search timestamps.");
+        if (page.ScannedEntries is < 0 or > RemoteSearchPolicy.MaximumOutputLines)
+            throw new InvalidDataException("The Agent returned an invalid remote-search scan count.");
+        if (page.EffectiveMatches.Length > expectedMaximumMatches)
+            throw new InvalidDataException("The Agent returned an oversized remote-search page.");
+
+        var active = page.State is RemoteSearchState.Queued or RemoteSearchState.Running;
+        if (active && (page.EffectiveMatches.Length != 0 || page.ContinuationToken is not null ||
+            page.TotalMatches is not null || page.Error is not null))
+        {
+            throw new InvalidDataException("The Agent returned result data before the remote search completed.");
+        }
+        if (page.State == RemoteSearchState.Completed)
+        {
+            if (page.Error is not null || page.TotalMatches is null or < 0 or > RemoteSearchPolicy.MaximumMatches)
+                throw new InvalidDataException("The Agent returned invalid completed remote-search metadata.");
+            if (page.EffectiveMatches.Length > page.TotalMatches)
+                throw new InvalidDataException("The Agent returned more remote-search matches than its total count.");
+            if (page.TotalMatches == 0 && (page.EffectiveMatches.Length != 0 || page.ContinuationToken is not null))
+                throw new InvalidDataException("The Agent returned pages for an empty remote search.");
+            if (page.TotalMatches > 0 && page.EffectiveMatches.Length == 0)
+                throw new InvalidDataException("The Agent returned an empty page for a non-empty remote search.");
+            if (!isContinuationPage && page.TotalMatches > page.EffectiveMatches.Length && page.ContinuationToken is null)
+                throw new InvalidDataException("The Agent ended a remote-search page before its declared result count.");
+        }
+        else if (!active)
+        {
+            if (page.EffectiveMatches.Length != 0 || page.ContinuationToken is not null || page.TotalMatches is not null)
+                throw new InvalidDataException("A cancelled or failed remote search cannot return navigable results.");
+            if ((page.State == RemoteSearchState.Failed && page.Error is null) ||
+                (page.State == RemoteSearchState.Cancelled && page.Error is not null))
+            {
+                throw new InvalidDataException("The Agent returned inconsistent terminal remote-search metadata.");
+            }
+        }
+
+        if (page.ContinuationToken is { } token &&
+            (token.Length > RemoteSearchPolicy.MaximumContinuationTokenCharacters ||
+             token.IndexOfAny(['\0', '\r', '\n']) >= 0))
+        {
+            throw new InvalidDataException("The Agent returned an invalid remote-search continuation token.");
+        }
+
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var match in page.EffectiveMatches)
+        {
+            if (!Enum.IsDefined(match.Kind) ||
+                string.IsNullOrEmpty(match.Name) || match.Name.Length > RemoteSearchPolicy.MaximumPathCharacters ||
+                match.Name.IndexOfAny(['\0', '\r', '\n']) >= 0 ||
+                !ProfileValidator.IsCanonicalRemotePath(match.FullPath) ||
+                string.Equals(match.FullPath, expectedSearch.Root, StringComparison.Ordinal) ||
+                !RemoteSearchPolicy.IsWithinRoot(expectedSearch.Root, match.FullPath) ||
+                !paths.Add(match.FullPath))
+            {
+                throw new InvalidDataException("The Agent returned an invalid or duplicate remote-search match.");
+            }
+            var separator = match.FullPath.LastIndexOf('/');
+            if (separator < 0 || !string.Equals(match.Name, match.FullPath[(separator + 1)..], StringComparison.Ordinal) ||
+                !RemoteSearchPolicy.MatchesName(match.Name, expectedSearch.Query, expectedSearch.MatchCase))
+            {
+                throw new InvalidDataException("The Agent returned a remote-search match that did not match its canonical path or query.");
+            }
+        }
+    }
 
     private static void ValidateRemoteEditSession(RemoteEditSession edit, Guid expectedSessionId, string expectedRemotePath)
     {
