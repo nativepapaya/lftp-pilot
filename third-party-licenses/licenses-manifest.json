@@ -1,0 +1,1250 @@
+{
+  "schema": 3,
+  "complete": true,
+  "bundle": {
+    "schema": 3,
+    "bundleRevision": "8",
+    "architecture": "x64",
+    "inventorySha256": "9330244e563b83c2b5be8a9881bc93c0672097cc1996b28676831dbd2e05fecf"
+  },
+  "packages": [
+    {
+      "name": "msys2-runtime",
+      "version": "3.6.9-2",
+      "filename": "msys2-runtime-3.6.9-2-x86_64.pkg.tar.zst",
+      "sha256": "20f39ad6d0fd2aae93ca84c2e9efbe567d3d7f5d465dc0810b700d7cbac0c3a4",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/msys2-runtime/COPYING",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "licenses/native/msys2-runtime-exception/CYGWIN_LICENSE",
+          "sha256": "794433752103cf4bbb4a84a1bdb8fbc150abb1762704bb35fecc9f7f820be984"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/msys2-runtime-3.6.9-2.src.tar.zst",
+        "sha256": "e4d8871643e0218a895ba4929ba7edad10cba824de9fa31dd43eb121c032567d",
+        "url": "https://repo.msys2.org/msys/sources/msys2-runtime-3.6.9-2.src.tar.zst"
+      }
+    },
+    {
+      "name": "lftp",
+      "version": "4.9.3-1",
+      "filename": "lftp-4.9.3-1-x86_64.pkg.tar.zst",
+      "sha256": "1f831bbfdd2b29d6cd54bea849f3f3f5f8ce5fbe45fbcce9a670c63d930e92cf",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/lftp-4.9.3-1.src.tar.zst",
+        "sha256": "3c380b0ce17b974d6a209a5379219dc4aa9cf82ae664c1e60b80f22b21cf9b3e",
+        "url": "https://repo.msys2.org/msys/sources/lftp-4.9.3-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "gcc-libs",
+      "version": "15.3.0-1",
+      "filename": "gcc-libs-15.3.0-1-x86_64.pkg.tar.zst",
+      "sha256": "0d99a122c453c05ae21ba3dcea910f2e0d93d38ae067c677a112a315b0f3cec5",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "licenses/common/LGPL-2.1.txt",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        },
+        {
+          "path": "licenses/common/LGPL-3.0.txt",
+          "sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+        },
+        {
+          "path": "licenses/native/gcc-libs/RUNTIME.LIBRARY.EXCEPTION",
+          "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/gcc-15.3.0-1.src.tar.zst",
+        "sha256": "110eaa240aaced2ec2d05b1ce1c7d7273b9549c60ac17cb571bd28781766522d",
+        "url": "https://repo.msys2.org/msys/sources/gcc-15.3.0-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "ca-certificates",
+      "version": "20250419-1",
+      "filename": "ca-certificates-20250419-1-any.pkg.tar.zst",
+      "sha256": "7afc4754426fa1309be91d33037455f017704742f54b34fe071284a772875caa",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/ca-certificates/copyright",
+          "sha256": "e85e1bcad3a915dc7e6f41412bc5bdeba275cadd817896ea0451f2140a93967c"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/ca-certificates-20250419-1.src.tar.zst",
+        "sha256": "0e96cbfe9d0ec342c92d0e6ae6e6227c8ada298583eab0958cb3321614e15de9",
+        "url": "https://repo.msys2.org/msys/sources/ca-certificates-20250419-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "bash",
+      "version": "5.3.015-1",
+      "filename": "bash-5.3.015-1-x86_64.pkg.tar.zst",
+      "sha256": "ecd097c0b85938b3167abd7e839a6113b25c8b581b14954aad02e1f8ce556c8e",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/bash-5.3.015-1.src.tar.zst",
+        "sha256": "513f485881c94d0bab3ebcb2d1d3b98c19078d4abe26796bc52220db3e65b7af",
+        "url": "https://repo.msys2.org/msys/sources/bash-5.3.015-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "openssl",
+      "version": "3.6.3-1",
+      "filename": "openssl-3.6.3-1-x86_64.pkg.tar.zst",
+      "sha256": "26b53a063e95bd9295b796053ac34d0a4ec77dc49fb11fc135454ea676e7e9c5",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/libopenssl/LICENSE.txt",
+          "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/openssl-3.6.3-1.src.tar.zst",
+        "sha256": "00774e2fe4829eb214e6952118a132c78841d6b6a84fe9b274a8804d587b006e",
+        "url": "https://repo.msys2.org/msys/sources/openssl-3.6.3-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libopenssl",
+      "version": "3.6.3-1",
+      "filename": "libopenssl-3.6.3-1-x86_64.pkg.tar.zst",
+      "sha256": "f85f28d46b09d02229bfe923c9cc323463810fc4dbea2e8275a2fdc40edb2c53",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/libopenssl/LICENSE.txt",
+          "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/openssl-3.6.3-1.src.tar.zst",
+        "sha256": "00774e2fe4829eb214e6952118a132c78841d6b6a84fe9b274a8804d587b006e",
+        "url": "https://repo.msys2.org/msys/sources/openssl-3.6.3-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "findutils",
+      "version": "4.10.0-3",
+      "filename": "findutils-4.10.0-3-x86_64.pkg.tar.zst",
+      "sha256": "77665a1e69d41461a1a628f7da557fee5936469808282dc674d703effdfccb6e",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/findutils-4.10.0-3.src.tar.zst",
+        "sha256": "e9cfc03f387283e8861084c47dce39962d989dd0b43b034304f12a53d3cc5437",
+        "url": "https://repo.msys2.org/msys/sources/findutils-4.10.0-3.src.tar.zst"
+      }
+    },
+    {
+      "name": "libiconv",
+      "version": "1.19-1",
+      "filename": "libiconv-1.19-1-x86_64.pkg.tar.zst",
+      "sha256": "0fa55ea2a6ccf97cf8c58b24b2615815e15e16e6e4e888091c263c2c83c5313d",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/LGPL-2.1.txt",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/libiconv-1.19-1.src.tar.zst",
+        "sha256": "5a8bcd3242e2be94fffd9f03fadcda8d9fd64047430050c5cbd214cd3bf7f0a7",
+        "url": "https://repo.msys2.org/msys/sources/libiconv-1.19-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libintl",
+      "version": "0.22.5-1",
+      "filename": "libintl-0.22.5-1-x86_64.pkg.tar.zst",
+      "sha256": "336d66b9d95cf9c1804958f8e260762a3e83bf158ed5981f783bc772a31073cf",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "licenses/common/LGPL-2.1.txt",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/gettext-0.22.5-1.src.tar.zst",
+        "sha256": "e07a0b3e6716aae86dc0edd2dcdc8864731d56051345592b53659a3840ccfbd8",
+        "url": "https://repo.msys2.org/msys/sources/gettext-0.22.5-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "coreutils",
+      "version": "8.32-5",
+      "filename": "coreutils-8.32-5-x86_64.pkg.tar.zst",
+      "sha256": "62dfee1c39fd15f99c39802b35e82643bc14fffc16d6c76d4001caa385ec77e3",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/coreutils-8.32-5.src.tar.zst",
+        "sha256": "2b8689413bc50367a9995adf50ea84cd3caaff0ec68a8f32d8328842c3f83835",
+        "url": "https://repo.msys2.org/msys/sources/coreutils-8.32-5.src.tar.zst"
+      }
+    },
+    {
+      "name": "gmp",
+      "version": "6.3.0-2",
+      "filename": "gmp-6.3.0-2-x86_64.pkg.tar.zst",
+      "sha256": "f84536138e618d47a1df2da83916cfebbd449f159ffad52f994a71060a41cf34",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/LGPL-3.0.txt",
+          "sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/gmp-6.3.0-2.src.tar.zst",
+        "sha256": "02356ca25ce362edb883ce7c060050de2cec5f2b1227a1c56ef7c0a0f99ff667",
+        "url": "https://repo.msys2.org/msys/sources/gmp-6.3.0-2.src.tar.zst"
+      }
+    },
+    {
+      "name": "sed",
+      "version": "4.9-1",
+      "filename": "sed-4.9-1-x86_64.pkg.tar.zst",
+      "sha256": "3748af28f69e946ec5a42e6670c9bbf6da7352dc93baaa537f69e99c5483b9fc",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/sed-4.9-1.src.tar.zst",
+        "sha256": "a9686da7c1f3cb2ba7ae5f20f30d9ef38f7bba993f9c777b43bd13c7fbd7cc58",
+        "url": "https://repo.msys2.org/msys/sources/sed-4.9-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "p11-kit",
+      "version": "0.26.4-1",
+      "filename": "p11-kit-0.26.4-1-x86_64.pkg.tar.zst",
+      "sha256": "f1ef8c518e53e5f439e0b01587e326536330ad547221af17a3b6a514f7f9a812",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/p11-kit/COPYING",
+          "sha256": "2e1ba993904df807a10c3eda1e5c272338edc35674b679773a8b3ad460731054"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/p11-kit-0.26.4-1.src.tar.zst",
+        "sha256": "ba81fc15547a4c3554952fdc848a2e138e11a0fc8b53adbfa9b8b4a31d73030f",
+        "url": "https://repo.msys2.org/msys/sources/p11-kit-0.26.4-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libp11-kit",
+      "version": "0.26.4-1",
+      "filename": "libp11-kit-0.26.4-1-x86_64.pkg.tar.zst",
+      "sha256": "8c682d3010b3d641cc34e22221b5d042ff45bb3dd32fa669531c7e3ef5f9f13e",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/p11-kit/COPYING",
+          "sha256": "2e1ba993904df807a10c3eda1e5c272338edc35674b679773a8b3ad460731054"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/p11-kit-0.26.4-1.src.tar.zst",
+        "sha256": "ba81fc15547a4c3554952fdc848a2e138e11a0fc8b53adbfa9b8b4a31d73030f",
+        "url": "https://repo.msys2.org/msys/sources/p11-kit-0.26.4-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libffi",
+      "version": "3.7.1-1",
+      "filename": "libffi-3.7.1-1-x86_64.pkg.tar.zst",
+      "sha256": "d33024a6839127a13db1d0331e3c08b3b80488a111c7ad6b1694a9a02b55b8f2",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/libffi/LICENSE",
+          "sha256": "17b64dc60f3b6897a60f971e288b973f655c2edcdf08b25f3c3dd5549857881c"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/libffi-3.7.1-1.src.tar.zst",
+        "sha256": "f69e81eb0264b418efe04ecf6b7a18ddf1b158a552e5a685ddbae837642dea40",
+        "url": "https://repo.msys2.org/msys/sources/libffi-3.7.1-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libtasn1",
+      "version": "4.21.0-1",
+      "filename": "libtasn1-4.21.0-1-x86_64.pkg.tar.zst",
+      "sha256": "14f15c4b2b6ebeb6bfcf060cab27a32cd8967f70b0e68cc14670062cce546f04",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "licenses/common/LGPL-2.1.txt",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/libtasn1-4.21.0-1.src.tar.zst",
+        "sha256": "3b3f93112cd0b7c626483b1aa95a2b63f36a682f47f13f5c416547602c4602e8",
+        "url": "https://repo.msys2.org/msys/sources/libtasn1-4.21.0-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "info",
+      "version": "7.2-3",
+      "filename": "info-7.2-3-x86_64.pkg.tar.zst",
+      "sha256": "69242603357aa7011356f7d15a2017ad086e5682c8577f13520943c94bd2b03e",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/texinfo-7.2-3.src.tar.zst",
+        "sha256": "2d185d46ab2b04f1c259909cf7092e1fb1cf9cb50488de7c613fc8eb4f72d934",
+        "url": "https://repo.msys2.org/msys/sources/texinfo-7.2-3.src.tar.zst"
+      }
+    },
+    {
+      "name": "gzip",
+      "version": "1.14-2",
+      "filename": "gzip-1.14-2-x86_64.pkg.tar.zst",
+      "sha256": "d63e8d98ff030c88663cc64cf8ebd04203fba17365807477efa06f717d7daedc",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/gzip-1.14-2.src.tar.zst",
+        "sha256": "aea2fc89713e314d6dc3c929b63cf8e949a9a6cbae82c3fd0c32005d3e044ae9",
+        "url": "https://repo.msys2.org/msys/sources/gzip-1.14-2.src.tar.zst"
+      }
+    },
+    {
+      "name": "less",
+      "version": "704-1",
+      "filename": "less-704-1-x86_64.pkg.tar.zst",
+      "sha256": "0fddcf47bb99487616a0044bd98cda8528952cf5097666436d34383ecffe7fd6",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/less-704-1.src.tar.zst",
+        "sha256": "58f970f43d51ec1c51317e39a7c299f2617985ffa2b60c5065d36b1d6f7a8dff",
+        "url": "https://repo.msys2.org/msys/sources/less-704-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "ncurses",
+      "version": "6.6-2",
+      "filename": "ncurses-6.6-2-x86_64.pkg.tar.zst",
+      "sha256": "828c92f09b17f00d3b49362fcfa4affa58e5e50e238f290ea36eb7a690da3acb",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/ncurses/LICENSE",
+          "sha256": "708999f95527e1ffa670c6fce288c6c600cb477dd04afcc1171422b3dd4ee226"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/ncurses-6.6-2.src.tar.zst",
+        "sha256": "f5df12bd297e6b6930e2aa68e8014347b2193592645d93acce6774e05cbf15e6",
+        "url": "https://repo.msys2.org/msys/sources/ncurses-6.6-2.src.tar.zst"
+      }
+    },
+    {
+      "name": "libpcre2_8",
+      "version": "10.47-1",
+      "filename": "libpcre2_8-10.47-1-x86_64.pkg.tar.zst",
+      "sha256": "550804c3fd7c802daf5edb54396ef164cb3c1b4329e250def440eb18a3285ec6",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/pcre2/LICENCE.md",
+          "sha256": "197d8a73ffee0d6b09adba2f9c677b5f5aede24edf89258a68e48248d010d811"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/pcre2-10.47-1.src.tar.zst",
+        "sha256": "87c1e99a6cf70b8cde13938142a1dc32599b6b6af04e947edb670727da49d4f5",
+        "url": "https://repo.msys2.org/msys/sources/pcre2-10.47-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libxcrypt",
+      "version": "4.5.2-1",
+      "filename": "libxcrypt-4.5.2-1-x86_64.pkg.tar.zst",
+      "sha256": "e63db0aa2b708359e25f61f506e2d2c92c315febf5f88cc9f386e4ec0bdf4fa5",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/LGPL-2.1.txt",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/libxcrypt-4.5.2-1.src.tar.zst",
+        "sha256": "dc3e44cea067417ff61c25c981d7d58bb0f343b824ba10fd2a0a3b8badc55746",
+        "url": "https://repo.msys2.org/msys/sources/libxcrypt-4.5.2-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "expat",
+      "version": "2.8.2-1",
+      "filename": "expat-2.8.2-1-x86_64.pkg.tar.zst",
+      "sha256": "5f883859b5484727f51adfdd047d3a04caaa1fb9b726368fb9dd904cc06ac34c",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/expat/COPYING",
+          "sha256": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/expat-2.8.2-1.src.tar.zst",
+        "sha256": "7dd4f581e68d5aedaa4aceefd8215ea57a80bb0f7eed539ce73be4c7b42e2a05",
+        "url": "https://repo.msys2.org/msys/sources/expat-2.8.2-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "gettext",
+      "version": "0.22.5-1",
+      "filename": "gettext-0.22.5-1-x86_64.pkg.tar.zst",
+      "sha256": "b31ab065c3538ecb1fb6ab48ab2b3049243d6d9e585331c882f38326eefc1831",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "licenses/common/LGPL-2.1.txt",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/gettext-0.22.5-1.src.tar.zst",
+        "sha256": "e07a0b3e6716aae86dc0edd2dcdc8864731d56051345592b53659a3840ccfbd8",
+        "url": "https://repo.msys2.org/msys/sources/gettext-0.22.5-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libgettextpo",
+      "version": "0.22.5-1",
+      "filename": "libgettextpo-0.22.5-1-x86_64.pkg.tar.zst",
+      "sha256": "a9f3ef6b3712e20f0dc6eecaf8c2ec6aff5f259b2dbe87422a0aaca7b27c98d5",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "licenses/common/LGPL-2.1.txt",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/gettext-0.22.5-1.src.tar.zst",
+        "sha256": "e07a0b3e6716aae86dc0edd2dcdc8864731d56051345592b53659a3840ccfbd8",
+        "url": "https://repo.msys2.org/msys/sources/gettext-0.22.5-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libasprintf",
+      "version": "0.22.5-1",
+      "filename": "libasprintf-0.22.5-1-x86_64.pkg.tar.zst",
+      "sha256": "fdd59ae72d355ae1c5615f12429493611782f3e38bf1f7ca9ca83b61fcfb6c26",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "licenses/common/LGPL-2.1.txt",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/gettext-0.22.5-1.src.tar.zst",
+        "sha256": "e07a0b3e6716aae86dc0edd2dcdc8864731d56051345592b53659a3840ccfbd8",
+        "url": "https://repo.msys2.org/msys/sources/gettext-0.22.5-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libexpat",
+      "version": "2.8.2-1",
+      "filename": "libexpat-2.8.2-1-x86_64.pkg.tar.zst",
+      "sha256": "e5d4a947b2b39aa9c5e9233165470fc78e670b679cafda801a2f41c36714dded",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/expat/COPYING",
+          "sha256": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/expat-2.8.2-1.src.tar.zst",
+        "sha256": "7dd4f581e68d5aedaa4aceefd8215ea57a80bb0f7eed539ce73be4c7b42e2a05",
+        "url": "https://repo.msys2.org/msys/sources/expat-2.8.2-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libgnutls",
+      "version": "3.8.13-2",
+      "filename": "libgnutls-3.8.13-2-x86_64.pkg.tar.zst",
+      "sha256": "144a34bda1456dfbc0ca83ce8ed1ce49e89d750987ef096ab4083676dbcb373e",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "licenses/common/LGPL-2.1.txt",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/gnutls-3.8.13-2.src.tar.zst",
+        "sha256": "fac68f2ab63f60e8da216c9533955165b8a26ef7a8559d4685f9497292a57414",
+        "url": "https://repo.msys2.org/msys/sources/gnutls-3.8.13-2.src.tar.zst"
+      }
+    },
+    {
+      "name": "libidn2",
+      "version": "2.3.8-1",
+      "filename": "libidn2-2.3.8-1-x86_64.pkg.tar.zst",
+      "sha256": "55e0de96b893e9f67f14a4283d411fc2a45d7b59333bc16e2a9b16e5bfc9282f",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "licenses/common/LGPL-3.0.txt",
+          "sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/libidn2-2.3.8-1.src.tar.zst",
+        "sha256": "c77c550e8cc2f595ed10b4a3996085cc6e6a3f5f650916a14701bd48d5d9fd7d",
+        "url": "https://repo.msys2.org/msys/sources/libidn2-2.3.8-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libunistring",
+      "version": "1.4.2-1",
+      "filename": "libunistring-1.4.2-1-x86_64.pkg.tar.zst",
+      "sha256": "bcd04706d95b5e7127d39834565bceed6b400192f5fb51599745aba28d5da018",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/LGPL-3.0.txt",
+          "sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/libunistring-1.4.2-1.src.tar.zst",
+        "sha256": "9a397e2ffa803f1c18abc119207186ae86ab173f30123e77bf2830afe40befc8",
+        "url": "https://repo.msys2.org/msys/sources/libunistring-1.4.2-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libnettle",
+      "version": "4.0-1",
+      "filename": "libnettle-4.0-1-x86_64.pkg.tar.zst",
+      "sha256": "aa2a398eb5af88247f29d5de683c6d1d7411733c07cc5e6c62803e1e77337cf7",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/LGPL-3.0.txt",
+          "sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/nettle-4.0-1.src.tar.zst",
+        "sha256": "25454dea637f906ac5dfb1e7ff8534b289b7f1ad5a1ce60568af8ff1082015b1",
+        "url": "https://repo.msys2.org/msys/sources/nettle-4.0-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libhogweed",
+      "version": "4.0-1",
+      "filename": "libhogweed-4.0-1-x86_64.pkg.tar.zst",
+      "sha256": "1302b7e86c5c54c93bd431685ccefa89df5f1b01257c68e24f2609df953cfdc2",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/LGPL-3.0.txt",
+          "sha256": "a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/nettle-4.0-1.src.tar.zst",
+        "sha256": "25454dea637f906ac5dfb1e7ff8534b289b7f1ad5a1ce60568af8ff1082015b1",
+        "url": "https://repo.msys2.org/msys/sources/nettle-4.0-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "zlib",
+      "version": "1.3.2-1",
+      "filename": "zlib-1.3.2-1-x86_64.pkg.tar.zst",
+      "sha256": "a04aa79996c57f0db936be66cf94326d7e67e9cd8dbffe4cf6e97693d0a1d9ef",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/zlib/LICENSE",
+          "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/zlib-1.3.2-1.src.tar.zst",
+        "sha256": "b3ec151674ce25015b16b28394d679ac0eedee03d02be33f93367c3a2b4d426d",
+        "url": "https://repo.msys2.org/msys/sources/zlib-1.3.2-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libreadline",
+      "version": "8.3.003-1",
+      "filename": "libreadline-8.3.003-1-x86_64.pkg.tar.zst",
+      "sha256": "f78e11a496010305fb80b6804518d5c1257794fc87bc8caaf8c4a65d7a983dec",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/readline-8.3.003-1.src.tar.zst",
+        "sha256": "8b9e2370bf80d30cdb1bfeb00be1e2be2c9ec8b92838ffcb5ddc4805ac0a899e",
+        "url": "https://repo.msys2.org/msys/sources/readline-8.3.003-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "openssh",
+      "version": "10.4p1-1",
+      "filename": "openssh-10.4p1-1-x86_64.pkg.tar.zst",
+      "sha256": "778592d988c4d99bfcd76ad0293b4e6a065fdfc877a291cb2f7dba2a41a1cd5a",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/openssh/LICENCE",
+          "sha256": "5bb5b160726ef5756e4f32fe95b35249c294962419650f48d05134b486d27ccb"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/openssh-10.4p1-1.src.tar.zst",
+        "sha256": "dd52db7fc7555bcffed7ef030898f15b7fdce1d0f4b17635c9b0c9e079761cde",
+        "url": "https://repo.msys2.org/msys/sources/openssh-10.4p1-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "heimdal",
+      "version": "7.8.0-5",
+      "filename": "heimdal-7.8.0-5-x86_64.pkg.tar.zst",
+      "sha256": "4b3906a2a677232d43db712b6fecab50da761c5b229c5018178a577c5c25ec64",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/heimdal/LICENSE",
+          "sha256": "0c4b07bf5b98f7a1d01f8e60722d6c6747ef052c2aa6d2043daf690d4e1b0a7f"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/heimdal-7.8.0-5.src.tar.zst",
+        "sha256": "8c11d29e88431abffac4e79f1a14f4a72cb71adfc532faafd35831efaabe7f19",
+        "url": "https://repo.msys2.org/msys/sources/heimdal-7.8.0-5.src.tar.zst"
+      }
+    },
+    {
+      "name": "heimdal-libs",
+      "version": "7.8.0-5",
+      "filename": "heimdal-libs-7.8.0-5-x86_64.pkg.tar.zst",
+      "sha256": "d5f139b6feebd75f0b5fefec952c7fbb4cdfa16235601c223dabc3b1bcead19f",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/heimdal/LICENSE",
+          "sha256": "0c4b07bf5b98f7a1d01f8e60722d6c6747ef052c2aa6d2043daf690d4e1b0a7f"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/heimdal-7.8.0-5.src.tar.zst",
+        "sha256": "8c11d29e88431abffac4e79f1a14f4a72cb71adfc532faafd35831efaabe7f19",
+        "url": "https://repo.msys2.org/msys/sources/heimdal-7.8.0-5.src.tar.zst"
+      }
+    },
+    {
+      "name": "libdb",
+      "version": "6.2.32-6",
+      "filename": "libdb-6.2.32-6-x86_64.pkg.tar.zst",
+      "sha256": "27a35786f3aab14e625c02df7bcd8a9dda0da782ce4f0549a427a21316b4d179",
+      "licenseFiles": [
+        {
+          "path": "licenses/common/Berkeley-DB-AGPL-3.0.txt",
+          "sha256": "733de00e355f9a86635c663543fd4091cf30dda3d9b8960edebdc5f5431486ad"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/db-6.2.32-6.src.tar.zst",
+        "sha256": "ca33d813847b2a544faa23cc732fdef5fcb84b6a4b73f1c22eefadb7dbcb7f17",
+        "url": "https://repo.msys2.org/msys/sources/db-6.2.32-6.src.tar.zst"
+      }
+    },
+    {
+      "name": "libedit",
+      "version": "20240808_3.1-1",
+      "filename": "libedit-20240808_3.1-1-x86_64.pkg.tar.zst",
+      "sha256": "aada8ba7dfe41fdcac28d3706c0dc7c621b7667035a5e629cb5f3af7fb3f7de0",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/libedit/LICENSE",
+          "sha256": "9da6c9c74987a36c84302982799d17d2f748ba1c1c0c471425716173c1d07649"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/libedit-20240808_3.1-1.src.tar.zst",
+        "sha256": "a76c0a19cbd69ef01c6c304d4776f96fc5b31dcbca7b446e6d99272affbffb97",
+        "url": "https://repo.msys2.org/msys/sources/libedit-20240808_3.1-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libsqlite",
+      "version": "3.53.3-1",
+      "filename": "libsqlite-3.53.3-1-x86_64.pkg.tar.zst",
+      "sha256": "2423b33f291f9f1cdf51c2fc5d6f9e4b56c2bace43edb386c1eca6ca95087222",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/libsqlite/LICENSE",
+          "sha256": "0b76663a90e034f3d7f2af5bfada4cedec5ebc275361899eccc5c18e6f01ff1f"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/sqlite-3.53.3-1.src.tar.zst",
+        "sha256": "922f2c24ed6d24461c560beea10e80b6af35694c94a19c653bf24d13606d6943",
+        "url": "https://repo.msys2.org/msys/sources/sqlite-3.53.3-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libfido2",
+      "version": "1.17.0-1",
+      "filename": "libfido2-1.17.0-1-x86_64.pkg.tar.zst",
+      "sha256": "30794db36fa21af67c7126a221e2cb95b177be08845bb38720a8c9f28c39cdbb",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/libfido2/LICENSE",
+          "sha256": "4aad6cad5e570c10cccd1a6124bf2690eedb548b709fede991ed41326122ee2a"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/libfido2-1.17.0-1.src.tar.zst",
+        "sha256": "01adcb82f4f252186d88366a5e68eb8f25b7e3714e02434f9be413d51d0d165d",
+        "url": "https://repo.msys2.org/msys/sources/libfido2-1.17.0-1.src.tar.zst"
+      }
+    },
+    {
+      "name": "libcbor",
+      "version": "0.14.0-2",
+      "filename": "libcbor-0.14.0-2-x86_64.pkg.tar.zst",
+      "sha256": "a661826edc2d452f8d74bae2cd5974dfbcd84e23bfbfa7ea3db38ee010d7b004",
+      "licenseFiles": [
+        {
+          "path": "licenses/native/libcbor/LICENSE.md",
+          "sha256": "6a5e182d758db66ecad6e6fa304dc637d4d2585bafceb5003c86e8dc9f6344ff"
+        }
+      ],
+      "correspondingSource": {
+        "kind": "archive",
+        "path": "sources/native/libcbor-0.14.0-2.src.tar.zst",
+        "sha256": "84ae76a880bb327fc631a053da7c1c730e54008d485f326c741ccea47db6d11c",
+        "url": "https://repo.msys2.org/msys/sources/libcbor-0.14.0-2.src.tar.zst"
+      }
+    }
+  ],
+  "managedPackages": [
+    {
+      "name": "Microsoft.NETCore.App.Runtime.win-x64",
+      "version": "10.0.10",
+      "category": "dotnet-runtime-pack",
+      "sha512": "77fea6d9bc0d3f7e7f6c10e6b4d3dbd0604bc252b47b233cfd06fbcc4b481490e08c0a3deb46d1394941e9772e2cce1599f03c86494e8060d4f7c9d483ac43c0",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.netcore.app.runtime.win-x64-10.0.10/LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "path": "licenses/managed/microsoft.netcore.app.runtime.win-x64-10.0.10/THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.netcore.app.runtime.win-x64.10.0.10.nupkg",
+        "sha512": "77fea6d9bc0d3f7e7f6c10e6b4d3dbd0604bc252b47b233cfd06fbcc4b481490e08c0a3deb46d1394941e9772e2cce1599f03c86494e8060d4f7c9d483ac43c0",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.netcore.app.runtime.win-x64/10.0.10/microsoft.netcore.app.runtime.win-x64.10.0.10.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The MIT terms and bundled notices were reviewed; notice retention applies and no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.Web.WebView2",
+      "version": "1.0.3719.77",
+      "category": "nuget",
+      "sha512": "b7eb9cc8ac39353c0c8ec52b0c5e91f4b938d25a5c2900f5fc7832185c65e3db5d03887d74a96c8fa15818498346914d7e74e910db93ca931c75bae592a05d0c",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.web.webview2-1.0.3719.77/LICENSE.txt",
+          "sha256": "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55"
+        },
+        {
+          "path": "licenses/managed/microsoft.web.webview2-1.0.3719.77/NOTICE.txt",
+          "sha256": "106423785c5b7eba0a8e61d1837f2132e9c828e20ad530f565d981c1df60dd90"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.web.webview2.1.0.3719.77.nupkg",
+        "sha512": "0a9abb1068228e208dd258354654d9b99711933ca8fd4494f5c1093123e1e851b83cb8e64c4a49e4d2ae26a434e8e36755501109c4cb7f7d488e3845254ac0a7",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3719.77/microsoft.web.webview2.1.0.3719.77.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.Windows.AI.MachineLearning",
+      "version": "2.1.70",
+      "category": "nuget",
+      "sha512": "dc5b7f20dc7b8ffa5a37af1bb6d2161ac542b3f0cd2445ad8e6e3ad19e6fcb12048961ddb411518be6c1565bb7db6fabf28a8dd4666d07740357daa8635c3b9a",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windows.ai.machinelearning-2.1.70/license.txt",
+          "sha256": "66395f8cb219087fae2bd025010bd9076b736c14f03b48f20295471c0c376814"
+        },
+        {
+          "path": "licenses/managed/microsoft.windows.ai.machinelearning-2.1.70/ThirdPartyNotices.txt",
+          "sha256": "fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windows.ai.machinelearning.2.1.70.nupkg",
+        "sha512": "de18d956eb6c1a79462f84453715df17c3865e988f0516fcbcdc63d23e13f420e3eb80e5646bd0019b895335a2850f049a1e69ff37985550ba062094ffd026e3",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.ai.machinelearning/2.1.70/microsoft.windows.ai.machinelearning.2.1.70.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.Windows.SDK.BuildTools",
+      "version": "10.0.28000.2270",
+      "category": "nuget",
+      "sha512": "6bbc6518145f4b25d0ae39f314c0ddd0508ebf2bfd980fe85f414db7803984056f572eb0eb6341c728030bf2c7335db4e5d5c7f4fbf8bb40fe42befb187f1ee1",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windows.sdk.buildtools-10.0.28000.2270/sdk_license.txt",
+          "sha256": "a7a5c7e7ff998558983d6aca2702117c328aeb0c6404d298cb275f5623c6fd13"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windows.sdk.buildtools.10.0.28000.2270.nupkg",
+        "sha512": "b7c3a5f291ab2d09bd02830f07b7c4ad2dba202849f765eac24190ad2f32772964875c3ac6c40d8d0e8b19cf52900fd36a4fc7a6e5e08b4599b15ce3be28604b",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/10.0.28000.2270/microsoft.windows.sdk.buildtools.10.0.28000.2270.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.Windows.SDK.BuildTools.MSIX",
+      "version": "1.7.251221100",
+      "category": "nuget",
+      "sha512": "7f8688649d0d52d876e34de8c6ba51fbdaf157365523a75a6ea076d6ef2772793c78900a0acf66efb138898027bcfd58c2b45ee1ac73ddff3ec9472db4d49f10",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windows.sdk.buildtools.msix-1.7.251221100/sdk_license.txt",
+          "sha256": "a7a5c7e7ff998558983d6aca2702117c328aeb0c6404d298cb275f5623c6fd13"
+        },
+        {
+          "path": "licenses/managed/microsoft.windows.sdk.buildtools.msix-1.7.251221100/NOTICE.txt",
+          "sha256": "f09ebf5de6a5c8e7ebc900bb2e52af2f75e13610a1cf91e1514530e448d956c3"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windows.sdk.buildtools.msix.1.7.251221100.nupkg",
+        "sha512": "dce1098e60ef3d01fae3da7bded693b769f801e63d74c83f81a0dd647419878c4e39302375fbb3baec3617149e76942e3fd3db922ec5346a04d663389237f433",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools.msix/1.7.251221100/microsoft.windows.sdk.buildtools.msix.1.7.251221100.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK",
+      "version": "2.2.0",
+      "category": "nuget",
+      "sha512": "9148339315a4ab150da54c035389a73709640f048ef2c3b54a25131570f660a5be48a4d5078ac98ea98e2ea3200506f3e327ecf9d2e39a978a5ed57851ff5cfd",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk-2.2.0/license.txt",
+          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+        },
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk-2.2.0/NOTICE.txt",
+          "sha256": "572b43d41dea717dae7dc5de69acb20a74df025e8f5a3c0aa6f7bca02615e23c"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.2.2.0.nupkg",
+        "sha512": "6e63a1211300514b695a082727f0ea74a01574cbaa0e816152bb9499e18401d44248278eb6c1a183fa363f03a88ea69dcc300560ece8094748dbd551ed51f3da",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk/2.2.0/microsoft.windowsappsdk.2.2.0.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK.AI",
+      "version": "2.2.3",
+      "category": "nuget",
+      "sha512": "ab7569b99228a9425f32677a1d634929a9e94aa1b8444234896c86cdc117978c94e30d63474e873a8b9b70f4024e8c67958284534494131821cf0e42044c43e0",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.ai-2.2.3/license.txt",
+          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.ai.2.2.3.nupkg",
+        "sha512": "bfa2db9b655d4bbcefd9ff16cf54f7708075f44ba06e811e8ede062501f876b347989aa88a503dae7339aa0c393e7ab6bbb672d4b3ed0306a7dada141f731a12",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.ai/2.2.3/microsoft.windowsappsdk.ai.2.2.3.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK.Base",
+      "version": "2.0.4",
+      "category": "nuget",
+      "sha512": "4174b2da5957dbf071f5d61619412c6f5d05e34abde198839cf333a9adbfa919931b8cbd117c46a7ab872136fb7346f81426bee8a14196087a0f9dccd1010c12",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.base-2.0.4/license.txt",
+          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+        },
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.base-2.0.4/NOTICE.txt",
+          "sha256": "572b43d41dea717dae7dc5de69acb20a74df025e8f5a3c0aa6f7bca02615e23c"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.base.2.0.4.nupkg",
+        "sha512": "323cba2bb97d923d7ee5434f83ccbf7e41f1d9b7b44dd2d8688589b1fed296464711c15de9b9792fcb928cf3582b45f3e6f7da6042cee722accc71c86da3bbe4",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.base/2.0.4/microsoft.windowsappsdk.base.2.0.4.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK.DWrite",
+      "version": "2.1.0",
+      "category": "nuget",
+      "sha512": "7608b1ecd49ea3b67c4993f2aec3aa626ffa394bc1bde1c2895ca8ad879c9ad0d8a195b6e9d27afe2f72bde231816be616981f2973de22e4010af85b7ad1e262",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.dwrite-2.1.0/license.txt",
+          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.dwrite.2.1.0.nupkg",
+        "sha512": "966d6624c85003a1d5ef4d8ea26dd88e6edee40d1951f53a262d0914386061250fef502505ede140c30d61cd680aea8e77f6fb51d1e5e9a2705c6ce43fedb41f",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.dwrite/2.1.0/microsoft.windowsappsdk.dwrite.2.1.0.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK.Foundation",
+      "version": "2.1.0",
+      "category": "nuget",
+      "sha512": "52bcf55abb171d80c762b08f216665493c205f0821117952ea563ad87937bd9134199de1c98acc33b6bea7a46b5c2e7918482b46139346a5ea707d992ff51644",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.foundation-2.1.0/license.txt",
+          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.foundation.2.1.0.nupkg",
+        "sha512": "47b8f28b1e2b5f216d1af6b9e45bd2695b759f0d93192d1b5561093254e8e3a1e9aeb9efcb3f0b2ad52c734d8fe6d072b9cf4337bbfbe362ec634fe927c3b776",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.foundation/2.1.0/microsoft.windowsappsdk.foundation.2.1.0.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK.InteractiveExperiences",
+      "version": "2.0.15",
+      "category": "nuget",
+      "sha512": "690f6ecc02214da37dce4725aed560ea4ca5a45fa111253eb42d1b1daace096741cfc4a167b82dfa02b01268ca8aab4fbfab11ad1825c8b2cd5523df6fc2a631",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.interactiveexperiences-2.0.15/license.txt",
+          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.interactiveexperiences.2.0.15.nupkg",
+        "sha512": "4c227cf3f8205b0317776deedfc1c78e13c3013bb5e0280c0ba385a88b0feca965e9057122303df97568e973e61b19f39fbd542bbd5725847640745b4583a2a9",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.interactiveexperiences/2.0.15/microsoft.windowsappsdk.interactiveexperiences.2.0.15.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK.ML",
+      "version": "2.1.70",
+      "category": "nuget",
+      "sha512": "3a46dbfe506fd980431fa6e386b30240100db28a6f6498ddbbe645355731e4b69f33e76c8c45450673e46a4980febc116ee3fe378abf198a0a1fad2ec07f6344",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.ml-2.1.70/license.txt",
+          "sha256": "656aab74c15aa9f9964bcdcc993eb2755cbdb4822d5e0e3bc61d2e281897f758"
+        },
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.ml-2.1.70/ThirdPartyNotices.txt",
+          "sha256": "fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.ml.2.1.70.nupkg",
+        "sha512": "c70391657b8f256875d095fac095ce7addd521bed48bd74355ba68b7dcdb21e513e276045662d7e0801c8c27b6bdd4161933816bdb4a6cfe5521dcf46b8d8c9e",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.ml/2.1.70/microsoft.windowsappsdk.ml.2.1.70.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK.Runtime",
+      "version": "2.2.0",
+      "category": "nuget",
+      "sha512": "eb041800b6a778b6d98e5d283788684bd081fb4272e5d9451f2c351bd620f613cf999ba9e5b00231d58c5289bd304d3affc60eb28e13e36a779a6ea5edc0fe2a",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.runtime-2.2.0/license.txt",
+          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+        },
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.runtime-2.2.0/NOTICE.txt",
+          "sha256": "572b43d41dea717dae7dc5de69acb20a74df025e8f5a3c0aa6f7bca02615e23c"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.runtime.2.2.0.nupkg",
+        "sha512": "2f1fc1beb86b62b49e7129147027c1cd5f08df27bb65de401522de39b4ae8666a9fab32c566414290d6dcddb597cc39480360ebb27d0172586d31ee6dd5ad634",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.runtime/2.2.0/microsoft.windowsappsdk.runtime.2.2.0.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK.Widgets",
+      "version": "2.0.5",
+      "category": "nuget",
+      "sha512": "951cfef3e414eb9815f214732d513e191b0f299e36967cea926b30f7a1f341dfc3b8561faf8258a5453b659e58ae457611f41ee010a6a11280799dd6c1a94c72",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.widgets-2.0.5/license.txt",
+          "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.widgets.2.0.5.nupkg",
+        "sha512": "baa3085a5a0b067b1d48ab023f62b9db78cef85846788707e78041b0983f4d2287bdd43fc3c4500e2e594465418e1ee8bebc3c6e348975f101034bb5fa70ba77",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.widgets/2.0.5/microsoft.windowsappsdk.widgets.2.0.5.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "Microsoft.WindowsAppSDK.WinUI",
+      "version": "2.2.1",
+      "category": "nuget",
+      "sha512": "c3c2aea8907b229843457006355b91abea067a81b271ce1902b680f8e229b069bf6e810a1cb9305e6ccd0da36b5659ec0e98f1405584d97569d215e395626ac7",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.winui-2.2.1/license.txt",
+          "sha256": "c2f1d9efba5864366335c007d51cab1d5b07005e9f1a67d7ca90b7b2a01fd615"
+        },
+        {
+          "path": "licenses/managed/microsoft.windowsappsdk.winui-2.2.1/NOTICE.txt",
+          "sha256": "e25393c0d340a1821827b093fa4dbbfcccd8feb7bf769e7fa773e3955cd5314b"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/microsoft.windowsappsdk.winui.2.2.1.nupkg",
+        "sha512": "adf4e6fc37a88f93eb866517bb86338954a0aaff28c5e0d4493c9874e56cc72ec2466ff3b1b220419adca76de2da2ead67569b5bec7cdf5d6aec36f21a4f1d82",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.winui/2.2.1/microsoft.windowsappsdk.winui.2.2.1.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The packaged Microsoft redistribution terms and bundled notices were reviewed; no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "System.Numerics.Tensors",
+      "version": "9.0.0",
+      "category": "nuget",
+      "sha512": "872241e14969022d7d5ebf405f3bb636e6a0282e253df1ce6cd304000d079aa173dab5fbc0a833798ccefe333f7811c386750614512393970ea096b1aa0e49e0",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/system.numerics.tensors-9.0.0/LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "path": "licenses/managed/system.numerics.tensors-9.0.0/THIRD-PARTY-NOTICES.TXT",
+          "sha256": "40686c6447a7d5b5d3693068e4571b5f483d7ed335aeee773ef662440de4c5d5"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/system.numerics.tensors.9.0.0.nupkg",
+        "sha512": "adace58eeed48082d0fd56fb0685b5451ff120404373c627ab4b1193be0aa4b0476b2dd031925f80af25cb8204ce52656c562508ec6974f6bb0cd05461a62d23",
+        "url": "https://api.nuget.org/v3-flatcontainer/system.numerics.tensors/9.0.0/system.numerics.tensors.9.0.0.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The MIT terms and bundled notices were reviewed; notice retention applies and no source-code delivery condition was identified."
+      }
+    },
+    {
+      "name": "System.Security.Cryptography.ProtectedData",
+      "version": "10.0.0",
+      "category": "nuget",
+      "sha512": "ab2e82de04114eb7e115fba22185358cdc167c5749a41568d410115bb8e0326d734c49b72d1ccb2f238b246680b8a13e9d90869043fbd72e2b8fd3568ea2c675",
+      "licenseFiles": [
+        {
+          "path": "licenses/managed/system.security.cryptography.protecteddata-10.0.0/LICENSE.TXT",
+          "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+        },
+        {
+          "path": "licenses/managed/system.security.cryptography.protecteddata-10.0.0/THIRD-PARTY-NOTICES.TXT",
+          "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+        }
+      ],
+      "distributionArchive": {
+        "kind": "nupkg",
+        "path": "managed-packages/system.security.cryptography.protecteddata.10.0.0.nupkg",
+        "sha512": "b5e1f1373a10990299cf8cb4ac5fdb75f65b1deec9b8bba330327411cfa685dcbdff9e406ce9c65ea39a43c9e525555d49e330f3138bdcb0f301c7b5a8505e07",
+        "url": "https://api.nuget.org/v3-flatcontainer/system.security.cryptography.protecteddata/10.0.0/system.security.cryptography.protecteddata.10.0.0.nupkg"
+      },
+      "reviewedObligations": {
+        "sourceCodeRequired": false,
+        "reviewNote": "The MIT terms and bundled notices were reviewed; notice retention applies and no source-code delivery condition was identified."
+      }
+    }
+  ]
+}

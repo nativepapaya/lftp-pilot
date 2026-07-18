@@ -185,15 +185,18 @@ still needs real servers, signed packages, or additional product development.
   payloads before and after signing, allowing only the non-empty signature
   entry. It also enforces exact LFTP contents, production dependency locks, a
   production-only SBOM, immutable releases, certificate continuity, and a
-  non-exportable trusted-test signing key. Managed .NET/WinUI legal evidence is
-  deliberately incomplete, so binary publication remains fail-closed.
+  non-exportable trusted-test signing key. The schema 3 release evidence now
+  exactly covers all 43 native runtime packages and 17 managed production
+  dependencies, including direct corresponding-source and distribution
+  archives. NuGet's normalized locked content hash is kept distinct from the
+  raw public `.nupkg` digest, and deterministic staging includes only the
+  manifest allowlist.
 
 ## Still required before 1.0 acceptance
 
-- Independently review and stage the exact native and managed third-party
-  license/redistribution/corresponding-source evidence, create the trusted-test
-  certificate, then validate an
-  increasing signed App Installer update on clean tester machines.
+- Produce the signed immutable trusted-tester release from an attested `main`
+  package, validate an increasing App Installer update locally, and repeat the
+  install/update smoke test on clean tester machines.
 
 Recurring schedules, Windows 10, ARM64, portable ZIP distribution, FISH, HTTP
 browsing, and torrent support remain deliberately deferred.

@@ -10,10 +10,13 @@ Windows App SDK/WinUI dependencies are locked by each source project's
 `packages.lock.json` and derived from restored `project.assets.json`; test-only
 dependencies are excluded from release evidence.
 
-Before any binary release, the repository must contain independently reviewed
-license, redistribution-package, and source-obligation evidence for every
-native and managed production input. `build/Test-LicenseEvidence.ps1`
-deliberately blocks publication until schema 3 evidence is exact and complete;
-the checked-in template is not complete. The release tooling then generates
-cryptographic checksums, a production-scoped SBOM, and an allowlisted evidence
-archive from only those reviewed inputs.
+The reviewed `third-party-licenses/licenses-manifest.json` binds license,
+redistribution-package, and source-obligation evidence for every native and
+managed production input. `build/Test-LicenseEvidence.ps1` blocks publication
+unless that schema 3 evidence exactly matches the current production graph.
+The release tooling generates cryptographic checksums, a production-scoped
+SBOM, and an allowlisted evidence archive from only those reviewed inputs.
+
+The separately retained incomplete template remains a fail-closed starting
+point for a future runtime or dependency revision. Any graph change requires a
+fresh manifest generation and review; it cannot inherit this release decision.

@@ -82,14 +82,13 @@ Agent continue until idle; Windows can apply a staged package after they exit.
    requires `-ApproveInitialReleaseCertificate` after explicit fingerprint
    review. Later releases download `LFTPPilot.cer` from the latest immutable
    release and require the exact same certificate.
-5. Copy `third-party-licenses/licenses-manifest.template.json` to
-   `third-party-licenses/licenses-manifest.json`, add the exact evidence for
-   every native and managed production dependency. This includes .NET, WinUI,
-   Windows App SDK, WebView2, exact NuGet redistribution archives, the selected
-   self-contained runtime pack, reviewed license files, and explicit source-code
-   obligation decisions. Native corresponding source remains mandatory. Have
-   the result independently reviewed before setting `complete` to `true`. The
-   committed template is deliberately incomplete and blocks binary release.
+5. Run `build/New-LicenseEvidenceManifest.ps1` without `-MarkComplete` after
+   every runtime or production dependency change. Review the reconstructed
+   native and managed graph, license mappings, raw public NuGet archives,
+   selected self-contained runtime pack, source-code obligation decisions, and
+   native corresponding-source archives. Run it again with `-MarkComplete`
+   only after that review. The committed incomplete template remains the
+   fail-closed reference and must never replace reviewed evidence.
 6. Create and push the reviewed `v<four-part-version>` tag. Publication peels
    lightweight or annotated tags through the GitHub API and requires the remote
    tag to resolve exactly to the attested source digest. It refuses to replace
