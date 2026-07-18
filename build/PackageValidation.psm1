@@ -1,5 +1,5 @@
 Set-StrictMode -Version Latest
-Import-Module (Join-Path $PSScriptRoot 'ReleaseTools.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ReleaseTools.psm1')
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 

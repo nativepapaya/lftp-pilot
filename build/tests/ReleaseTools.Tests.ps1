@@ -3,6 +3,12 @@ $ErrorActionPreference = 'Stop'
 $buildRoot = Split-Path $PSScriptRoot -Parent
 $repository = Split-Path $buildRoot -Parent
 Import-Module (Join-Path $buildRoot 'ReleaseTools.psm1') -Force
+Import-Module (Join-Path $buildRoot 'PackageValidation.psm1') -Force
+foreach ($requiredCommand in @('Assert-ReleaseCertificate', 'Test-LftpPilotMsix')) {
+    if ($null -eq (Get-Command $requiredCommand -ErrorAction SilentlyContinue)) {
+        throw "Release module import order hid required command '$requiredCommand'."
+    }
+}
 
 function Assert-Equal($Expected, $Actual, [string]$Message) {
     if ($Expected -ne $Actual) { throw "$Message Expected '$Expected', got '$Actual'." }
