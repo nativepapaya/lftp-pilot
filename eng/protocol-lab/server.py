@@ -422,6 +422,7 @@ def main() -> int:
         "key_passphrase": LAB_KEY_PASSPHRASE,
         "seed_name": SEED_NAME,
         "seed_content": SEED_CONTENT,
+        "seed_sha256": hashlib.sha256((endpoint_roots["sftp"] / SEED_NAME).read_bytes()).hexdigest(),
         "tls_ca_path": str(certificate_path),
         "sftp_client_key_path": str(sftp.client_key_path),
         "sftp_encrypted_client_key_path": str(sftp.encrypted_client_key_path),

@@ -9,6 +9,15 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- SFTP and mixed-protocol remote-to-remote transfers now use an Agent-owned
+  client relay with distinct source and destination LFTP processes, preserving
+  each endpoint's credential redaction and pinned host-key configuration. The
+  managed payload is freshly size-checked, never exposed through App contracts,
+  and removed on success, failure, or cancellation; destination no-clobber is
+  revalidated immediately before upload.
+- The protocol lab now pins a mutually compatible `cryptography 48.0.1` and
+  `pyOpenSSL 26.2.0` pair, retaining the security fix without making the
+  hash-locked test environment impossible to install.
 - SFTP profiles now support unencrypted and passphrase-encrypted OpenSSH
   private keys. Passphrases use LFTP's redacted in-memory credential channel,
   never process arguments or environment variables, and can optionally use
@@ -63,14 +72,10 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   Activity history. The Agent validates and atomically persists terminal
   records, replays them on reconnect, publishes live updates, and backfills
   terminal durable jobs after an Agent restart without duplicating entries.
-- SFTP and mixed-protocol remote-to-remote jobs now fail closed instead of
-  sharing LFTP's process-global SFTP connect program across two independently
-  pinned endpoints. FTP-family FXP remains available; secure SFTP relay will
-  use distinct processes.
 - Remote-to-remote route reviews now receive Agent-issued, single-use plan
   identifiers that also become durable job identifiers. Concurrent duplicate
   submissions and lost-reply reconciliation reuse that exact identifier, so
-  they converge on one job and one LFTP process instead of launching a second
+  they converge on one job and one execution instead of launching a second
   transfer under a fresh review. Each review also pins both complete connection
   identities; changing either endpoint, protocol, user, authentication mode, or
   SSH key invalidates the old route before any remote stat or process launch.

@@ -118,11 +118,12 @@ still needs real servers, signed packages, or additional product development.
 - Read-only isolated advanced console; local shell syntax and structured
   mutation/transfer commands are blocked.
 - Reviewed FTP-family remote-to-remote file plans and jobs prefer FXP with
-  LFTP's client-relay fallback. SFTP and mixed pairs fail closed because
-  LFTP's SFTP connect program is process-global; they remain blocked until the
-  relay uses distinct processes with independently pinned host trust. The
+  LFTP's client-relay fallback. SFTP and mixed pairs use a managed client relay
+  with distinct source and destination processes, independently pinned host
+  trust, a freshly size-checked Agent-owned payload, destination no-clobber
+  revalidation, and terminal cleanup on success, failure, or cancellation. The
   Agent issues each reviewed plan ID, consumes it once as the durable job ID,
-  and makes concurrent or lost-reply replays converge on one LFTP process. The
+  and makes concurrent or lost-reply replays converge on one execution. The
   plan pins both full connection identities, so a profile endpoint or user
   change cannot redirect an earlier route review.
 - Run-once transfer scheduling while the same Agent remains alive. A stopped or
@@ -160,9 +161,6 @@ still needs real servers, signed packages, or additional product development.
 - Exercise managed-cache editing, concurrent target changes, staging promotion,
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.
-- Implement SFTP/mixed remote-to-remote client relay with distinct source and
-  destination processes so each endpoint retains its own pinned host-key
-  configuration.
 - Extend live progress to guarded directory transfers, reviewed mirrors, and
   remote-to-remote jobs, and wire notifications, taskbar progress, Jump Lists,
   and support-bundle UI.

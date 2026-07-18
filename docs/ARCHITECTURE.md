@@ -71,11 +71,14 @@ the App while keeping both package trees read-only.
   before backup and rename-based promotion. Rollback preserves a backup or
   quarantined concurrent version rather than deleting ambiguous remote data;
   the live path is never overwritten with `put -e`.
-- Remote-to-remote transfers currently execute only for FTP-family pairs, where
-  one LFTP process can prefer FXP and fall back to relay. SFTP/mixed pairs are
-  rejected until client relay uses distinct processes; a process-global
-  `sftp:connect-program` must never be reused for two endpoint-bound host-key
-  files. Route plans are bounded, expiring Agent-issued capabilities whose plan
+- Remote-to-remote FTP-family transfers use one LFTP process that prefers FXP
+  and can fall back to LFTP's client relay. SFTP and mixed-protocol routes use
+  two sequential, endpoint-specific LFTP processes and an Agent-owned managed
+  payload, so process-global `sftp:connect-program` state and pinned host-key
+  files are never shared across endpoints. The payload is freshly size-checked,
+  rejected if it becomes a link or special entry, and removed before terminal
+  completion on success, failure, or cancellation. Route plans are bounded,
+  expiring Agent-issued capabilities whose plan
   ID becomes the durable job ID. The Agent serializes first consumption and
   caches its result, while the App privately reconciles an uncertain submission
   with the same ID; duplicate control-pipe deliveries therefore cannot start a

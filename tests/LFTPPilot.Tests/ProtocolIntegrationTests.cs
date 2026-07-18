@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using LFTPPilot.Agent;
@@ -121,6 +122,109 @@ public sealed class ProtocolIntegrationTests
             Assert.Equal(
                 SftpHostKeyState.Trusted,
                 (await manager.InspectAsync(profile, TestContext.Current.CancellationToken)).State);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "ProtocolIntegration")]
+    public async Task SftpAndFtpRemoteTransfersUseManagedTwoProcessRelayInBothDirections()
+    {
+        var configPath = Environment.GetEnvironmentVariable(ConfigVariable);
+        var executablePath = Environment.GetEnvironmentVariable(RuntimeVariable);
+        if (string.IsNullOrWhiteSpace(configPath) || string.IsNullOrWhiteSpace(executablePath)) return;
+        var config = await LoadConfigAsync(configPath);
+        var root = Path.Combine(Path.GetTempPath(), $"lftp-pilot-relay-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var profiles = new MemoryProfileStore();
+            var secrets = new MemorySecretStore();
+            var hostKeys = new MemoryHostKeyStore();
+            var sftp = new ConnectionProfile(
+                Guid.NewGuid(), "Relay SFTP", ConnectionProtocol.Sftp, config.Host,
+                config.Endpoints.Sftp, config.Username, AuthenticationKind.Password,
+                InitialRemotePath: "/", InitialLocalPath: root);
+            var ftp = new ConnectionProfile(
+                Guid.NewGuid(), "Relay FTP", ConnectionProtocol.Ftp, config.Host,
+                config.Endpoints.Ftp, config.Username, AuthenticationKind.Password,
+                InitialRemotePath: "/", InitialLocalPath: root);
+            await hostKeys.SaveAsync(new(
+                SftpHostKeyManager.CreateBinding(sftp),
+                config.SftpHostKeyAlgorithm,
+                config.SftpHostKeyBase64,
+                config.SftpHostKeyFingerprint),
+                TestContext.Current.CancellationToken);
+            var jobs = new JobCoordinator();
+            var options = AgentWorkspaceOptions.CreateDefault(Path.Combine(root, "agent")) with
+            {
+                ConnectTimeout = TimeSpan.FromSeconds(20),
+                BrowseTimeout = TimeSpan.FromSeconds(20),
+                TransferTimeout = TimeSpan.FromMinutes(2),
+            };
+            await using var service = new AgentWorkspaceService(
+                profiles,
+                secrets,
+                new SftpHostKeyManager(hostKeys, new UnexpectedHostKeyProbe()),
+                new TlsCaProcessHost(new LftpProcessHost(), config.TlsCaPath),
+                PackagedLftpRuntimeProvider.CreateTestOverride(executablePath),
+                jobs,
+                new MirrorPlanner(),
+                options);
+
+            await service.SaveProfileAsync(new(sftp), TestContext.Current.CancellationToken);
+            await service.SaveProfileAsync(new(sftp, config.Password), TestContext.Current.CancellationToken);
+            await service.SaveProfileAsync(new(ftp, config.Password), TestContext.Current.CancellationToken);
+            var sftpSession = await service.ConnectAsync(
+                new(ConnectionIdentity.FromProfile(sftp)), TestContext.Current.CancellationToken);
+            var ftpSession = await service.ConnectAsync(
+                new(ConnectionIdentity.FromProfile(ftp)), TestContext.Current.CancellationToken);
+
+            const string ftpTarget = "/relay-from-sftp-雪.txt";
+            var outbound = await service.PlanRemoteTransferAsync(
+                new(sftp.Id, ftp.Id, "/seed-雪.txt", ftpTarget), TestContext.Current.CancellationToken);
+            Assert.Equal(RemoteTransferMode.ClientRelay, outbound.Mode);
+            var outboundJob = await service.EnqueueRemoteTransferAsync(
+                new(outbound), TestContext.Current.CancellationToken);
+            await WaitForCompletedAsync(jobs, outboundJob.Job.Id, ConnectionProtocol.Sftp);
+
+            const string sftpTarget = "/relay-roundtrip-雪.txt";
+            var inbound = await service.PlanRemoteTransferAsync(
+                new(ftp.Id, sftp.Id, ftpTarget, sftpTarget), TestContext.Current.CancellationToken);
+            Assert.Equal(RemoteTransferMode.ClientRelay, inbound.Mode);
+            var inboundJob = await service.EnqueueRemoteTransferAsync(
+                new(inbound), TestContext.Current.CancellationToken);
+            await WaitForCompletedAsync(jobs, inboundJob.Job.Id, ConnectionProtocol.Sftp);
+
+            var verificationPath = Path.Combine(root, "relay-verification.txt");
+            var verification = await service.EnqueueTransferAsync(new(
+                sftpSession.SessionId,
+                new TransferPlan(
+                    Guid.NewGuid(), sftp.Id, TransferDirection.Download,
+                    sftpTarget, verificationPath, TransferMode.Overwrite)),
+                TestContext.Current.CancellationToken);
+            await WaitForCompletedAsync(jobs, verification.Job.Id, ConnectionProtocol.Sftp);
+            await using (var verificationStream = File.OpenRead(verificationPath))
+            {
+                Assert.Equal(
+                    config.SeedSha256,
+                    Convert.ToHexStringLower(await SHA256.HashDataAsync(
+                        verificationStream, TestContext.Current.CancellationToken)));
+            }
+            Assert.False(Directory.Exists(Path.Combine(options.TemporaryRoot, "remote-relays", outbound.Id.ToString("N"))));
+            Assert.False(Directory.Exists(Path.Combine(options.TemporaryRoot, "remote-relays", inbound.Id.ToString("N"))));
+
+            await service.DeleteEntriesAsync(
+                new(PaneKind.Remote, [ftpTarget], ftpSession.SessionId, Confirmed: true),
+                TestContext.Current.CancellationToken);
+            await service.DeleteEntriesAsync(
+                new(PaneKind.Remote, [sftpTarget], sftpSession.SessionId, Confirmed: true),
+                TestContext.Current.CancellationToken);
+            await service.DisconnectAsync(new(ftpSession.SessionId), TestContext.Current.CancellationToken);
+            await service.DisconnectAsync(new(sftpSession.SessionId), TestContext.Current.CancellationToken);
         }
         finally
         {
@@ -281,6 +385,8 @@ public sealed class ProtocolIntegrationTests
         string Password,
         [property: JsonPropertyName("key_passphrase")] string KeyPassphrase,
         [property: JsonPropertyName("seed_name")] string SeedName,
+        [property: JsonPropertyName("seed_content")] string SeedContent,
+        [property: JsonPropertyName("seed_sha256")] string SeedSha256,
         [property: JsonPropertyName("tls_ca_path")] string TlsCaPath,
         [property: JsonPropertyName("sftp_client_key_path")] string SftpClientKeyPath,
         [property: JsonPropertyName("sftp_encrypted_client_key_path")] string SftpEncryptedClientKeyPath,
