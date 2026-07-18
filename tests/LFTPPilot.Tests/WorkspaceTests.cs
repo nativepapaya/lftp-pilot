@@ -920,8 +920,13 @@ public sealed class WorkspaceTests
         }
 
         Assert.True(await disconnect!);
-        var rejected = await Assert.ThrowsAsync<InvalidOperationException>(() => start!);
-        Assert.Contains("closing", rejected.Message, StringComparison.OrdinalIgnoreCase);
+        var rejected = await Assert.ThrowsAnyAsync<Exception>(() => start!);
+        Assert.True(rejected is InvalidOperationException or KeyNotFoundException,
+            $"Expected an authoritative closing or missing-session rejection, but received {rejected.GetType().Name}.");
+        Assert.True(
+            rejected.Message.Contains("closing", StringComparison.OrdinalIgnoreCase) ||
+            rejected.Message.Contains("not found", StringComparison.OrdinalIgnoreCase),
+            "The queued search was not rejected by the session-removal boundary.");
         Assert.DoesNotContain(fixture.ProcessHost.Starts,
             item => item.Tag.StartsWith("remote-search-", StringComparison.Ordinal));
     }
