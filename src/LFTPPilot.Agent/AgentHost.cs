@@ -21,6 +21,7 @@ public sealed partial class AgentHost : IAsyncDisposable
     private readonly JobHistoryRecorder? _history;
     private readonly AgentEventHub _events = new();
     private readonly Func<int, bool>? _clientAuthorizer;
+    private readonly Action<JobSnapshot>? _jobObserver;
     private readonly AgentIdleExitPolicy _idleExit;
     private readonly Func<Stream, ProtocolEnvelope, CancellationToken, ValueTask> _writeControlResponse =
         static (stream, response, cancellationToken) => FramedJsonStream.WriteAsync(stream, response, cancellationToken);
@@ -44,7 +45,8 @@ public sealed partial class AgentHost : IAsyncDisposable
         AgentWorkspaceOptions? workspaceOptions = null,
         Func<int, bool>? clientAuthorizer = null,
         IMirrorDefinitionStore? mirrorDefinitionStore = null,
-        IHistoryStore? historyStore = null)
+        IHistoryStore? historyStore = null,
+        Action<JobSnapshot>? jobObserver = null)
     {
         _idleExit = new(HasBackgroundWork, timeProvider);
         _coordinator = new();
@@ -52,6 +54,7 @@ public sealed partial class AgentHost : IAsyncDisposable
         _scheduler = new(_coordinator, _store, timeProvider);
         _coordinator.JobChanged += OnJobChanged;
         _clientAuthorizer = clientAuthorizer;
+        _jobObserver = jobObserver;
         var services = new object?[] { profileStore, secretStore, hostKeyManager, processHost, runtimeProvider, mirrorPlanner, workspaceOptions };
         if (services.Any(static service => service is not null) && services.Any(static service => service is null))
             throw new ArgumentException("All workspace services must be supplied together.");
@@ -327,6 +330,11 @@ public sealed partial class AgentHost : IAsyncDisposable
     {
         _events.Publish(EngineEventKind.Job, "job.changed", job, job.Id);
         _history?.Observe(job);
+        if (_jobObserver is not null)
+        {
+            try { _jobObserver(job); }
+            catch (Exception exception) when (!IsFatalRuntimeException(exception)) { }
+        }
         if (Volatile.Read(ref _jobStateOwned)) _ = PersistJobsAsync();
         _idleExit.BackgroundWorkChanged();
     }

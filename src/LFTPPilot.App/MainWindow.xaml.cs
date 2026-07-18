@@ -1,8 +1,11 @@
+using System.Collections.Specialized;
+using System.Runtime.InteropServices;
 using LFTPPilot.App.Services;
 using LFTPPilot.App.ViewModels;
 using LFTPPilot.App.Views.Pages;
 using LFTPPilot.Core;
 using LFTPPilot.Windows.Activation;
+using LFTPPilot.Windows.Shell;
 using Microsoft.UI;
 using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Windowing;
@@ -20,6 +23,9 @@ public sealed partial class MainWindow : Window
     private bool _allowClose;
     private bool _closePromptOpen;
     private AppWindow? _appWindow;
+    private TaskbarProgressService? _taskbarProgress;
+    private readonly JumpListService _jumpLists = new();
+    private readonly SemaphoreSlim _jumpListGate = new(1, 1);
     private readonly SemaphoreSlim _remoteEditDialogGate = new(1, 1);
     private readonly HashSet<string> _pendingRemoteEditPrompts = new(StringComparer.Ordinal);
     private bool _activeEditsSurfacePending;
@@ -31,6 +37,8 @@ public sealed partial class MainWindow : Window
         ViewModel = new MainWindowViewModel(AppServices.Agent);
         ViewModel.RemoteEditLocalChanged += ViewModel_RemoteEditLocalChanged;
         RootGrid.DataContext = ViewModel;
+        ViewModel.Activity.Jobs.CollectionChanged += Jobs_CollectionChanged;
+        ViewModel.Connections.Profiles.CollectionChanged += Profiles_CollectionChanged;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         SystemBackdrop = new MicaBackdrop { Kind = MicaKind.Base };
@@ -47,9 +55,11 @@ public sealed partial class MainWindow : Window
         RootGrid.Loaded -= RootGrid_Loaded;
         var requestedProfile = _activation?.Action == ProtocolActivationAction.OpenProfile ? _activation.ProfileId : null;
         await ViewModel.InitializeAsync(requestedProfile).ConfigureAwait(true);
+        UpdateTaskbarProgress();
+        await RefreshJumpListAsync().ConfigureAwait(true);
         if (_activation?.Action == ProtocolActivationAction.OpenSettings)
         {
-            await ShowToolAsync("Settings", new SettingsPage { DataContext = ViewModel.Settings }, 720).ConfigureAwait(true);
+            await ShowToolAsync("Settings", new SettingsPage(WindowNative.GetWindowHandle(this)) { DataContext = ViewModel.Settings }, 720).ConfigureAwait(true);
         }
         else if (_activation?.Action == ProtocolActivationAction.ShowTransfers)
         {
@@ -122,7 +132,7 @@ public sealed partial class MainWindow : Window
         await ShowToolAsync("Isolated LFTP console", new ConsolePage { DataContext = ViewModel.Console }, 860).ConfigureAwait(true);
 
     private async void Settings_Click(object sender, RoutedEventArgs e) =>
-        await ShowToolAsync("Settings", new SettingsPage { DataContext = ViewModel.Settings }, 720).ConfigureAwait(true);
+        await ShowToolAsync("Settings", new SettingsPage(WindowNative.GetWindowHandle(this)) { DataContext = ViewModel.Settings }, 720).ConfigureAwait(true);
 
     private async Task ShowToolAsync(string title, FrameworkElement content, double width)
     {
@@ -407,6 +417,52 @@ public sealed partial class MainWindow : Window
         _appWindow.Resize(new global::Windows.Graphics.SizeInt32(1440, 920));
         _appWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
         _appWindow.Closing += AppWindow_Closing;
+        try { _taskbarProgress = new(); }
+        catch (Exception exception) when (exception is COMException or InvalidCastException) { }
+    }
+
+    private void Jobs_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e) => UpdateTaskbarProgress();
+
+    private void Profiles_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e) => _ = RefreshJumpListAsync();
+
+    private void UpdateTaskbarProgress()
+    {
+        if (_taskbarProgress is null) return;
+        try
+        {
+            var summary = TaskbarProgressPolicy.Summarize(ViewModel.Activity.Jobs);
+            var handle = WindowNative.GetWindowHandle(this);
+            if (summary.Completed is { } completed && summary.Total is { } total)
+                _taskbarProgress.SetValue(handle, completed, total);
+            _taskbarProgress.SetState(handle, summary.State);
+        }
+        catch (Exception exception) when (exception is COMException or ArgumentException or InvalidOperationException) { }
+    }
+
+    private async Task RefreshJumpListAsync()
+    {
+        await _jumpListGate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            var entries = new List<JumpListEntry>
+            {
+                new("Transfers", "lftp-pilot://transfers"),
+                new("Settings", "lftp-pilot://settings"),
+            };
+            entries.AddRange(ViewModel.Connections.Profiles
+                .OrderBy(static profile => profile.Name, StringComparer.CurrentCultureIgnoreCase)
+                .Take(10)
+                .Select(static profile => new JumpListEntry(
+                    profile.Name,
+                    $"lftp-pilot://open-profile?id={profile.Id:D}",
+                    "Connections")));
+            await _jumpLists.ReplaceAsync(entries).ConfigureAwait(true);
+        }
+        catch (Exception exception) when (exception is ArgumentException or COMException or InvalidOperationException or UnauthorizedAccessException) { }
+        finally
+        {
+            _jumpListGate.Release();
+        }
     }
 
     private async void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
@@ -466,6 +522,7 @@ public sealed partial class MainWindow : Window
             if (stopAgent && !AppServices.Agent.IsConnected && AppServices.ProcessManager.OwnsRunningAgent)
                 await AppServices.ForceStopOwnedAgentAsync().ConfigureAwait(true);
             await AppServices.ShutdownAsync(stopAgent).ConfigureAwait(true);
+            DetachShellHandlers();
             _allowClose = true;
             Close();
         }
@@ -473,6 +530,7 @@ public sealed partial class MainWindow : Window
         {
             await AppServices.ForceStopOwnedAgentAsync().ConfigureAwait(true);
             await AppServices.ShutdownAsync(stopAgent: false).ConfigureAwait(true);
+            DetachShellHandlers();
             _allowClose = true;
             Close();
             System.Diagnostics.Debug.WriteLine(exception);
@@ -488,5 +546,11 @@ public sealed partial class MainWindow : Window
             };
             await dialog.ShowAsync();
         }
+    }
+
+    private void DetachShellHandlers()
+    {
+        ViewModel.Activity.Jobs.CollectionChanged -= Jobs_CollectionChanged;
+        ViewModel.Connections.Profiles.CollectionChanged -= Profiles_CollectionChanged;
     }
 }

@@ -92,7 +92,13 @@ the App while keeping both package trees read-only.
 
 The Windows library exposes App Installer status, protocol activation, native
 notifications, Jump Lists, taskbar progress, package data paths, atomic JSON
-stores, sanitized support bundles, and the trusted editor launcher. Managed
+stores, sanitized support bundles, and the trusted editor launcher. The Agent
+is the registered notification COM server so terminal outcomes remain visible
+after the App closes; notification activation ignores payload data and opens
+only the allowlisted Transfers route. The App aggregates active jobs onto the
+taskbar and rebuilds allowlisted Jump List routes from bounded profile metadata.
+Settings writes support archives only after all JSON/text entries pass bounded
+name/size checks and secret/private-key/user-profile redaction. Managed
 remote files are passed as one argument to the fixed System32 Notepad executable
 with shell execution disabled; file associations never receive the cache path.
 Update downloads and replacement remain owned by Windows App Installer; LFTP

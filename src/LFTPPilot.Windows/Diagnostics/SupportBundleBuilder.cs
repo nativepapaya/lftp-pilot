@@ -9,6 +9,7 @@ public sealed record SupportBundleText(string Name, string Content);
 
 public sealed class SupportBundleBuilder
 {
+    internal static readonly DateTimeOffset DeterministicZipTimestamp = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private const int MaximumEntryBytes = 4 * 1024 * 1024;
     private const int MaximumTotalBytes = 32 * 1024 * 1024;
     private const int MaximumEntries = 128;
@@ -66,7 +67,7 @@ public sealed class SupportBundleBuilder
     private static async Task WriteEntryAsync(ZipArchive archive, string name, string content, CancellationToken cancellationToken)
     {
         ZipArchiveEntry entry = archive.CreateEntry(name, CompressionLevel.Optimal);
-        entry.LastWriteTime = DateTimeOffset.UnixEpoch;
+        entry.LastWriteTime = DeterministicZipTimestamp;
         await using Stream stream = entry.Open();
         await using var writer = new StreamWriter(stream, new UTF8Encoding(false), 4096, leaveOpen: false);
         await writer.WriteAsync(content.AsMemory(), cancellationToken);

@@ -11,6 +11,13 @@
             </StackPanel>
             <Rectangle Height="1" Fill="{ThemeResource PilotBorderBrush}" />
             <StackPanel Spacing="10">
+                <TextBlock Text="Diagnostics" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                <TextBlock Text="Create a bounded support ZIP containing current workspace and activity diagnostics. Credentials, authorization values, private-key material, and your user-profile path are redacted before the archive is written." TextWrapping="Wrap" />
+                <Button Content="Create support bundle" Click="SupportBundle_Click" HorizontalAlignment="Left" />
+                <TextBlock Text="{Binding SupportBundleStatus}" TextWrapping="Wrap" Style="{ThemeResource CaptionTextBlockStyle}" />
+            </StackPanel>
+            <Rectangle Height="1" Fill="{ThemeResource PilotBorderBrush}" />
+            <StackPanel Spacing="10">
                 <TextBlock Text="Automatic updates" Style="{ThemeResource SubtitleTextBlockStyle}" />
                 <TextBlock Text="Installed version" Style="{ThemeResource CaptionTextBlockStyle}" />
                 <TextBlock Text="{Binding InstalledVersion}" Style="{ThemeResource BodyStrongTextBlockStyle}" />

@@ -307,8 +307,18 @@ function Assert-PackageManifest {
     }
     $protocols = @($manifest.SelectNodes("//*[local-name()='Protocol']", $ns))
     $extensions = @($manifest.SelectNodes("//*[local-name()='Extension']", $ns))
+    $extensionCategories = @($extensions | ForEach-Object { [string]$_.GetAttribute('Category') } | Sort-Object)
+    $toastActivator = $manifest.SelectSingleNode("//*[local-name()='ToastNotificationActivation']", $ns)
+    $notificationServer = $manifest.SelectSingleNode("//*[local-name()='ExeServer']", $ns)
+    $notificationClass = $manifest.SelectSingleNode("//*[local-name()='ExeServer']/*[local-name()='Class']", $ns)
+    $notificationClsid = 'D4C07989-AD6A-4F7A-AE58-FA5BBFD07611'
     if ($protocols.Count -ne 1 -or $protocols[0].GetAttribute('Name') -ne 'lftp-pilot' -or
-        $extensions.Count -ne 1 -or $extensions[0].GetAttribute('Category') -ne 'windows.protocol') {
+        ($extensionCategories -join ',') -cne 'windows.comServer,windows.protocol,windows.toastNotificationActivation' -or
+        $null -eq $toastActivator -or $toastActivator.GetAttribute('ToastActivatorCLSID') -cne $notificationClsid -or
+        $null -eq $notificationServer -or $notificationServer.GetAttribute('Executable') -cne 'agent\LFTPPilot.Agent.exe' -or
+        $notificationServer.GetAttribute('Arguments') -cne '----AppNotificationActivated:' -or
+        $notificationServer.GetAttribute('DisplayName') -cne 'LFTP Pilot background agent' -or
+        $null -eq $notificationClass -or $notificationClass.GetAttribute('Id') -cne $notificationClsid) {
         throw 'The package protocol/extension metadata is invalid.'
     }
     $capabilities = @($manifest.SelectNodes("/*[local-name()='Package']/*[local-name()='Capabilities']/*[local-name()='Capability']") |

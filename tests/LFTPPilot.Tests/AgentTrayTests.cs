@@ -1,3 +1,4 @@
+using LFTPPilot.Agent;
 using LFTPPilot.Windows.Activation;
 using LFTPPilot.Windows.Shell;
 
@@ -5,6 +6,26 @@ namespace LFTPPilot.Tests;
 
 public sealed class AgentTrayTests
 {
+    [Fact]
+    public void NotificationActivationCanOnlyOpenTheFixedTransfersRoute()
+    {
+        Uri? launched = null;
+
+        Assert.True(AgentNotificationActivation.TryHandle(
+            [AgentNotificationActivation.ArgumentPrefix + "untrusted=ignored"],
+            uri => { launched = uri; return true; }));
+        Assert.Equal(AgentTrayActions.TransfersUri, launched);
+        Assert.False(AgentNotificationActivation.TryHandle(["--help"], _ => true));
+    }
+
+    [Fact]
+    public void NotificationActivationIsConsumedEvenWhenWindowsDoesNotReturnAProcess()
+    {
+        Assert.True(AgentNotificationActivation.TryHandle(
+            [AgentNotificationActivation.ArgumentPrefix + "untrusted-payload"],
+            static _ => false));
+    }
+
     [Fact]
     public void OpenCommandUsesTheAllowlistedTransfersActivation()
     {

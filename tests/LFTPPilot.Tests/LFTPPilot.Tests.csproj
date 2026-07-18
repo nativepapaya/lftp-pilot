@@ -27,6 +27,7 @@
     <Compile Include="..\..\src\LFTPPilot.App\Services\AgentProcessManager.cs" Link="App\AgentProcessManager.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\IAgentWorkspaceClient.cs" Link="App\IAgentWorkspaceClient.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\LiveAgentWorkspaceClient.cs" Link="App\LiveAgentWorkspaceClient.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\Services\ProtocolActivationRouter.cs" Link="App\ProtocolActivationRouter.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\FilePaneDragDropRegistry.cs" Link="App\FilePaneDragDropRegistry.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\Services\TransferQueueAggregation.cs" Link="App\TransferQueueAggregation.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\ViewModels\ActivityCenterViewModel.cs" Link="App\ActivityCenterViewModel.cs" />

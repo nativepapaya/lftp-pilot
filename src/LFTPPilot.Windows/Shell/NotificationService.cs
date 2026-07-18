@@ -28,7 +28,9 @@ public sealed class NotificationService : IDisposable
     public void Dispose()
     {
         if (!_registered) return;
-        AppNotificationManager.Default.Unregister();
-        _registered = false;
+        try { AppNotificationManager.Default.Unregister(); }
+        catch (Exception exception) when (exception is not
+            (OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException)) { }
+        finally { _registered = false; }
     }
 }

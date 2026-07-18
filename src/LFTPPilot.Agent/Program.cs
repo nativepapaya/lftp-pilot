@@ -13,6 +13,7 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (AgentNotificationActivation.TryHandle(args, AgentNotificationActivation.Launch)) return 0;
         if (args.Contains("--help", StringComparer.OrdinalIgnoreCase))
         {
             Console.WriteLine("LFTP Pilot background agent");
@@ -27,6 +28,23 @@ public static class Program
 
         var paths = PackageDataPaths.CreateDefault();
         paths.EnsureCreated();
+        NotificationService? notifications = null;
+        if (paths.IsPackaged)
+        {
+            try
+            {
+                notifications = new();
+                notifications.Register();
+            }
+            catch (Exception exception) when (exception is not
+                (OutOfMemoryException or StackOverflowException or AccessViolationException or AppDomainUnloadedException))
+            {
+                notifications?.Dispose();
+                notifications = null;
+            }
+        }
+        using var notificationLifetime = notifications;
+        var notificationService = notifications;
         var statePath = Path.Combine(paths.History, "agent-state.json");
         var runtimeProvider = new PackagedLftpRuntimeProvider();
         var hostKeyManager = new SftpHostKeyManager(
@@ -46,7 +64,14 @@ public static class Program
             clientAuthorizer: AgentClientAuthorization.Create(paths),
             mirrorDefinitionStore: new JsonMirrorDefinitionStore(
                 Path.Combine(paths.MirrorDefinitions, JsonMirrorDefinitionStore.FileName)),
-            historyStore: new JsonHistoryStore(Path.Combine(paths.History, "history.json"))))
+            historyStore: new JsonHistoryStore(Path.Combine(paths.History, "history.json")),
+            jobObserver: notificationService is null
+                ? null
+                : job =>
+                {
+                    if (JobNotificationPolicy.Create(job) is { } notification)
+                        notificationService.Show(notification.Title, notification.Message, notification.Tag, notification.Group);
+                }))
         {
             using var runLifetime = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
             try
