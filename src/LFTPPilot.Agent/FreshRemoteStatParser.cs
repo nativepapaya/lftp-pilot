@@ -31,7 +31,7 @@ internal static class FreshRemoteStatParser
             throw new IOException($"{operation} failed closed: {error}");
         }
 
-        if (IsExactMissingPathDiagnostic(result, remotePath) || result.Lines.Length == 0) return null;
+        if (IsBoundMissingPathDiagnostic(result, remotePath) || result.Lines.Length == 0) return null;
         if (result.Lines.Length != 1 ||
             !string.Equals(result.Lines[0].Stream, "stdout", StringComparison.OrdinalIgnoreCase) ||
             string.IsNullOrWhiteSpace(result.Lines[0].Line))
@@ -83,11 +83,19 @@ internal static class FreshRemoteStatParser
         return foundPath || !diagnostic.Contains('/', StringComparison.Ordinal);
     }
 
-    private static bool IsExactMissingPathDiagnostic(LftpCommandResult result, string remotePath) =>
-        result.Lines.Length == 1 &&
-        string.Equals(result.Lines[0].Stream, "stderr", StringComparison.OrdinalIgnoreCase) &&
-        string.Equals(
-            result.Lines[0].Line,
-            $"Access failed: 550 No such file or directory. ({remotePath})",
-            StringComparison.Ordinal);
+    private static bool IsBoundMissingPathDiagnostic(LftpCommandResult result, string remotePath)
+    {
+        if (result.Lines.Length != 1 ||
+            !string.Equals(result.Lines[0].Stream, "stderr", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var diagnostic = result.Lines[0].Line;
+        return diagnostic.StartsWith("Access failed:", StringComparison.OrdinalIgnoreCase) &&
+            (diagnostic.Contains("no such", StringComparison.OrdinalIgnoreCase) ||
+             diagnostic.Contains("not found", StringComparison.OrdinalIgnoreCase)) &&
+            diagnostic.Contains("(/", StringComparison.Ordinal) &&
+            MissingDiagnosticMatchesPath(diagnostic, remotePath);
+    }
 }

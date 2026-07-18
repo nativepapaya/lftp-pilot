@@ -25,5 +25,7 @@ id_ed25519*
 SHA256SUMS.txt
 runtime/
 app-data/
+__pycache__/
+*.py[cod]
 third-party-licenses/sources/
 third-party-licenses/managed-packages/

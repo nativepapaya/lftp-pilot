@@ -60,6 +60,13 @@ still needs real servers, signed packages, or additional product development.
 - Authenticated packaged LFTP/MSYS2 runtime execution from a read-only MSIX,
   with an exact file inventory, `--norc`, isolated homes/caches, secret
   redaction, and no credential-bearing process arguments.
+- A repository-contained controlled protocol lab exercises the real
+  Agent/Engine/runtime path against separate loopback FTP, opportunistic FTP
+  TLS, FTPES, implicit FTPS, and SFTP servers. Password authentication, strict
+  TLS and SFTP host trust, Unicode browse/mutation, upload, segmented download,
+  move, delete, and process cleanup pass across all five endpoints without
+  installing a system service or changing the user's certificate store. Its
+  exact test-only Python dependency graph is version- and hash-pinned.
 - LFTP-backed uploads/downloads, resume and skip policies, segmented `pget`,
   rate controls, per-profile native LFTP queues, cancellation-safe queue
   retirement, typed regular-file and directory transfers, explicit
@@ -136,8 +143,11 @@ still needs real servers, signed packages, or additional product development.
 
 ## Still required before 1.0 acceptance
 
-- Exercise authentication, Unicode, mutation, resume/retry/cancel, TLS, FXP,
-  and relay behavior against controlled SFTP and FTP-family servers.
+- Complete the controlled matrix for interrupted resume, failed-transfer
+  retry, active cancellation, FTP-to-FTP FXP/client-relay routing, and the
+  remaining SSH-key authentication modes. Password authentication, Unicode
+  browse/mutation, TLS, upload, and segmented download already pass on every
+  supported protocol.
 - Exercise first-use, unchanged, and rotating SFTP host keys against the
   controlled SSH server matrix. Encrypted private-key passphrase support also
   remains required.

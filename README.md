@@ -40,6 +40,17 @@ acceptance work.
 `run-checks.ps1` runs the same locked restore, solution build, xUnit suite, and
 release-tool tamper tests used by CI.
 
+The opt-in controlled protocol matrix uses disposable loopback servers and the
+real packaged LFTP runtime without installing Docker, WSL, or a Windows
+service:
+
+```powershell
+.\build\Test-ProtocolMatrix.ps1
+```
+
+See [the protocol-lab contract](eng/protocol-lab/README.md) for its isolated
+test-only dependencies and trust behavior.
+
 The local `.dotnet` SDK is ignored. Install the SDK version pinned by
 `global.json` when it is not already available.
 
