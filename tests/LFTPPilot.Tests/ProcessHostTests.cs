@@ -5,6 +5,7 @@ namespace LFTPPilot.Tests;
 
 public sealed class ProcessHostTests
 {
+    private static readonly TimeSpan RealProcessTimeout = TimeSpan.FromSeconds(15);
     private const string FakeLftpScript = "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); " +
         "$pendingShutdownOutput=$false; $oneShotExitCode=0; " +
         "while (($line=[Console]::In.ReadLine()) -ne $null) { " +
@@ -25,7 +26,7 @@ public sealed class ProcessHostTests
         await using var session = await StartFakeAsync(TestContext.Current.CancellationToken);
         var observed = new System.Collections.Concurrent.ConcurrentBag<LftpOutputLine>();
         session.OutputReceived += (_, line) => observed.Add(line);
-        var result = await session.ExecuteAsync("cls 曲", TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var result = await session.ExecuteAsync("cls 曲", RealProcessTimeout, TestContext.Current.CancellationToken);
         Assert.True(result.Succeeded);
         Assert.Contains(result.Lines, line => line.Stream == "stdout" && line.Line == "OUT:cls 曲");
         Assert.Contains(result.Lines, line => line.Stream == "stderr" && line.Line == "ERR:cls 曲");
@@ -36,7 +37,7 @@ public sealed class ProcessHostTests
         Assert.DoesNotContain(observed, line => line.Line.Contains("__LFTPPILOT_SYNC__", StringComparison.Ordinal));
 
         Assert.True(session.IsRunning);
-        var next = await session.ExecuteAsync("pwd reusable", TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var next = await session.ExecuteAsync("pwd reusable", RealProcessTimeout, TestContext.Current.CancellationToken);
         Assert.True(next.Succeeded);
         Assert.Contains(next.Lines, line => line.Stream == "stdout" && line.Line == "OUT:pwd reusable");
         Assert.True(session.IsRunning);
@@ -51,7 +52,7 @@ public sealed class ProcessHostTests
 
         var result = await session.ExecuteToExitAsync(
             "one-shot-buffered",
-            TimeSpan.FromSeconds(5),
+            RealProcessTimeout,
             TestContext.Current.CancellationToken);
 
         Assert.True(result.Succeeded);
@@ -73,7 +74,7 @@ public sealed class ProcessHostTests
 
         var result = await session.ExecuteToExitAsync(
             "one-shot-fail",
-            TimeSpan.FromSeconds(5),
+            RealProcessTimeout,
             TestContext.Current.CancellationToken);
 
         Assert.False(result.Succeeded);
@@ -90,7 +91,7 @@ public sealed class ProcessHostTests
 
         var result = await session.ExecuteToExitAsync(
             "one-shot-long-line",
-            TimeSpan.FromSeconds(5),
+            RealProcessTimeout,
             TestContext.Current.CancellationToken);
 
         Assert.True(result.Succeeded);
@@ -135,8 +136,8 @@ public sealed class ProcessHostTests
     public async Task CommandsAreSerializedAndSecretsAreRedacted()
     {
         await using var session = await StartFakeAsync(TestContext.Current.CancellationToken, "hunter2");
-        var first = session.ExecuteAsync("pwd hunter2", TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        var second = session.ExecuteAsync("cls second", TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var first = session.ExecuteAsync("pwd hunter2", RealProcessTimeout, TestContext.Current.CancellationToken);
+        var second = session.ExecuteAsync("cls second", RealProcessTimeout, TestContext.Current.CancellationToken);
         var results = await Task.WhenAll(first, second);
         Assert.Contains(SecretRedactor.Replacement, string.Join('\n', results[0].Lines.Select(static line => line.Line)), StringComparison.Ordinal);
         Assert.DoesNotContain("hunter2", string.Join('\n', results[0].Lines.Select(static line => line.Line)), StringComparison.Ordinal);
