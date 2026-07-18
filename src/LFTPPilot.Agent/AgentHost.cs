@@ -21,6 +21,7 @@ public sealed partial class AgentHost : IAsyncDisposable
     private readonly JobHistoryRecorder? _history;
     private readonly AgentEventHub _events = new();
     private readonly Func<int, bool>? _clientAuthorizer;
+    private readonly AgentIdleExitPolicy _idleExit;
     private readonly Func<Stream, ProtocolEnvelope, CancellationToken, ValueTask> _writeControlResponse =
         static (stream, response, cancellationToken) => FramedJsonStream.WriteAsync(stream, response, cancellationToken);
     private readonly CancellationTokenSource _lifetime = new();
@@ -45,6 +46,7 @@ public sealed partial class AgentHost : IAsyncDisposable
         IMirrorDefinitionStore? mirrorDefinitionStore = null,
         IHistoryStore? historyStore = null)
     {
+        _idleExit = new(HasBackgroundWork, timeProvider);
         _coordinator = new();
         _store = new(statePath);
         _scheduler = new(_coordinator, _store, timeProvider);
@@ -61,7 +63,11 @@ public sealed partial class AgentHost : IAsyncDisposable
                 record => _events.Publish(EngineEventKind.Job, "history.appended", record, record.JobId),
                 PublishHistoryPersistenceFailure);
             _workspace = new(profileStore, secretStore!, hostKeyManager!, processHost!, runtimeProvider!, _coordinator, mirrorPlanner!, workspaceOptions!,
-                (kind, name, payload, jobId, sessionId) => _events.Publish(kind, name, payload, jobId, sessionId),
+                (kind, name, payload, jobId, sessionId) =>
+                {
+                    _events.Publish(kind, name, payload, jobId, sessionId);
+                    if (kind == EngineEventKind.RemoteEdit) _idleExit.BackgroundWorkChanged();
+                },
                 _scheduler,
                 _store,
                 mirrorDefinitionStore,
@@ -100,6 +106,7 @@ public sealed partial class AgentHost : IAsyncDisposable
             if (_workspace is not null)
                 await _workspace.RestoreSessionTabsAsync(state.EffectiveSessionTabs, cancellationToken).ConfigureAwait(false);
 
+            _idleExit.AgentReady();
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
             await Task.WhenAll(AcceptControlClientsAsync(linked.Token), AcceptEventClientsAsync(linked.Token)).ConfigureAwait(false);
         }
@@ -108,6 +115,9 @@ public sealed partial class AgentHost : IAsyncDisposable
             _acceptorsStopped.TrySetResult();
         }
     }
+
+    internal Task WaitForIdleExitAsync(TimeSpan idleDelay, CancellationToken cancellationToken = default) =>
+        _idleExit.WaitForIdleExitAsync(idleDelay, cancellationToken);
 
     public async ValueTask DisposeAsync()
     {
@@ -168,7 +178,7 @@ public sealed partial class AgentHost : IAsyncDisposable
             {
                 await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
                 if (!TryAuthenticateClient(pipe, out var processId)) { pipe.Dispose(); continue; }
-                TrackClient(HandleControlClientAsync(pipe, processId, cancellationToken));
+                TrackClient(HandleControlClientAsync(pipe, processId, cancellationToken), countsAsAppConnection: true);
             }
             catch
             {
@@ -188,7 +198,11 @@ public sealed partial class AgentHost : IAsyncDisposable
             {
                 await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
                 if (!TryAuthenticateClient(pipe, out _)) { pipe.Dispose(); continue; }
-                TrackClient(HandleEventClientAsync(pipe, cancellationToken));
+                // The event stream writes only when an event is published, so a
+                // disconnected reader can remain undetected while the Agent is
+                // quiet. The control stream continuously waits for its next frame
+                // and is the authoritative App-lifetime signal for idle exit.
+                TrackClient(HandleEventClientAsync(pipe, cancellationToken), countsAsAppConnection: false);
             }
             catch
             {
@@ -314,6 +328,7 @@ public sealed partial class AgentHost : IAsyncDisposable
         _events.Publish(EngineEventKind.Job, "job.changed", job, job.Id);
         _history?.Observe(job);
         if (Volatile.Read(ref _jobStateOwned)) _ = PersistJobsAsync();
+        _idleExit.BackgroundWorkChanged();
     }
 
     private async Task PersistJobsAsync()
@@ -348,15 +363,25 @@ public sealed partial class AgentHost : IAsyncDisposable
                 Detail: exception.GetType().Name));
     }
 
-    private void TrackClient(Task task)
+    private void TrackClient(Task task, bool countsAsAppConnection)
     {
-        task = ObserveClientAsync(task);
+        if (countsAsAppConnection) _idleExit.ClientConnected();
+        task = ObserveTrackedClientAsync(task, countsAsAppConnection);
         lock (_clientGate) _clients.Add(task);
         _ = task.ContinueWith(
             completed => { lock (_clientGate) _clients.Remove(completed); },
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    private async Task ObserveTrackedClientAsync(Task task, bool countsAsAppConnection)
+    {
+        try { await ObserveClientAsync(task).ConfigureAwait(false); }
+        finally
+        {
+            if (countsAsAppConnection) _idleExit.ClientDisconnected();
+        }
     }
 
     private async Task ObserveClientAsync(Task task)
@@ -374,6 +399,11 @@ public sealed partial class AgentHost : IAsyncDisposable
                     Detail: exception.GetType().Name));
         }
     }
+
+    private bool HasBackgroundWork() =>
+        _coordinator.GetJobs().Any(static job =>
+            job.State is JobState.Scheduled or JobState.Queued or JobState.Running or JobState.Paused) ||
+        _workspace?.HasActiveRemoteEdits == true;
 
     private static NamedPipeServerStream CreatePipe(string name) => new(
         name,

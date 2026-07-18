@@ -27,6 +27,15 @@ still needs real servers, signed packages, or additional product development.
   Its atomic state writer validates job snapshots at the same boundary as the
   in-memory coordinator, rejects stale asynchronous captures, and completes
   workspace/process cleanup before reporting a shutdown persistence failure.
+- The Agent owns a native notification-area surface while it remains alive.
+  Double-click and Open reactivate the allowlisted Transfers view; its explicit
+  Stop Agent and transfers command performs normal Agent disposal and
+  kill-on-close process-tree cleanup. Explorer restarts re-register the icon,
+  and notification callback failures cannot unwind Agent work. Scheduled jobs,
+  queued or active transfers, paused work, and managed edits suppress idle
+  exit. After the final App disconnects and all such work finishes, the Agent
+  keeps a two-minute recovery window before exiting automatically. The same
+  grace period cleans up an orphaned, idle Agent after workspace restoration.
 - Credential-free session-tab intent persists in the same bounded, atomic
   Agent state. After an Agent restart, tabs return disconnected with stable
   identifiers, ordering, and last local/remote paths; reconnect is an explicit
@@ -138,9 +147,9 @@ still needs real servers, signed packages, or additional product development.
 - Implement SFTP/mixed remote-to-remote client relay with distinct source and
   destination processes so each endpoint retains its own pinned host-key
   configuration.
-- Add the tray surface and idle-exit policy, extend live progress to guarded
-  directory transfers, reviewed mirrors, and remote-to-remote jobs, and wire
-  notifications, taskbar progress, Jump Lists, and support-bundle UI.
+- Extend live progress to guarded directory transfers, reviewed mirrors, and
+  remote-to-remote jobs, and wire notifications, taskbar progress, Jump Lists,
+  and support-bundle UI.
 - Complete outbound Explorer drag/drop for remote files and add richer folder
   transfer controls such as reusable filters and per-tree parallelism.
 - Independently review and stage the exact native and managed third-party
