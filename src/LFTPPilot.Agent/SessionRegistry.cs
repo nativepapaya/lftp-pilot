@@ -10,6 +10,7 @@ public sealed record AgentWorkspaceOptions(
     string TemporaryRoot,
     TimeSpan ConnectTimeout,
     TimeSpan BrowseTimeout,
+    TimeSpan RemoteSearchTimeout,
     TimeSpan TransferTimeout,
     TimeSpan MirrorPreviewTimeout,
     TimeSpan ConsoleTimeout,
@@ -21,6 +22,7 @@ public sealed record AgentWorkspaceOptions(
         temporaryRoot ?? Path.Combine(runtimeHomeRoot, "temporary"),
         TimeSpan.FromSeconds(60),
         TimeSpan.FromSeconds(90),
+        TimeSpan.FromMinutes(2),
         TimeSpan.FromHours(24),
         TimeSpan.FromMinutes(15),
         TimeSpan.FromMinutes(5),
@@ -58,7 +60,7 @@ public sealed class SessionRegistry : IAsyncDisposable
         _options = options;
         if (!Path.IsPathFullyQualified(options.RuntimeHomeRoot) || !Path.IsPathFullyQualified(options.CacheRoot) || !Path.IsPathFullyQualified(options.TemporaryRoot))
             throw new ArgumentException("The Agent runtime, cache, and temporary roots must be fully qualified.", nameof(options));
-        if (options.ConnectTimeout <= TimeSpan.Zero || options.BrowseTimeout <= TimeSpan.Zero || options.TransferTimeout <= TimeSpan.Zero ||
+        if (options.ConnectTimeout <= TimeSpan.Zero || options.BrowseTimeout <= TimeSpan.Zero || options.RemoteSearchTimeout <= TimeSpan.Zero || options.TransferTimeout <= TimeSpan.Zero ||
             options.MirrorPreviewTimeout <= TimeSpan.Zero || options.ConsoleTimeout <= TimeSpan.Zero)
             throw new ArgumentException("Agent operation timeouts must be positive.", nameof(options));
         if (options.TransferQueueParallelism is < 1 or > 8)

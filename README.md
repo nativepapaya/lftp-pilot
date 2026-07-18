@@ -17,6 +17,7 @@ acceptance work.
 ## Product direction
 
 - Native WinUI 3 dual-pane workspace with independent connection tabs
+- Non-modal recursive remote name search isolated from persistent browsing
 - SFTP, FTP, FTPES, implicit FTPS, and plain FTP
 - LFTP queues, parallel transfers, segmented downloads, mirror/reverse mirror,
   bandwidth controls, and remote-to-remote jobs

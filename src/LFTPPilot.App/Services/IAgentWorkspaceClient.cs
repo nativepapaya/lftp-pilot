@@ -24,6 +24,21 @@ public interface IAgentWorkspaceClient : IAsyncDisposable
         Guid? existingSessionId = null);
     Task<bool> DisconnectAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<FileEntry>> BrowseAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default);
+    Task<RemoteSearchPage> StartRemoteSearchAsync(
+        RemoteSearchSpec search,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<RemoteSearchPage>(new NotSupportedException("Recursive remote search is not available through this client."));
+    Task<RemoteSearchPage> GetRemoteSearchAsync(
+        RemoteSearchSpec search,
+        string? continuationToken = null,
+        int pageSize = RemoteSearchPolicy.DefaultPageSize,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<RemoteSearchPage>(new NotSupportedException("Recursive remote search is not available through this client."));
+    Task<bool> CancelRemoteSearchAsync(
+        Guid searchId,
+        Guid sessionId,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<bool>(new NotSupportedException("Recursive remote search is not available through this client."));
     Task<FileMutationResult> CreateDirectoryAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default);
     Task<FileMutationResult> MoveEntryAsync(Guid sessionId, PaneKind pane, string sourcePath, string destinationPath, CancellationToken cancellationToken = default);
     Task<FileMutationResult> DeleteEntriesAsync(Guid sessionId, PaneKind pane, IReadOnlyList<string> paths, bool recursive, bool confirmed, CancellationToken cancellationToken = default);

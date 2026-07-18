@@ -37,6 +37,7 @@
     <Compile Include="..\..\src\LFTPPilot.App\ViewModels\MainWindowViewModel.cs" Link="App\MainWindowViewModel.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\ViewModels\MirrorViewModel.cs" Link="App\MirrorViewModel.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\ViewModels\RemoteEditItemViewModel.cs" Link="App\RemoteEditItemViewModel.cs" />
+    <Compile Include="..\..\src\LFTPPilot.App\ViewModels\RemoteSearchViewModel.cs" Link="App\RemoteSearchViewModel.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\ViewModels\RemoteTransferViewModel.cs" Link="App\RemoteTransferViewModel.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\ViewModels\SessionViewModel.cs" Link="App\SessionViewModel.cs" />
     <Compile Include="..\..\src\LFTPPilot.App\ViewModels\SettingsViewModel.cs" Link="App\SettingsViewModel.cs" />

@@ -7,6 +7,8 @@ using LFTPPilot.Windows.Shell;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 
 namespace LFTPPilot.App.Views.Controls;
 
@@ -16,6 +18,39 @@ public sealed partial class SessionWorkspaceView : UserControl
         "The Agent must remain running until this time and completion. If Windows restarts or the Agent is explicitly exited, the job is marked missed and will not run late.";
 
     public SessionWorkspaceView() => InitializeComponent();
+
+    private void RemoteSearch_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not SessionViewModel viewModel) return;
+        viewModel.Search.Open();
+        DispatcherQueue.TryEnqueue(() => RemoteSearchQuery.Focus(FocusState.Keyboard));
+    }
+
+    private void RemoteSearchQuery_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (DataContext is not SessionViewModel viewModel) return;
+        if (e.Key == VirtualKey.Enter && viewModel.Search.SearchCommand.CanExecute(null))
+        {
+            viewModel.Search.SearchCommand.Execute(null);
+            e.Handled = true;
+        }
+        else if (e.Key == VirtualKey.Escape)
+        {
+            if (viewModel.Search.IsSearching && viewModel.Search.CancelCommand.CanExecute(null))
+                viewModel.Search.CancelCommand.Execute(null);
+            else if (viewModel.Search.CloseCommand.CanExecute(null))
+                viewModel.Search.CloseCommand.Execute(null);
+            e.Handled = true;
+        }
+    }
+
+    private void RemoteSearchResults_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (DataContext is not SessionViewModel viewModel ||
+            !viewModel.Search.OpenLocationCommand.CanExecute(null)) return;
+        viewModel.Search.OpenLocationCommand.Execute(null);
+        e.Handled = true;
+    }
 
     private void LocalPane_TransferRequested(object? sender, EventArgs e)
     {

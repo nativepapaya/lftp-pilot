@@ -14,6 +14,9 @@ public static class WorkspaceMethods
     public const string SessionDisconnect = "sessions.disconnect";
     public const string BrowseLocal = "browse.local";
     public const string BrowseRemote = "browse.remote";
+    public const string RemoteSearchStart = "remoteSearch.start";
+    public const string RemoteSearchGet = "remoteSearch.get";
+    public const string RemoteSearchCancel = "remoteSearch.cancel";
     public const string FileCreateDirectory = "files.createDirectory";
     public const string FileMove = "files.move";
     public const string FileDelete = "files.delete";
@@ -74,6 +77,13 @@ public sealed record BrowseResult(
     ImmutableArray<FileEntry> Entries,
     string? ContinuationToken = null,
     int TotalCount = 0);
+public sealed record RemoteSearchStartRequest(RemoteSearchSpec Search);
+public sealed record RemoteSearchGetRequest(
+    Guid SearchId,
+    Guid SessionId,
+    string? ContinuationToken = null,
+    int PageSize = RemoteSearchPolicy.DefaultPageSize);
+public sealed record RemoteSearchCancelRequest(Guid SearchId, Guid SessionId);
 public sealed record CreateDirectoryRequest(PaneKind Kind, string Path, Guid? SessionId = null);
 public sealed record MoveEntryRequest(
     PaneKind Kind,

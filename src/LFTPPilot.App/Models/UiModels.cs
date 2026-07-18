@@ -33,6 +33,22 @@ public sealed record MirrorUiPreview(
     MirrorDefinition Definition,
     MirrorPreview Preview);
 
+public sealed record RemoteSearchResultItem(RemoteSearchMatch Match)
+{
+    public string Name => Match.Name;
+    public string FullPath => Match.FullPath;
+    public string ContainingPath
+    {
+        get
+        {
+            var separator = FullPath.LastIndexOf('/');
+            return separator <= 0 ? "/" : FullPath[..separator];
+        }
+    }
+    public string KindDisplay => Match.IsDirectory ? "Folder" : "Remote item";
+    public string Glyph => Match.IsDirectory ? "\uE8B7" : "\uE7C3";
+}
+
 public sealed record TransferUiOptions(
     TransferMode Mode,
     int DownloadSegments,

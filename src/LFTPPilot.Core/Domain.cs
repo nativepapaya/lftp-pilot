@@ -29,6 +29,8 @@ public enum TransferMode { Auto, Resume, Overwrite, Skip }
 public enum MirrorDirection { Download, Upload }
 public enum MirrorActionKind { Download, Upload, CreateDirectory, DeleteFile, DeleteDirectory, UpdateMetadata, Other }
 public enum RemoteTransferMode { Fxp, ClientRelay }
+public enum RemoteSearchState { Queued, Running, Completed, Cancelled, Failed }
+public enum RemoteSearchEntryKind { Directory, Other }
 public enum RemoteEditReviewState { ReadyToUpload, Conflict }
 public enum RemoteEditConflictKind { None, RemoteChanged, RemoteMissingOrRenamed, RemoteIdentityUnavailable, LocalMissingOrRenamed, LocalChanged, LocalTooLarge, ManagedCacheLimitExceeded }
 public enum RemoteEditResolution { Upload, RefreshLocal, Overwrite }
@@ -153,6 +155,38 @@ public sealed record FileEntry(
     string? LinkTarget = null)
 {
     public bool IsDirectory => Kind == EntryKind.Directory;
+}
+
+public sealed record RemoteSearchSpec(
+    Guid SearchId,
+    Guid SessionId,
+    string Root,
+    string Query,
+    int MaxDepth = RemoteSearchPolicy.DefaultMaxDepth,
+    bool MatchCase = false);
+
+public sealed record RemoteSearchMatch(
+    string Name,
+    string FullPath,
+    RemoteSearchEntryKind Kind)
+{
+    public bool IsDirectory => Kind == RemoteSearchEntryKind.Directory;
+}
+
+public sealed record RemoteSearchPage(
+    RemoteSearchSpec Search,
+    RemoteSearchState State,
+    ImmutableArray<RemoteSearchMatch> Matches,
+    string? ContinuationToken,
+    int? TotalMatches,
+    int ScannedEntries,
+    bool WasLimited,
+    DateTimeOffset StartedAt,
+    DateTimeOffset UpdatedAt,
+    EngineError? Error = null)
+{
+    public ImmutableArray<RemoteSearchMatch> Matches { get; init; } = Matches.IsDefault ? [] : Matches;
+    public ImmutableArray<RemoteSearchMatch> EffectiveMatches => Matches;
 }
 
 public sealed record TransferPlan(

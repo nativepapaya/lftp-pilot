@@ -888,6 +888,44 @@ public sealed class WorkspaceTests
         Assert.Null(await fixture.HostKeys.GetAsync(binding, TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task SessionRemovalWinsAgainstSearchQueuedBehindItsStateCommit()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        var session = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+        var gateField = typeof(AgentWorkspaceService).GetField(
+            "_sessionStateGate",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The session-state admission gate was not found.");
+        var gate = Assert.IsType<SemaphoreSlim>(gateField.GetValue(fixture.Service));
+        await gate.WaitAsync(TestContext.Current.CancellationToken);
+        Task<bool>? disconnect = null;
+        Task<RemoteSearchPage>? start = null;
+        try
+        {
+            disconnect = fixture.Service.DisconnectAsync(
+                new(session.SessionId), TestContext.Current.CancellationToken);
+            Assert.False(disconnect.IsCompleted);
+            start = fixture.Service.StartRemoteSearchAsync(
+                new(new(Guid.NewGuid(), session.SessionId, "/remote", "file")),
+                TestContext.Current.CancellationToken);
+            Assert.False(start.IsCompleted);
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        Assert.True(await disconnect!);
+        var rejected = await Assert.ThrowsAsync<InvalidOperationException>(() => start!);
+        Assert.Contains("closing", rejected.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(fixture.ProcessHost.Starts,
+            item => item.Tag.StartsWith("remote-search-", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

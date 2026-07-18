@@ -262,6 +262,74 @@ public sealed class CoreValidationTests
         Assert.Contains(exception.Issues, issue => issue.Field == "mode" && issue.Code == "unsupported");
     }
 
+    [Fact]
+    public void RemoteSearchValidationAcceptsUnicodeLiteralQueriesAndSharedDefaults()
+    {
+        var search = new RemoteSearchSpec(Guid.NewGuid(), Guid.NewGuid(), "/srv/曲 folder", " [final]*\t曲 ");
+
+        RemoteSearchPolicy.Validate(search);
+
+        Assert.Equal(32, search.MaxDepth);
+        var page = new RemoteSearchGetRequest(search.SearchId, search.SessionId);
+        RemoteSearchPolicy.ValidatePageRequest(page);
+        Assert.Equal(256, page.PageSize);
+    }
+
+    [Fact]
+    public void RemoteSearchValidationReportsEveryInvalidSpecField()
+    {
+        var exception = Assert.Throws<ModelValidationException>(() => RemoteSearchPolicy.Validate(
+            new RemoteSearchSpec(Guid.Empty, Guid.Empty, "/safe/../escape", "bad\nquery", 129)));
+
+        Assert.Contains(exception.Issues, issue => issue.Field == "searchId" && issue.Code == "required");
+        Assert.Contains(exception.Issues, issue => issue.Field == "sessionId" && issue.Code == "required");
+        Assert.Contains(exception.Issues, issue => issue.Field == "root" && issue.Code == "absolute");
+        Assert.Contains(exception.Issues, issue => issue.Field == "query" && issue.Code == "control-character");
+        Assert.Contains(exception.Issues, issue => issue.Field == "maxDepth" && issue.Code == "range");
+    }
+
+    [Fact]
+    public void RemoteSearchValidationRejectsBlankAndOversizedQueries()
+    {
+        var search = new RemoteSearchSpec(Guid.NewGuid(), Guid.NewGuid(), "/", " ");
+        var blank = Assert.Throws<ModelValidationException>(() => RemoteSearchPolicy.Validate(search));
+        Assert.Contains(blank.Issues, issue => issue.Field == "query" && issue.Code == "required");
+
+        var oversized = Assert.Throws<ModelValidationException>(() => RemoteSearchPolicy.Validate(
+            search with { Query = new string('q', RemoteSearchPolicy.MaximumQueryCharacters + 1) }));
+        Assert.Contains(oversized.Issues, issue => issue.Field == "query" && issue.Code == "length");
+    }
+
+    [Fact]
+    public void RemoteSearchPagingAndCancellationRequireBoundedIdentifiersAndTokens()
+    {
+        var searchId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        RemoteSearchPolicy.ValidatePageRequest(new(searchId, sessionId, "next-page", RemoteSearchPolicy.MaximumPageSize));
+        RemoteSearchPolicy.ValidateCancelRequest(new(searchId, sessionId));
+
+        Assert.Throws<ArgumentException>(() => RemoteSearchPolicy.ValidatePageRequest(new(Guid.Empty, sessionId)));
+        Assert.Throws<ArgumentException>(() => RemoteSearchPolicy.ValidatePageRequest(new(searchId, Guid.Empty)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => RemoteSearchPolicy.ValidatePageRequest(new(searchId, sessionId, PageSize: 0)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => RemoteSearchPolicy.ValidatePageRequest(
+            new(searchId, sessionId, PageSize: RemoteSearchPolicy.MaximumPageSize + 1)));
+        Assert.Throws<ArgumentException>(() => RemoteSearchPolicy.ValidatePageRequest(
+            new(searchId, sessionId, new string('t', RemoteSearchPolicy.MaximumContinuationTokenCharacters + 1))));
+        Assert.Throws<ArgumentException>(() => RemoteSearchPolicy.ValidatePageRequest(new(searchId, sessionId, "bad\ntoken")));
+        Assert.Throws<ArgumentException>(() => RemoteSearchPolicy.ValidateCancelRequest(new(Guid.Empty, sessionId)));
+    }
+
+    [Fact]
+    public void RemoteSearchMatchingIsLiteralAndRootChecksAreSegmentBounded()
+    {
+        Assert.True(RemoteSearchPolicy.MatchesName("Report [final]*.TXT", "[FINAL]*", matchCase: false));
+        Assert.False(RemoteSearchPolicy.MatchesName("Report [final]*.TXT", "[FINAL]*", matchCase: true));
+        Assert.True(RemoteSearchPolicy.IsWithinRoot("/srv/root", "/srv/root/child"));
+        Assert.False(RemoteSearchPolicy.IsWithinRoot("/srv/root", "/srv/rooted/child"));
+        Assert.False(RemoteSearchPolicy.IsWithinRoot("/srv/root", "/SRV/root/child"));
+        Assert.True(RemoteSearchPolicy.IsWithinRoot("/", "/anywhere"));
+    }
+
     [Theory]
     [InlineData("! calc")]
     [InlineData("cat x | sh")]

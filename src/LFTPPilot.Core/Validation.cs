@@ -309,6 +309,89 @@ public static class MirrorDefinitionPolicy
     public const long MaximumRateLimitBytesPerSecond = 1_000_000_000_000;
 }
 
+public static class RemoteSearchPolicy
+{
+    public const int DefaultMaxDepth = 32;
+    public const int MaximumMaxDepth = 128;
+    public const int MaximumQueryCharacters = 256;
+    public const int MaximumPathCharacters = 4096;
+    public const int MaximumOutputLineCharacters = MaximumPathCharacters + 1;
+    public const int MaximumOutputLines = 100_000;
+    public const int MaximumOutputBytes = 16 * 1024 * 1024;
+    public const int MaximumMatches = 5_000;
+    public const int MaximumStoredMatchBytes = 2 * 1024 * 1024;
+    public const int DefaultPageSize = 256;
+    public const int MaximumPageSize = 512;
+    public const int MaximumPageBytes = 512 * 1024;
+    public const int MaximumContinuationTokenCharacters = 96;
+
+    public static void Validate(RemoteSearchSpec search)
+    {
+        ArgumentNullException.ThrowIfNull(search);
+        var issues = new List<ValidationIssue>();
+        if (search.SearchId == Guid.Empty)
+            issues.Add(new("searchId", "required", "The remote-search identifier cannot be empty."));
+        if (search.SessionId == Guid.Empty)
+            issues.Add(new("sessionId", "required", "The remote-search session identifier cannot be empty."));
+        if (!ProfileValidator.IsCanonicalRemotePath(search.Root))
+            issues.Add(new("root", "absolute", "The remote-search root must be a bounded canonical absolute path."));
+        if (string.IsNullOrWhiteSpace(search.Query))
+            issues.Add(new("query", "required", "Enter a remote file or folder name to search for."));
+        else
+        {
+            if (search.Query.Length > MaximumQueryCharacters)
+                issues.Add(new("query", "length", $"The remote-search query cannot exceed {MaximumQueryCharacters} characters."));
+            if (ProfileValidator.ContainsProtocolControl(search.Query))
+                issues.Add(new("query", "control-character", "The remote-search query contains a prohibited control character."));
+        }
+        if (search.MaxDepth is < 1 or > MaximumMaxDepth)
+            issues.Add(new("maxDepth", "range", $"Remote-search depth must be between 1 and {MaximumMaxDepth}."));
+        if (issues.Count != 0) throw new ModelValidationException(issues);
+    }
+
+    public static void ValidatePageRequest(RemoteSearchGetRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateIdentifiers(request.SearchId, request.SessionId);
+        if (request.PageSize is < 1 or > MaximumPageSize)
+            throw new ArgumentOutOfRangeException(nameof(request), $"Remote-search pages must contain between 1 and {MaximumPageSize} matches.");
+        if (request.ContinuationToken is { Length: > MaximumContinuationTokenCharacters } ||
+            request.ContinuationToken is not null && ProfileValidator.ContainsProtocolControl(request.ContinuationToken))
+        {
+            throw new ArgumentException("The remote-search continuation token is invalid.", nameof(request));
+        }
+    }
+
+    public static void ValidateCancelRequest(RemoteSearchCancelRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateIdentifiers(request.SearchId, request.SessionId);
+    }
+
+    public static bool IsWithinRoot(string root, string path)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        ArgumentNullException.ThrowIfNull(path);
+        return string.Equals(root, path, StringComparison.Ordinal) ||
+            (root == "/"
+                ? path.StartsWith("/", StringComparison.Ordinal)
+                : path.StartsWith(root + "/", StringComparison.Ordinal));
+    }
+
+    public static bool MatchesName(string name, string query, bool matchCase)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(query);
+        return name.Contains(query, matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void ValidateIdentifiers(Guid searchId, Guid sessionId)
+    {
+        if (searchId == Guid.Empty) throw new ArgumentException("A remote-search identifier is required.", nameof(searchId));
+        if (sessionId == Guid.Empty) throw new ArgumentException("A remote-search session identifier is required.", nameof(sessionId));
+    }
+}
+
 public sealed record ConsolePolicyDecision(bool Allowed, string? Reason = null);
 
 public static class SafeConsolePolicy

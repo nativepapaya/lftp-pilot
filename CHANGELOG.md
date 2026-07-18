@@ -61,6 +61,11 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   the App in an unresolved state.
 - Native LFTP transfer queues, segmented downloads, rate controls, safe mirror
   previews/execution, cancellation, and run-once transfer scheduling.
+- Per-session non-modal recursive remote name search with depth and case
+  controls, literal Unicode basename matching, cancellable isolated LFTP
+  processes, bounded snapshot paging, and fresh navigation from results.
+  Search output is root-contained and fail-closed; delayed `find` output never
+  shares the persistent browse session.
 - Reusable package-scoped mirror definitions with native save/select/edit/delete
   controls, bounded validated persistence, profile-aware cleanup, and
   lost-reply reconciliation. Durable definitions never contain preview output,

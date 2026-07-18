@@ -271,6 +271,36 @@ public sealed class CommandBuilderTests
         Assert.Equal("rm -r \"/tree\"", LftpCommandBuilder.BuildDelete("/tree", isDirectory: true, recursive: true));
     }
 
+    [Fact]
+    public void RemoteSearchUsesOnlyTheLockedBoundedFindCommand()
+    {
+        var command = LftpCommandBuilder.BuildRemoteFind("/srv/remote \"folder\"; ! literal", 32);
+
+        Assert.Equal("command find -d 32 \"/srv/remote \\\"folder\\\"; ! literal\"", command);
+        Assert.DoesNotContain("--script", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("redirect", command, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("relative")]
+    [InlineData("/safe/")]
+    [InlineData("/safe/../escape")]
+    [InlineData("/safe//ambiguous")]
+    [InlineData("/safe\nquit")]
+    public void RemoteSearchRejectsNonCanonicalRoots(string root)
+    {
+        Assert.Throws<ArgumentException>(() => LftpCommandBuilder.BuildRemoteFind(root, 1));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(129)]
+    public void RemoteSearchRejectsDepthOutsideTheSharedPolicy(int maxDepth)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => LftpCommandBuilder.BuildRemoteFind("/safe", maxDepth));
+    }
+
     private static void AssertGuardedDirectoryMirrorCommand(string command)
     {
         Assert.Contains("--no-symlinks", command, StringComparison.Ordinal);

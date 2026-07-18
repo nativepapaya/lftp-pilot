@@ -10,6 +10,39 @@ namespace LFTPPilot.Tests;
 public sealed class ProtocolTests
 {
     [Fact]
+    public void RemoteSearchContractsRoundTripOnProtocolVersionSeven()
+    {
+        var startedAt = new DateTimeOffset(2026, 7, 16, 12, 30, 0, TimeSpan.Zero);
+        var search = new RemoteSearchSpec(Guid.NewGuid(), Guid.NewGuid(), "/srv/曲 folder", "[final]*", 12, true);
+        var page = new RemoteSearchPage(
+            search,
+            RemoteSearchState.Completed,
+            [new("Report [final]*.txt", "/srv/曲 folder/Report [final]*.txt", RemoteSearchEntryKind.Other)],
+            "next-page",
+            1,
+            42,
+            false,
+            startedAt,
+            startedAt.AddSeconds(1));
+
+        var json = JsonSerializer.Serialize(page, FramedJsonStream.SerializerOptions);
+        var actual = JsonSerializer.Deserialize<RemoteSearchPage>(json, FramedJsonStream.SerializerOptions);
+
+        Assert.Equal(7, AgentProtocol.CurrentVersion);
+        Assert.Equal("remoteSearch.start", WorkspaceMethods.RemoteSearchStart);
+        Assert.Equal("remoteSearch.get", WorkspaceMethods.RemoteSearchGet);
+        Assert.Equal("remoteSearch.cancel", WorkspaceMethods.RemoteSearchCancel);
+        Assert.NotNull(actual);
+        Assert.Equal(search, actual.Search);
+        Assert.Equal(RemoteSearchState.Completed, actual.State);
+        var match = Assert.Single(actual.EffectiveMatches);
+        Assert.Equal("Report [final]*.txt", match.Name);
+        Assert.Equal(RemoteSearchEntryKind.Other, match.Kind);
+        Assert.Equal(42, actual.ScannedEntries);
+        Assert.Equal("next-page", actual.ContinuationToken);
+    }
+
+    [Fact]
     public async Task FramedJsonRoundTripsAcrossFragmentedReads()
     {
         var payload = JsonSerializer.SerializeToElement(new { message = "曲.txt", value = 42 });
