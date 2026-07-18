@@ -689,7 +689,7 @@ public sealed class SessionRegistry : IAsyncDisposable
         {
             var open = LftpCommandBuilder.BuildOpen(
                 profile,
-                profile.Authentication == AuthenticationKind.SshKey ? null : credential,
+                credential,
                 trustedHost?.KnownHostsPath,
                 trustedHost?.HostKeyAlias);
             var initialized = await process.ExecuteAsync($"{CommonSettings}; {open}", _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);
@@ -770,7 +770,7 @@ public sealed class SessionRegistry : IAsyncDisposable
         }
         var open = LftpCommandBuilder.BuildOpen(
             profile,
-            profile.Authentication == AuthenticationKind.SshKey ? null : credential,
+            credential,
             trustedHost?.KnownHostsPath,
             trustedHost?.HostKeyAlias);
         var initialized = await process.ExecuteAsync(open, _options.ConnectTimeout, cancellationToken).ConfigureAwait(false);

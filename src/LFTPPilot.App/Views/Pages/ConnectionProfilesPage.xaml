@@ -87,9 +87,9 @@
                             <TextBox Header="OpenSSH private key" Text="{Binding SshKeyPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="C:\Users\you\.ssh\id_ed25519" />
                             <Button Grid.Column="1" Content="Browse…" Click="SshKeyBrowse_Click" VerticalAlignment="Bottom" />
                         </Grid>
-                        <PasswordBox x:Name="CredentialBox" Header="Password or ask-on-connect credential" PasswordChanged="Credential_PasswordChanged" AutomationProperties.Name="Connection credential" Visibility="{Binding IsCredentialAuthentication, Converter={StaticResource BoolToVisibilityConverter}}" />
-                        <CheckBox Content="Remember password securely for password authentication" IsChecked="{Binding RememberCredential, Mode=TwoWay}" Visibility="{Binding CanRememberCredential, Converter={StaticResource BoolToVisibilityConverter}}" />
-                        <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Message="Credentials remain in this window until any required SFTP host-key review succeeds. Remembered passwords are then stored by the Agent with profile-bound DPAPI protection." />
+                        <PasswordBox x:Name="CredentialBox" Header="{Binding CredentialHeader}" PasswordChanged="Credential_PasswordChanged" AutomationProperties.Name="Connection credential" Visibility="{Binding IsCredentialAuthentication, Converter={StaticResource BoolToVisibilityConverter}}" />
+                        <CheckBox Content="{Binding RememberCredentialLabel}" IsChecked="{Binding RememberCredential, Mode=TwoWay}" Visibility="{Binding CanRememberCredential, Converter={StaticResource BoolToVisibilityConverter}}" />
+                        <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Message="Credentials remain in this window until any required SFTP host-key review succeeds. Remembered passwords and private-key passphrases are then stored by the Agent with profile-bound DPAPI protection." />
                         <TextBlock Text="A profile cannot be deleted while one of its sessions owns an active managed edit. Use Active edits from the main toolbar to review or finish it first." Style="{ThemeResource CaptionTextBlockStyle}" TextWrapping="Wrap" Opacity="0.72" />
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <Button Content="Connect selected" Command="{Binding ConnectCommand}" />

@@ -56,7 +56,16 @@ still needs real servers, signed packages, or additional product development.
   `known_hosts` file with `StrictHostKeyChecking=yes`, while LFTP automatic host
   confirmation and OpenSSH global trust/update sources are disabled.
   Changed-key replacement requires explicit review and no active or scheduled
-  dependent work.
+  dependent work. The controlled SSH lab verifies first-use enrollment,
+  unchanged trust, a live host-key rotation on the same endpoint, explicit
+  replacement, and the restored trusted state through the packaged
+  `ssh.exe` probe.
+- SFTP key authentication supports both unencrypted and encrypted OpenSSH
+  private keys. Optional passphrases travel through LFTP's in-memory credential
+  channel, are included in output redaction, never enter process arguments or
+  environment variables, and may be stored with the same identity-bound DPAPI
+  protection as passwords. The real-runtime lab exercises browse, mutation,
+  queued upload, and segmented download with both key forms.
 - Authenticated packaged LFTP/MSYS2 runtime execution from a read-only MSIX,
   with an exact file inventory, `--norc`, isolated homes/caches, secret
   redaction, and no credential-bearing process arguments.
@@ -145,12 +154,9 @@ still needs real servers, signed packages, or additional product development.
 
 - Complete the controlled matrix for interrupted resume, failed-transfer
   retry, active cancellation, FTP-to-FTP FXP/client-relay routing, and the
-  remaining SSH-key authentication modes. Password authentication, Unicode
-  browse/mutation, TLS, upload, and segmented download already pass on every
-  supported protocol.
-- Exercise first-use, unchanged, and rotating SFTP host keys against the
-  controlled SSH server matrix. Encrypted private-key passphrase support also
-  remains required.
+  remaining routing cases. Password authentication, both SSH-key modes,
+  Unicode browse/mutation, TLS, upload, and segmented download already pass on
+  every applicable supported protocol.
 - Exercise managed-cache editing, concurrent target changes, staging promotion,
   rollback recovery, and the trusted Notepad boundary against the controlled
   SFTP and FTP-family server matrix.

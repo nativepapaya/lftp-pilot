@@ -1092,6 +1092,73 @@ public sealed class WorkspaceTests
         Assert.Empty(fixture.Secrets.Values);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SshKeyPassphraseUsesRedactedEphemeralOrPersistedCredentialChannel(bool persist)
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.PasswordProfile() with
+        {
+            Authentication = AuthenticationKind.SshKey,
+            SshKeyPath = @"C:\Keys\encrypted_ed25519",
+        };
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        if (persist)
+            await fixture.Service.SaveProfileAsync(new(profile, "private-key-passphrase"), TestContext.Current.CancellationToken);
+
+        _ = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile), persist ? null : "private-key-passphrase"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(persist ? 1 : 0, fixture.Secrets.Values.Count);
+        Assert.Contains("private-key-passphrase", Assert.Single(fixture.ProcessHost.Starts).Secrets!);
+        Assert.Contains(fixture.ProcessHost.Commands, command =>
+            command.Contains("open --user \"alice\" --password \"private-key-passphrase\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task UnencryptedSshKeyStillConnectsWithoutStoredOrEphemeralPassphrase()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.PasswordProfile() with
+        {
+            Authentication = AuthenticationKind.SshKey,
+            SshKeyPath = @"C:\Keys\unencrypted_ed25519",
+        };
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+
+        _ = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
+
+        Assert.Empty(fixture.Secrets.Values);
+        Assert.Empty(Assert.Single(fixture.ProcessHost.Starts).Secrets!);
+        Assert.Contains(fixture.ProcessHost.Commands, command => command.Contains("--password \"\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ChangingSshKeyPathInvalidatesItsBoundStoredPassphrase()
+    {
+        await using var fixture = new WorkspaceFixture();
+        var profile = fixture.PasswordProfile() with
+        {
+            Authentication = AuthenticationKind.SshKey,
+            SshKeyPath = @"C:\Keys\first_ed25519",
+        };
+        await fixture.Service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
+        await fixture.Service.SaveProfileAsync(
+            new(profile, "first-key-passphrase"), TestContext.Current.CancellationToken);
+        Assert.Single(fixture.Secrets.Values);
+
+        var changed = profile with { SshKeyPath = @"C:\Keys\replacement_ed25519" };
+        await fixture.Service.SaveProfileAsync(new(changed), TestContext.Current.CancellationToken);
+
+        Assert.Empty(fixture.Secrets.Values);
+        _ = await fixture.Service.ConnectAsync(
+            new(ConnectionIdentity.FromProfile(changed)), TestContext.Current.CancellationToken);
+        Assert.Empty(Assert.Single(fixture.ProcessHost.Starts).Secrets!);
+    }
+
     [Fact]
     public async Task LocalAndRemoteBrowsingReturnTypedSortedEntries()
     {

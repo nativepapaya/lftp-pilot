@@ -301,6 +301,7 @@ class RootedSftpServer(paramiko.SFTPServerInterface):
 class SftpEndpoint:
     def __init__(self, root: pathlib.Path, identity_root: pathlib.Path) -> None:
         self._root = root
+        self._host_key_lock = threading.Lock()
         self._host_key = paramiko.RSAKey.generate(2048)
         self._client_key = paramiko.RSAKey.generate(2048)
         self.client_key_path = identity_root / "sftp-client-key"
@@ -320,16 +321,23 @@ class SftpEndpoint:
 
     @property
     def host_key_algorithm(self) -> str:
-        return self._host_key.get_name()
+        with self._host_key_lock:
+            return self._host_key.get_name()
 
     @property
     def host_key_base64(self) -> str:
-        return self._host_key.get_base64()
+        with self._host_key_lock:
+            return self._host_key.get_base64()
 
     @property
     def host_key_fingerprint(self) -> str:
         digest = hashlib.sha256(base64.b64decode(self.host_key_base64)).digest()
         return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+    def rotate_host_key(self) -> None:
+        replacement = paramiko.RSAKey.generate(2048)
+        with self._host_key_lock:
+            self._host_key = replacement
 
     def start(self) -> None:
         self._thread.start()
@@ -349,7 +357,9 @@ class SftpEndpoint:
         with self._lock:
             self._transports.append(transport)
         try:
-            transport.add_server_key(self._host_key)
+            with self._host_key_lock:
+                host_key = self._host_key
+            transport.add_server_key(host_key)
             transport.set_subsystem_handler(
                 "sftp", paramiko.SFTPServer, RootedSftpServer, root=str(self._root)
             )
@@ -403,6 +413,8 @@ def main() -> int:
     for endpoint in endpoints:
         endpoint.start()
 
+    rotate_host_key_path = root / "rotate-sftp-host-key"
+    host_key_generation = 1
     configuration = {
         "host": "127.0.0.1",
         "username": LAB_USER,
@@ -416,6 +428,8 @@ def main() -> int:
         "sftp_host_key_algorithm": sftp.host_key_algorithm,
         "sftp_host_key_base64": sftp.host_key_base64,
         "sftp_host_key_fingerprint": sftp.host_key_fingerprint,
+        "sftp_host_key_generation": host_key_generation,
+        "sftp_rotate_host_key_path": str(rotate_host_key_path),
         "endpoints": {
             "ftp": endpoints[0].port,
             "ftp_opportunistic_tls": endpoints[1].port,
@@ -424,14 +438,28 @@ def main() -> int:
             "sftp": sftp.port,
         },
     }
+    def write_configuration() -> None:
+        temporary = arguments.config.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(configuration, indent=2), encoding="utf-8")
+        os.replace(temporary, arguments.config)
+
     arguments.config.parent.mkdir(parents=True, exist_ok=True)
-    arguments.config.write_text(json.dumps(configuration, indent=2), encoding="utf-8")
+    write_configuration()
     print(f"READY {arguments.config}", flush=True)
     try:
         if arguments.stop_file is None:
             sys.stdin.readline()
         else:
             while not arguments.stop_file.exists():
+                if rotate_host_key_path.exists():
+                    rotate_host_key_path.unlink()
+                    sftp.rotate_host_key()
+                    host_key_generation += 1
+                    configuration["sftp_host_key_algorithm"] = sftp.host_key_algorithm
+                    configuration["sftp_host_key_base64"] = sftp.host_key_base64
+                    configuration["sftp_host_key_fingerprint"] = sftp.host_key_fingerprint
+                    configuration["sftp_host_key_generation"] = host_key_generation
+                    write_configuration()
                 time.sleep(0.1)
     finally:
         for endpoint in reversed(endpoints):

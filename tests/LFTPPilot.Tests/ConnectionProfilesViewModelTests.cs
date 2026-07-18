@@ -185,6 +185,32 @@ public sealed class ConnectionProfilesViewModelTests
     }
 
     [Fact]
+    public async Task EncryptedSshKeyPassphraseCanBeRememberedAfterHostTrust()
+    {
+        var profile = Profile() with
+        {
+            Authentication = AuthenticationKind.SshKey,
+            SshKeyPath = @"C:\Keys\encrypted_ed25519",
+        };
+        var agent = new RecordingAgent(new(SftpHostKeyState.Trusted));
+        var viewModel = ViewModel(agent, profile);
+        viewModel.RememberCredential = true;
+        viewModel.Credential = "remember-key-passphrase";
+
+        Assert.True(viewModel.IsCredentialAuthentication);
+        Assert.True(viewModel.CanRememberCredential);
+        Assert.Contains("passphrase", viewModel.CredentialHeader, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("passphrase", viewModel.RememberCredentialLabel, StringComparison.OrdinalIgnoreCase);
+
+        viewModel.ConnectCommand.Execute(null);
+        await WaitUntilAsync(() => agent.ConnectCredentials.Count == 1);
+
+        Assert.Equal(["remember-key-passphrase"], agent.SavedCredentials);
+        Assert.Equal([null], agent.ConnectCredentials);
+        Assert.Empty(viewModel.Credential);
+    }
+
+    [Fact]
     public async Task CancelledConnectAfterDispatchReportsUnknownOutcomeAndRequestsRefresh()
     {
         var profile = Profile(ConnectionProtocol.Ftp);
@@ -466,7 +492,7 @@ public sealed class ConnectionProfilesViewModelTests
         public async Task<SftpHostKeyInspection> InspectSftpHostKeyAsync(ConnectionProfile profile, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Assert.Equal(inspection.Review?.ProfileId, profile.Id);
+            if (inspection.Review is { } review) Assert.Equal(review.ProfileId, profile.Id);
             if (DelayInspection)
             {
                 InspectionStarted.TrySetResult(true);

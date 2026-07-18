@@ -81,7 +81,11 @@ public static class LftpCommandBuilder
         var open = profile.Authentication switch
         {
             AuthenticationKind.Anonymous => $"open {Quote(endpoint)}",
-            AuthenticationKind.SshKey => $"open --user {Quote(profile.UserName)} {Quote(endpoint)}",
+            // LFTP 4.9.3 calls GetPass before launching its configured OpenSSH
+            // program unless the password field is initialized. An explicit
+            // empty value lets an unencrypted -i key authenticate without a
+            // terminal prompt; encrypted keys receive their real passphrase.
+            AuthenticationKind.SshKey => $"open --user {Quote(profile.UserName)} --password {Quote(secret ?? string.Empty)} {Quote(endpoint)}",
             _ => $"open --user {Quote(profile.UserName)} --password {Quote(secret!)} {Quote(endpoint)}",
         };
         commands.Add(open);

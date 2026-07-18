@@ -2,8 +2,10 @@
 
 This test-only lab creates five disposable loopback servers for the real LFTP
 acceptance matrix: FTP, opportunistic FTP TLS, explicit FTPS, implicit FTPS,
-and SFTP. It never installs or enables a Windows service and never listens on a
-non-loopback interface.
+and SFTP. The SFTP endpoint supplies unencrypted and passphrase-encrypted
+client keys and can rotate its host key in place so enrollment, unchanged
+trust, and replacement are tested against one endpoint. The lab never installs
+or enables a Windows service and never listens on a non-loopback interface.
 
 `build/Test-ProtocolMatrix.ps1` creates an ignored Python virtual environment,
 installs the exact versions in `requirements.txt`, launches the lab, and runs

@@ -9,6 +9,13 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Added
 
+- SFTP profiles now support unencrypted and passphrase-encrypted OpenSSH
+  private keys. Passphrases use LFTP's redacted in-memory credential channel,
+  never process arguments or environment variables, and can optionally use
+  profile/endpoint/user/key-bound DPAPI storage. The connection UI labels and
+  remembers key passphrases separately from passwords, and the controlled
+  runtime matrix covers both key forms plus first-use, unchanged, and rotating
+  host-key trust.
 - A disposable, repository-contained controlled protocol lab now runs the real
   Agent, Engine, and packaged LFTP runtime against loopback FTP, opportunistic
   FTP TLS, FTPES, implicit FTPS, and SFTP servers. It verifies password

@@ -39,16 +39,29 @@ public sealed class CommandBuilderTests
     }
 
     [Fact]
-    public void SshKeyOpenUsesUserWithoutAnEmptyPasswordOption()
+    public void UnencryptedSshKeyInitializesEmptyLftpCredentialWithoutInventingASecret()
     {
         var profile = new ConnectionProfile(
             Guid.NewGuid(), "Key", ConnectionProtocol.Sftp, "example.test", 22, "alice", AuthenticationKind.SshKey,
             SshKeyPath: @"C:\Keys\id_ed25519");
 
         var command = LftpCommandBuilder.BuildOpen(profile, trustedKnownHostsPath: KnownHostsPath, hostKeyAlias: HostKeyAlias);
-        Assert.Contains("open --user \"alice\" \"sftp://example.test:22\"", command, StringComparison.Ordinal);
-        Assert.DoesNotContain("--password", command, StringComparison.Ordinal);
+        Assert.Contains("open --user \"alice\" --password \"\" \"sftp://example.test:22\"", command, StringComparison.Ordinal);
         Assert.Contains("-o IdentitiesOnly=yes -i '/c/Keys/id_ed25519'", command, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EncryptedSshKeyPassphraseUsesLftpCredentialChannel()
+    {
+        var profile = new ConnectionProfile(
+            Guid.NewGuid(), "Encrypted key", ConnectionProtocol.Sftp, "example.test", 22, "alice", AuthenticationKind.SshKey,
+            SshKeyPath: @"C:\Keys\id_ed25519_encrypted");
+
+        var command = LftpCommandBuilder.BuildOpen(
+            profile, "key-passphrase", KnownHostsPath, HostKeyAlias);
+
+        Assert.Contains("open --user \"alice\" --password \"key-passphrase\"", command, StringComparison.Ordinal);
+        Assert.Contains("-i '/c/Keys/id_ed25519_encrypted'", command, StringComparison.Ordinal);
     }
 
     [Fact]

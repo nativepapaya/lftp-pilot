@@ -324,8 +324,11 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(request);
         ProfileValidator.ThrowIfInvalid(request.Profile);
         ValidateCredential(request.Credential);
-        if (!string.IsNullOrEmpty(request.Credential) && request.Profile.Authentication != AuthenticationKind.Password)
-            throw new NotSupportedException("Only password credentials can currently be persisted. Ask-on-connect credentials remain ephemeral and SSH key passphrases are not yet supported.");
+        if (!string.IsNullOrEmpty(request.Credential) &&
+            request.Profile.Authentication is not AuthenticationKind.Password and not AuthenticationKind.SshKey)
+        {
+            throw new NotSupportedException("Only passwords and SSH private-key passphrases can be persisted. Ask-on-connect credentials remain ephemeral.");
+        }
         await _profileTrustGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -2027,8 +2030,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             AuthenticationKind.Anonymous => null,
             AuthenticationKind.AskOnConnect => !string.IsNullOrEmpty(ephemeral) ? ephemeral : throw new InvalidOperationException("This profile requires an ask-on-connect credential."),
             AuthenticationKind.SshKey => !string.IsNullOrEmpty(ephemeral)
-                ? throw new NotSupportedException("Encrypted SSH key passphrases are not yet supported; use an unencrypted key for this milestone.")
-                : null,
+                ? ephemeral
+                : await _secretStore.GetAsync(SecretBindingFor(profile), cancellationToken).ConfigureAwait(false),
             AuthenticationKind.Password => !string.IsNullOrEmpty(ephemeral)
                 ? ephemeral
                 : await _secretStore.GetAsync(SecretBindingFor(profile), cancellationToken).ConfigureAwait(false)
@@ -2040,7 +2043,10 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
     private static SecretBinding SecretBindingFor(ConnectionProfile profile)
     {
         var identity = ConnectionIdentity.FromProfile(profile);
-        return new(profile.Id, identity.CanonicalEndpoint, profile.UserName, $"login-{profile.Authentication.ToString().ToLowerInvariant()}");
+        var purpose = profile.Authentication == AuthenticationKind.SshKey
+            ? $"login-sshkey-{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity.SshKeyPath!)))}"
+            : $"login-{profile.Authentication.ToString().ToLowerInvariant()}";
+        return new(profile.Id, identity.CanonicalEndpoint, profile.UserName, purpose);
     }
 
     private async Task<ConnectionProfile> FindExpectedProfileAsync(
