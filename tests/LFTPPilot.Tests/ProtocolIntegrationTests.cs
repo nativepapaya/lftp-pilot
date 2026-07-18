@@ -21,10 +21,7 @@ public sealed class ProtocolIntegrationTests
         var executablePath = Environment.GetEnvironmentVariable(RuntimeVariable);
         if (string.IsNullOrWhiteSpace(configPath) || string.IsNullOrWhiteSpace(executablePath)) return;
 
-        var config = JsonSerializer.Deserialize<ProtocolLabConfig>(
-            await File.ReadAllTextAsync(configPath, TestContext.Current.CancellationToken),
-            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-            ?? throw new InvalidDataException("The controlled protocol-lab configuration is empty.");
+        var config = await LoadConfigAsync(configPath);
         Assert.True(Path.IsPathFullyQualified(executablePath));
         Assert.True(File.Exists(executablePath));
 
@@ -49,11 +46,96 @@ public sealed class ProtocolIntegrationTests
         }
     }
 
+    [Fact]
+    [Trait("Category", "ProtocolIntegration")]
+    public async Task SftpUnencryptedAndEncryptedKeysRoundTripThroughRealLftpSessions()
+    {
+        var configPath = Environment.GetEnvironmentVariable(ConfigVariable);
+        var executablePath = Environment.GetEnvironmentVariable(RuntimeVariable);
+        if (string.IsNullOrWhiteSpace(configPath) || string.IsNullOrWhiteSpace(executablePath)) return;
+        var config = await LoadConfigAsync(configPath);
+
+        await ExerciseEndpointAsync(
+            config, executablePath, ConnectionProtocol.Sftp, config.Endpoints.Sftp,
+            AuthenticationKind.SshKey, config.SftpClientKeyPath);
+        await ExerciseEndpointAsync(
+            config, executablePath, ConnectionProtocol.Sftp, config.Endpoints.Sftp,
+            AuthenticationKind.SshKey, config.SftpEncryptedClientKeyPath, config.KeyPassphrase);
+    }
+
+    [Fact]
+    [Trait("Category", "ProtocolIntegration")]
+    public async Task SftpHostKeyEnrollmentUnchangedCheckAndRotationUseRealOpenSshProbe()
+    {
+        var configPath = Environment.GetEnvironmentVariable(ConfigVariable);
+        var executablePath = Environment.GetEnvironmentVariable(RuntimeVariable);
+        if (string.IsNullOrWhiteSpace(configPath) || string.IsNullOrWhiteSpace(executablePath)) return;
+        var config = await LoadConfigAsync(configPath);
+        var root = Path.Combine(Path.GetTempPath(), $"lftp-pilot-host-rotation-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var profile = new ConnectionProfile(
+                Guid.NewGuid(), "Rotating loopback host", ConnectionProtocol.Sftp,
+                config.Host, config.Endpoints.Sftp, config.Username, AuthenticationKind.SshKey,
+                SshKeyPath: config.SftpClientKeyPath);
+            var store = new MemoryHostKeyStore();
+            var manager = new SftpHostKeyManager(
+                store,
+                new OpenSshHostKeyProbe(PackagedLftpRuntimeProvider.CreateTestOverride(executablePath), root));
+
+            var first = await manager.InspectAsync(profile, TestContext.Current.CancellationToken);
+            Assert.Equal(SftpHostKeyState.EnrollmentRequired, first.State);
+            var enrollment = Assert.IsType<SftpHostKeyReview>(first.Review);
+            await manager.ApproveAsync(
+                profile,
+                new(profile.Id, enrollment.ReviewId, enrollment.ApprovalToken),
+                replacementAllowed: true,
+                cancellationToken: TestContext.Current.CancellationToken);
+            var unchanged = await manager.InspectAsync(profile, TestContext.Current.CancellationToken);
+            Assert.Equal(SftpHostKeyState.Trusted, unchanged.State);
+            Assert.Null(unchanged.Review);
+
+            await File.WriteAllTextAsync(
+                config.SftpRotateHostKeyPath, "rotate", TestContext.Current.CancellationToken);
+            ProtocolLabConfig rotated = config;
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (rotated.SftpHostKeyGeneration <= config.SftpHostKeyGeneration && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(100, TestContext.Current.CancellationToken);
+                rotated = await LoadConfigAsync(configPath);
+            }
+            Assert.True(rotated.SftpHostKeyGeneration > config.SftpHostKeyGeneration);
+
+            var changed = await manager.InspectAsync(profile, TestContext.Current.CancellationToken);
+            Assert.Equal(SftpHostKeyState.Changed, changed.State);
+            var replacement = Assert.IsType<SftpHostKeyReview>(changed.Review);
+            Assert.Equal(enrollment.PresentedFingerprintSha256, replacement.TrustedFingerprintSha256);
+            Assert.Equal(rotated.SftpHostKeyFingerprint, replacement.PresentedFingerprintSha256);
+            Assert.NotEqual(replacement.TrustedFingerprintSha256, replacement.PresentedFingerprintSha256);
+            await manager.ApproveAsync(
+                profile,
+                new(profile.Id, replacement.ReviewId, replacement.ApprovalToken, ReplaceExisting: true),
+                replacementAllowed: true,
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(
+                SftpHostKeyState.Trusted,
+                (await manager.InspectAsync(profile, TestContext.Current.CancellationToken)).State);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static async Task ExerciseEndpointAsync(
         ProtocolLabConfig config,
         string executablePath,
         ConnectionProtocol protocol,
-        int port)
+        int port,
+        AuthenticationKind authentication = AuthenticationKind.Password,
+        string? sshKeyPath = null,
+        string? credential = null)
     {
         var root = Path.Combine(Path.GetTempPath(), $"lftp-pilot-protocol-{protocol}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
@@ -69,7 +151,8 @@ public sealed class ProtocolIntegrationTests
                 config.Host,
                 port,
                 config.Username,
-                AuthenticationKind.Password,
+                authentication,
+                SshKeyPath: sshKeyPath,
                 InitialRemotePath: "/",
                 InitialLocalPath: root);
             if (protocol == ConnectionProtocol.Sftp)
@@ -102,9 +185,15 @@ public sealed class ProtocolIntegrationTests
                 new MirrorPlanner(),
                 options);
 
+            var effectiveCredential = authentication == AuthenticationKind.Password
+                ? config.Password
+                : credential;
             if (protocol == ConnectionProtocol.Sftp)
                 await service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
-            await service.SaveProfileAsync(new(profile, config.Password), TestContext.Current.CancellationToken);
+            if (!string.IsNullOrEmpty(effectiveCredential))
+                await service.SaveProfileAsync(new(profile, effectiveCredential), TestContext.Current.CancellationToken);
+            else if (protocol != ConnectionProtocol.Sftp)
+                await service.SaveProfileAsync(new(profile), TestContext.Current.CancellationToken);
             var session = await service.ConnectAsync(
                 new(ConnectionIdentity.FromProfile(profile)), TestContext.Current.CancellationToken);
             var initial = await service.BrowseRemoteAsync(
@@ -180,15 +269,26 @@ public sealed class ProtocolIntegrationTests
         Assert.Fail($"{protocol} job {jobId} did not complete within two minutes.");
     }
 
+    private static async Task<ProtocolLabConfig> LoadConfigAsync(string configPath) =>
+        JsonSerializer.Deserialize<ProtocolLabConfig>(
+            await File.ReadAllTextAsync(configPath, TestContext.Current.CancellationToken),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+        ?? throw new InvalidDataException("The controlled protocol-lab configuration is empty.");
+
     private sealed record ProtocolLabConfig(
         string Host,
         string Username,
         string Password,
+        [property: JsonPropertyName("key_passphrase")] string KeyPassphrase,
         [property: JsonPropertyName("seed_name")] string SeedName,
         [property: JsonPropertyName("tls_ca_path")] string TlsCaPath,
+        [property: JsonPropertyName("sftp_client_key_path")] string SftpClientKeyPath,
+        [property: JsonPropertyName("sftp_encrypted_client_key_path")] string SftpEncryptedClientKeyPath,
         [property: JsonPropertyName("sftp_host_key_algorithm")] string SftpHostKeyAlgorithm,
         [property: JsonPropertyName("sftp_host_key_base64")] string SftpHostKeyBase64,
         [property: JsonPropertyName("sftp_host_key_fingerprint")] string SftpHostKeyFingerprint,
+        [property: JsonPropertyName("sftp_host_key_generation")] int SftpHostKeyGeneration,
+        [property: JsonPropertyName("sftp_rotate_host_key_path")] string SftpRotateHostKeyPath,
         ProtocolLabEndpoints Endpoints);
 
     private sealed record ProtocolLabEndpoints(

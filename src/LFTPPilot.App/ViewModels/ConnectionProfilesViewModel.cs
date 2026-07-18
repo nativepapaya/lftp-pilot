@@ -96,15 +96,26 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
             OnPropertyChanged(nameof(IsCredentialAuthentication));
             OnPropertyChanged(nameof(IsSshKeyAuthentication));
             OnPropertyChanged(nameof(CanRememberCredential));
+            OnPropertyChanged(nameof(CredentialHeader));
+            OnPropertyChanged(nameof(RememberCredentialLabel));
         }
     }
     public string? Status { get => _status; private set => SetProperty(ref _status, value); }
     public string Credential { get => _credential; set => SetProperty(ref _credential, value); }
     public bool RememberCredential { get => _rememberCredential; set => SetProperty(ref _rememberCredential, value); }
     public string SshKeyPath { get => _sshKeyPath; set => SetProperty(ref _sshKeyPath, value); }
-    public bool IsCredentialAuthentication => Authentication is AuthenticationKind.Password or AuthenticationKind.AskOnConnect;
+    public bool IsCredentialAuthentication => Authentication is AuthenticationKind.Password or AuthenticationKind.AskOnConnect or AuthenticationKind.SshKey;
     public bool IsSshKeyAuthentication => Authentication == AuthenticationKind.SshKey;
-    public bool CanRememberCredential => Authentication == AuthenticationKind.Password;
+    public bool CanRememberCredential => Authentication is AuthenticationKind.Password or AuthenticationKind.SshKey;
+    public string CredentialHeader => Authentication switch
+    {
+        AuthenticationKind.SshKey => "Private-key passphrase (optional for unencrypted keys)",
+        AuthenticationKind.AskOnConnect => "Ask-on-connect password",
+        _ => "Password",
+    };
+    public string RememberCredentialLabel => Authentication == AuthenticationKind.SshKey
+        ? "Remember private-key passphrase securely"
+        : "Remember password securely";
     public SftpHostKeyReview? PendingHostKeyReview => _pendingHostKeyReview;
     public bool HasPendingHostKeyReview => PendingHostKeyReview is not null;
     public bool IsHostKeyEnrollment => PendingHostKeyReview?.State == SftpHostKeyState.EnrollmentRequired;
@@ -177,7 +188,9 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        if (RememberCredential && profile.Authentication == AuthenticationKind.Password && ephemeral is not null)
+        if (RememberCredential &&
+            profile.Authentication is (AuthenticationKind.Password or AuthenticationKind.SshKey) &&
+            ephemeral is not null)
         {
             markAgentMutationDispatched?.Invoke();
             var saved = await _agent.SaveProfileAsync(profile, ephemeral, cancellationToken).ConfigureAwait(true);
@@ -205,7 +218,8 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
                 Guid.NewGuid(), Name.Trim(), Protocol, Host.Trim(), Port, UserName.Trim(), Authentication,
                 SshKeyPath: IsSshKeyAuthentication ? SshKeyPath.Trim() : null);
             var ephemeralCredential = IsCredentialAuthentication && !string.IsNullOrEmpty(Credential) ? Credential : null;
-            var rememberCredential = RememberCredential && profile.Authentication == AuthenticationKind.Password;
+            var rememberCredential = RememberCredential &&
+                profile.Authentication is (AuthenticationKind.Password or AuthenticationKind.SshKey);
             // Save metadata first. An entered SFTP credential stays in App memory
             // until the presented host key has been explicitly trusted.
             var saved = await _agent.SaveProfileAsync(profile, cancellationToken: operation.Token).ConfigureAwait(true);
@@ -213,8 +227,9 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
             SelectedProfile = saved;
             // Selecting a genuinely new profile intentionally clears credential options.
             // This profile was created from the current form, so restore only the user's
-            // explicit remember choice captured for that new password-authenticated profile.
-            RememberCredential = rememberCredential && saved.Authentication == AuthenticationKind.Password;
+            // explicit remember choice for its password or SSH-key passphrase.
+            RememberCredential = rememberCredential &&
+                saved.Authentication is (AuthenticationKind.Password or AuthenticationKind.SshKey);
             operation.Token.ThrowIfCancellationRequested();
             Credential = ephemeralCredential ?? string.Empty;
             await ConnectCoreAsync(operation.Token).ConfigureAwait(true);
@@ -253,7 +268,7 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
                 Authentication = Authentication,
                 SshKeyPath = IsSshKeyAuthentication ? SshKeyPath.Trim() : null,
             };
-            var enteredCredential = RememberCredential && Authentication == AuthenticationKind.Password && !string.IsNullOrEmpty(Credential)
+            var enteredCredential = RememberCredential && CanRememberCredential && !string.IsNullOrEmpty(Credential)
                 ? Credential
                 : null;
             var deferSftpCredential = updated.Protocol == ConnectionProtocol.Sftp && enteredCredential is not null;

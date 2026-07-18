@@ -90,7 +90,7 @@ try {
         -c Release --no-restore --filter 'Category=ProtocolIntegration'
     if ($LASTEXITCODE -ne 0) { throw "The controlled protocol matrix failed (exit $LASTEXITCODE)." }
 
-    'Controlled FTP, opportunistic TLS, FTPES, implicit FTPS, and SFTP password endpoints passed Unicode browse, mutation, upload, segmented download, and cleanup checks.'
+    'Controlled FTP, opportunistic TLS, FTPES, implicit FTPS, and SFTP endpoints passed password/key authentication, host-key enrollment/rotation, Unicode browse, mutation, upload, segmented download, and cleanup checks.'
 }
 finally {
     $env:LFTP_PILOT_PROTOCOL_LAB_CONFIG = $savedConfig
