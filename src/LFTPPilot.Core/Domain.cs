@@ -152,7 +152,8 @@ public sealed record FileEntry(
     string? Permissions = null,
     string? Owner = null,
     string? Group = null,
-    string? LinkTarget = null)
+    string? LinkTarget = null,
+    bool IsHidden = false)
 {
     public bool IsDirectory => Kind == EntryKind.Directory;
 }
@@ -370,6 +371,30 @@ public sealed record AppUpdateStatus(
     Uri? InstallerUri = null,
     string? ErrorMessage = null,
     DateTimeOffset? CheckedAt = null);
+
+public enum AppThemePreference
+{
+    System,
+    Light,
+    Dark,
+}
+
+public enum FileListDensity
+{
+    Compact,
+    Comfortable,
+}
+
+public sealed record AppPreferences(
+    AppThemePreference Theme = AppThemePreference.System,
+    FileListDensity FileListDensity = FileListDensity.Compact,
+    bool ShowHiddenLocal = false,
+    bool ShowHiddenRemote = true,
+    bool ExpandActivityCenter = true,
+    int DefaultParallelFiles = 2,
+    int DefaultDownloadSegments = 4,
+    long DownloadLimitKiB = 0,
+    long UploadLimitKiB = 0);
 
 public sealed record SecretBinding(
     Guid ProfileId,

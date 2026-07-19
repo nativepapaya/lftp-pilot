@@ -247,7 +247,7 @@ public sealed partial class SessionWorkspaceView : UserControl
             Header = "Download segments per file",
             Minimum = 1,
             Maximum = 16,
-            Value = 4,
+            Value = viewModel.DefaultDownloadSegments,
             SmallChange = 1,
             SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact,
             Description = "1 uses a normal download; 2–16 use LFTP segmented downloads.",
@@ -300,7 +300,7 @@ public sealed partial class SessionWorkspaceView : UserControl
             Header = "Parallel files in each folder tree",
             Minimum = 1,
             Maximum = FolderTransferPolicy.MaximumParallelFiles,
-            Value = 2,
+            Value = viewModel.DefaultParallelFiles,
             SmallChange = 1,
             SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact,
             Description = "LFTP transfers this many files concurrently inside each selected folder.",
@@ -328,7 +328,17 @@ public sealed partial class SessionWorkspaceView : UserControl
         };
         bandwidthUnit.Items.Add(new ComboBoxItem { Content = "KiB/s (1,024 bytes/s)", Tag = 1_024L });
         bandwidthUnit.Items.Add(new ComboBoxItem { Content = "MiB/s (1,048,576 bytes/s)", Tag = 1_048_576L });
-        bandwidthUnit.SelectedIndex = 1;
+        bandwidthUnit.SelectedIndex = 0;
+        var defaultLimitKiB = direction == TransferDirection.Download
+            ? viewModel.DownloadLimitKiB
+            : viewModel.UploadLimitKiB;
+        if (defaultLimitKiB > 0)
+        {
+            limitBandwidth.IsChecked = true;
+            bandwidthValue.Value = defaultLimitKiB;
+            bandwidthValue.IsEnabled = true;
+            bandwidthUnit.IsEnabled = true;
+        }
         AutomationProperties.SetName(bandwidthUnit, "Bandwidth units");
         limitBandwidth.Checked += (_, _) => SetBandwidthEnabled(true);
         limitBandwidth.Unchecked += (_, _) => SetBandwidthEnabled(false);
@@ -451,8 +461,8 @@ public sealed partial class SessionWorkspaceView : UserControl
             presetName.Text = string.Empty;
             includePatterns.Text = string.Empty;
             excludePatterns.Text = string.Empty;
-            parallelFiles.Value = 2;
-            segments.Value = 4;
+            parallelFiles.Value = viewModel.DefaultParallelFiles;
+            segments.Value = viewModel.DefaultDownloadSegments;
             deletePreset.IsEnabled = false;
             validation.IsOpen = false;
         };

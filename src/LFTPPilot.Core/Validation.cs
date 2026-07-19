@@ -10,6 +10,31 @@ public sealed class ModelValidationException(IReadOnlyList<ValidationIssue> issu
     public IReadOnlyList<ValidationIssue> Issues { get; } = issues;
 }
 
+public static class AppPreferencesPolicy
+{
+    public const int MaximumParallelFiles = 16;
+    public const int MaximumDownloadSegments = 16;
+    public const long MaximumRateLimitKiB = 1_000_000_000;
+
+    public static void Validate(AppPreferences preferences)
+    {
+        ArgumentNullException.ThrowIfNull(preferences);
+        if (!Enum.IsDefined(preferences.Theme))
+            throw new ArgumentException("The interface theme preference is invalid.", nameof(preferences));
+        if (!Enum.IsDefined(preferences.FileListDensity))
+            throw new ArgumentException("The file-list density preference is invalid.", nameof(preferences));
+        if (preferences.DefaultParallelFiles is < 1 or > MaximumParallelFiles)
+            throw new ArgumentException($"Default parallel files must be from 1 through {MaximumParallelFiles}.", nameof(preferences));
+        if (preferences.DefaultDownloadSegments is < 1 or > MaximumDownloadSegments)
+            throw new ArgumentException($"Default download segments must be from 1 through {MaximumDownloadSegments}.", nameof(preferences));
+        if (preferences.DownloadLimitKiB is < 0 or > MaximumRateLimitKiB ||
+            preferences.UploadLimitKiB is < 0 or > MaximumRateLimitKiB)
+        {
+            throw new ArgumentException($"Transfer rate limits must be from 0 through {MaximumRateLimitKiB:N0} KiB/s.", nameof(preferences));
+        }
+    }
+}
+
 public static class ProfileValidator
 {
     public static ImmutableArray<ValidationIssue> Validate(ConnectionProfile profile)

@@ -1,0 +1,44 @@
+<UserControl
+    x:Class="LFTPPilot.App.Views.Pages.ShortcutsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer Width="580" MaxHeight="640" VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="16" Padding="0,0,8,8">
+            <StackPanel Spacing="4">
+                <TextBlock Text="Files" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                <Grid RowSpacing="8" ColumnSpacing="16">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="130" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <TextBlock Text="Enter" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Column="1" Text="Open the selected folder or file" />
+                    <TextBlock Grid.Row="1" Text="F2" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Row="1" Grid.Column="1" Text="Rename or move the selected item" />
+                    <TextBlock Grid.Row="2" Text="F7" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Row="2" Grid.Column="1" Text="Create a folder in the focused pane" />
+                    <TextBlock Grid.Row="3" Text="Delete" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Row="3" Grid.Column="1" Text="Review and delete the selection" />
+                    <TextBlock Grid.Row="4" Text="Ctrl+Left" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Row="4" Grid.Column="1" Text="Download selected remote items" />
+                    <TextBlock Grid.Row="5" Text="Ctrl+Right" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Row="5" Grid.Column="1" Text="Upload selected local items" />
+                </Grid>
+            </StackPanel>
+            <Rectangle Height="1" Fill="{ThemeResource PilotBorderBrush}" />
+            <StackPanel Spacing="4">
+                <TextBlock Text="Navigation" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                <Grid RowSpacing="8" ColumnSpacing="16">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="130" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <TextBlock Text="Backspace" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Column="1" Text="Go up one folder" />
+                    <TextBlock Grid.Row="1" Text="Ctrl+F" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Row="1" Grid.Column="1" Text="Filter the focused folder" />
+                    <TextBlock Grid.Row="2" Text="F3" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Row="2" Grid.Column="1" Text="Refresh the focused pane" />
+                </Grid>
+            </StackPanel>
+            <Rectangle Height="1" Fill="{ThemeResource PilotBorderBrush}" />
+            <StackPanel Spacing="4">
+                <TextBlock Text="Workspace" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                <Grid RowSpacing="8" ColumnSpacing="16">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="130" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <TextBlock Text="Ctrl+N" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Column="1" Text="Open the connection manager" />
+                    <TextBlock Grid.Row="1" Text="F1" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Row="1" Grid.Column="1" Text="Open this keyboard and mouse guide" />
+                    <TextBlock Grid.Row="2" Text="Drag &amp; drop" Style="{ThemeResource BodyStrongTextBlockStyle}" /><TextBlock Grid.Row="2" Grid.Column="1" Text="Transfer between panes or exchange files with Explorer" TextWrapping="Wrap" />
+                </Grid>
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

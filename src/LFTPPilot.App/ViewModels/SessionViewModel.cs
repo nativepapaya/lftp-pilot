@@ -18,6 +18,10 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
     private bool _isReconnecting;
     private string _displayName;
     private string _statusText;
+    private int _defaultParallelFiles = 2;
+    private int _defaultDownloadSegments = 4;
+    private long _downloadLimitKiB;
+    private long _uploadLimitKiB;
 
     public SessionViewModel(
         IAgentWorkspaceClient agent,
@@ -81,6 +85,7 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
             if (!SetProperty(ref _isConnected, value)) return;
             OnPropertyChanged(nameof(IsDisconnected));
             OnPropertyChanged(nameof(ConnectionGlyph));
+            OnPropertyChanged(nameof(ConnectionStateLabel));
             OnPropertyChanged(nameof(CanReconnect));
             OnPropertyChanged(nameof(ReconnectDescription));
             RefreshCommand.NotifyCanExecuteChanged();
@@ -109,6 +114,11 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
     }
 
     public string ConnectionGlyph => IsConnected ? "\uE701" : "\uE711";
+    public string ConnectionStateLabel => IsConnected ? "Ready" : "Offline";
+    public int DefaultParallelFiles => _defaultParallelFiles;
+    public int DefaultDownloadSegments => _defaultDownloadSegments;
+    public long DownloadLimitKiB => _downloadLimitKiB;
+    public long UploadLimitKiB => _uploadLimitKiB;
     public bool HasUnconfirmedTransfers => _unconfirmedTransferIds.Count != 0;
     public bool RequiresCredentialForReconnect => _profile.Authentication == AuthenticationKind.AskOnConnect;
     public bool CanReconnect => IsDisconnected && !IsReconnecting;
@@ -126,6 +136,21 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
         RemotePane.UpdateProfile(profile);
         OnPropertyChanged(nameof(RequiresCredentialForReconnect));
         OnPropertyChanged(nameof(ReconnectDescription));
+    }
+
+    public void ApplyPreferences(AppPreferences preferences)
+    {
+        AppPreferencesPolicy.Validate(preferences);
+        _defaultParallelFiles = preferences.DefaultParallelFiles;
+        _defaultDownloadSegments = preferences.DefaultDownloadSegments;
+        _downloadLimitKiB = preferences.DownloadLimitKiB;
+        _uploadLimitKiB = preferences.UploadLimitKiB;
+        LocalPane.ApplyPreferences(preferences.ShowHiddenLocal, preferences.FileListDensity);
+        RemotePane.ApplyPreferences(preferences.ShowHiddenRemote, preferences.FileListDensity);
+        OnPropertyChanged(nameof(DefaultParallelFiles));
+        OnPropertyChanged(nameof(DefaultDownloadSegments));
+        OnPropertyChanged(nameof(DownloadLimitKiB));
+        OnPropertyChanged(nameof(UploadLimitKiB));
     }
 
     public void ApplySeed(WorkspaceSessionSeed seed, ConnectionProfile profile)

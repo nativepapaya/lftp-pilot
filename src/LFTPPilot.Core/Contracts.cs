@@ -106,3 +106,9 @@ public interface IAppUpdateService
     Task<AppUpdateStatus> CheckAsync(CancellationToken cancellationToken = default);
     Task OpenInstallerAsync(CancellationToken cancellationToken = default);
 }
+
+public interface IAppPreferencesStore
+{
+    Task<AppPreferences> GetAsync(CancellationToken cancellationToken = default);
+    Task SaveAsync(AppPreferences preferences, CancellationToken cancellationToken = default);
+}

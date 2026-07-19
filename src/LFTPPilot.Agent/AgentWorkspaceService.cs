@@ -765,7 +765,8 @@ public sealed class AgentWorkspaceService : IAsyncDisposable
             var kind = isLink ? EntryKind.SymbolicLink : isDirectory ? EntryKind.Directory : EntryKind.File;
             var info = new FileInfo(path);
             entries.Add(new(info.Name, info.FullName, kind, isDirectory ? null : info.Length, info.LastWriteTimeUtc,
-                LinkTarget: isLink ? info.LinkTarget : null));
+                LinkTarget: isLink ? info.LinkTarget : null,
+                IsHidden: (attributes & FileAttributes.Hidden) != 0));
         }
         var ordered = entries.OrderBy(static entry => entry.Kind == EntryKind.Directory ? 0 : 1)
             .ThenBy(static entry => entry.Name, StringComparer.CurrentCultureIgnoreCase).ToImmutableArray();

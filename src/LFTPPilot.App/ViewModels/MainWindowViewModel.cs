@@ -22,7 +22,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private string _offlineWorkspaceStatus = "Browse local files now, then connect when you are ready.";
     private int _stateInvalidated;
 
-    public MainWindowViewModel(IAgentWorkspaceClient agent)
+    public MainWindowViewModel(IAgentWorkspaceClient agent, IAppPreferencesStore? preferencesStore = null)
     {
         _agent = agent;
         _uiContext = SynchronizationContext.Current;
@@ -31,7 +31,8 @@ public sealed class MainWindowViewModel : ObservableObject
         Mirror = new MirrorViewModel(agent);
         Console = new ConsoleViewModel(agent);
         RemoteTransfer = new RemoteTransferViewModel(agent);
-        Settings = new SettingsViewModel(agent);
+        Settings = new SettingsViewModel(agent, preferencesStore);
+        Settings.PreferencesChanged += (_, preferences) => ApplyPreferences(preferences);
         var localPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (string.IsNullOrWhiteSpace(localPath)) localPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
         OfflineLocalPane = new FilePaneViewModel(
@@ -98,6 +99,7 @@ public sealed class MainWindowViewModel : ObservableObject
         IsLoading = true;
         try
         {
+            await Settings.LoadPreferencesAsync().ConfigureAwait(true);
             var bootstrap = await _agent.LoadAsync().ConfigureAwait(true);
             HasAgentError = false;
             IsDemoMode = bootstrap.IsDemoMode;
@@ -336,6 +338,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private SessionViewModel CreateSession(Models.WorkspaceSessionSeed seed, ConnectionProfile profile)
     {
         var session = new SessionViewModel(_agent, seed, profile, FolderTransferPresets);
+        session.ApplyPreferences(Settings.Preferences);
         session.JobQueued += (_, job) => Activity.Add(job);
         session.TransferOutcomeUnconfirmed += (_, submission) => RememberUnconfirmedTransfer(submission);
         session.StateRefreshRequested += (_, _) => RequestStateRefresh();
@@ -346,6 +349,13 @@ public sealed class MainWindowViewModel : ObservableObject
         };
         ApplyTransferSubmissionGuard(session);
         return session;
+    }
+
+    private void ApplyPreferences(AppPreferences preferences)
+    {
+        Activity.IsExpanded = preferences.ExpandActivityCenter;
+        OfflineLocalPane.ApplyPreferences(preferences.ShowHiddenLocal, preferences.FileListDensity);
+        foreach (var session in Sessions) session.ApplyPreferences(preferences);
     }
 
     private void LoadFolderTransferPresets(IReadOnlyList<FolderTransferPreset> presets)
