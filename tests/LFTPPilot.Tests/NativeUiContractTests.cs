@@ -102,7 +102,9 @@ public sealed class NativeUiContractTests
         Assert.Equal(1, mainWindow.Split("IsClosable=\"True\"").Length - 1);
         Assert.DoesNotContain("<RowDefinition Height=\"44\"", mainWindow, StringComparison.Ordinal);
         Assert.Contains("BorderThickness=\"0,1,0,0\"", activity, StringComparison.Ordinal);
-        Assert.Contains("<Grid Height=\"136\" Background=\"Transparent\">", activity, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"ActivityContent\" Height=\"136\"", activity, StringComparison.Ordinal);
+        Assert.Contains("SelectedItem=\"{Binding SelectedHistory, Mode=TwoWay}\"", activity, StringComparison.Ordinal);
+        Assert.Contains("ItemsSource=\"{Binding SelectedHistory.Log}\"", activity, StringComparison.Ordinal);
     }
 
     [Fact]

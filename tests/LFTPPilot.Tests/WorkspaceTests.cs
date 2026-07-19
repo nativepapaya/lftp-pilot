@@ -1913,10 +1913,10 @@ public sealed class WorkspaceTests
                 Path.Combine(fixture.Directory.Path, "mismatched-stat.bin"))), TestContext.Current.CancellationToken);
 
         Assert.Equal(JobState.Failed, failed.Job.State);
-        Assert.Contains("different path", failed.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not found", failed.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Single(fixture.Jobs.GetJobs());
         Assert.Contains(fixture.ProcessHost.TaggedCommands, item =>
-            item.Role == "validation" && item.Command.StartsWith("recls -ldB ", StringComparison.Ordinal) &&
+            item.Role == "validation" && item.Command.StartsWith($"echo \"{LftpCommandBuilder.LiteralStatMarker}", StringComparison.Ordinal) &&
             item.Command.Contains("mismatched-stat", StringComparison.Ordinal));
     }
 
@@ -1939,11 +1939,11 @@ public sealed class WorkspaceTests
 
         Assert.All(fixture.ProcessHost.TaggedCommands.Where(item =>
             item.Role == "validation" && item.Command.Contains("zero-line-missing-target", StringComparison.Ordinal)),
-            item => Assert.StartsWith("recls -ldB ", item.Command, StringComparison.Ordinal));
+            item => Assert.StartsWith($"echo \"{LftpCommandBuilder.LiteralStatMarker}", item.Command, StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task WorkspaceFreshStatAcceptsPathlessOrCorrectlyBoundMissingDiagnosticsAndRejectsWrongPath()
+    public async Task WorkspaceFreshStatAcceptsSupportedAbsenceShapesAndRejectsWrongPathDiagnostics()
     {
         await using var fixture = new WorkspaceFixture();
         var profile = fixture.AnonymousProfile(ConnectionProtocol.Ftp);
@@ -1952,7 +1952,12 @@ public sealed class WorkspaceTests
         var source = Path.Combine(fixture.Directory.Path, "missing-diagnostic-upload.bin");
         await File.WriteAllTextAsync(source, "data", TestContext.Current.CancellationToken);
 
-        foreach (var target in new[] { "/remote/pathless-missing-target", "/remote/bound-missing-target" })
+        foreach (var target in new[]
+                 {
+                     "/remote/zero-line-missing-target",
+                     "/remote/pathless-missing-target",
+                     "/remote/bound-missing-target",
+                 })
         {
             var transfer = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
                 new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source, target)),
@@ -1961,11 +1966,13 @@ public sealed class WorkspaceTests
                 TestContext.Current.CancellationToken);
         }
 
-        var wrongPath = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
+        var ambiguous = await fixture.Service.EnqueueTransferAsync(new(session.SessionId,
             new(Guid.NewGuid(), profile.Id, TransferDirection.Upload, source, "/remote/wrong-bound-missing-target")),
             TestContext.Current.CancellationToken);
-        Assert.Equal(JobState.Failed, wrongPath.Job.State);
-        Assert.Contains("ambiguous output", wrongPath.Job.Error?.Message, StringComparison.OrdinalIgnoreCase);
+        await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == ambiguous.Job.Id).State == JobState.Failed,
+            TestContext.Current.CancellationToken);
+        var failed = fixture.Jobs.GetJobs().Single(job => job.Id == ambiguous.Job.Id);
+        Assert.Contains("ambiguous output", failed.Error?.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1987,14 +1994,14 @@ public sealed class WorkspaceTests
         Assert.Contains("symbolic link", fixture.Jobs.GetJobs().Single(job => job.Id == enqueued.Job.Id).Error?.Message,
             StringComparison.OrdinalIgnoreCase);
         var stats = fixture.ProcessHost.TaggedCommands.Where(item =>
-            item.Command.StartsWith("recls -ldB ", StringComparison.Ordinal) &&
+            item.Command.StartsWith($"echo \"{LftpCommandBuilder.LiteralStatMarker}", StringComparison.Ordinal) &&
             item.Command.Contains("stat-drift-directory", StringComparison.Ordinal)).ToArray();
         Assert.Equal(2, stats.Length);
-        Assert.All(stats, item => Assert.StartsWith("recls -ldB ", item.Command, StringComparison.Ordinal));
+        Assert.All(stats, item => Assert.Contains("; recls -laB --time-style=long-iso \".\"", item.Command, StringComparison.Ordinal));
         Assert.DoesNotContain(fixture.ProcessHost.TaggedCommands, item =>
             (item.Role == "transfer-queue" || item.Role == "transfer") &&
             item.Command.Contains("stat-drift-directory", StringComparison.Ordinal) &&
-            !item.Command.StartsWith("recls -ldB ", StringComparison.Ordinal));
+            !item.Command.StartsWith($"echo \"{LftpCommandBuilder.LiteralStatMarker}", StringComparison.Ordinal));
     }
 
     [Theory]
@@ -2802,8 +2809,8 @@ public sealed class WorkspaceTests
                 Path.Combine(fixture.Directory.Path, "file-slot-drift.bin"))), TestContext.Current.CancellationToken);
         await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.Single(fixture.ProcessHost.TaggedCommands, item =>
-            item.Command.StartsWith("recls -ldB ", StringComparison.Ordinal) &&
-            item.Command.Contains("\"/remote/file-slot-drift.bin\"", StringComparison.Ordinal));
+            item.Command.StartsWith($"echo \"{LftpCommandBuilder.LiteralStatMarker}", StringComparison.Ordinal) &&
+            item.Command.Contains("/remote/file-slot-drift.bin", StringComparison.Ordinal));
 
         fixture.ProcessHost.ReleaseReservedQueueSlots.TrySetResult(true);
         await WaitUntilAsync(() => fixture.Jobs.GetJobs().Single(job => job.Id == first.Job.Id).State == JobState.Completed,
@@ -5397,13 +5404,13 @@ public sealed class WorkspaceTests
                 return Task.FromResult(new LftpCommandResult([new("stdout", listing)]));
             }
             if (role == "validation" && IsStatCommand(command) &&
-                command.Contains("\"/remote/cancel-validation.bin\"", StringComparison.Ordinal))
+                command.Contains("/remote/cancel-validation.bin", StringComparison.Ordinal))
             {
                 var attempt = statAttempts.AddOrUpdate("cancel-validation", 1, static (_, count) => count + 1);
                 if (attempt >= 2) return WaitForCancellationAsync(cancellationToken);
             }
             if (role == "validation" && IsStatCommand(command) &&
-                command.Contains("\"/remote/validation-gate-one.bin\"", StringComparison.Ordinal))
+                command.Contains("/remote/validation-gate-one.bin", StringComparison.Ordinal))
             {
                 var attempt = statAttempts.AddOrUpdate("validation-gate-one", 1, static (_, count) => count + 1);
                 if (attempt >= 2)
@@ -5413,7 +5420,7 @@ public sealed class WorkspaceTests
                 }
             }
             if (role == "validation" && IsStatCommand(command) &&
-                command.Contains("\"/remote/scheduled-validation-cancel.bin\"", StringComparison.Ordinal))
+                command.Contains("/remote/scheduled-validation-cancel.bin", StringComparison.Ordinal))
             {
                 var attempt = statAttempts.AddOrUpdate("scheduled-validation-cancel", 1, static (_, count) => count + 1);
                 if (attempt >= 2)
@@ -5422,16 +5429,14 @@ public sealed class WorkspaceTests
                     return WaitForCancellationAsync(cancellationToken);
                 }
             }
-            if (IsStatCommand(command) && command.Contains("\"/remote/file-slot-drift.bin\"", StringComparison.Ordinal))
+            if (IsStatCommand(command) && command.Contains("/remote/file-slot-drift.bin", StringComparison.Ordinal))
             {
                 var attempt = statAttempts.AddOrUpdate("file-slot-drift", 1, static (_, count) => count + 1);
                 var listing = attempt == 1 ? RemoteEditListing(command) : RemoteSymbolicLinkListing(command);
                 return Task.FromResult(new LftpCommandResult([new("stdout", listing)]));
             }
             if (IsStatCommand(command) &&
-                (command.Contains("\"/remote/link-ancestor\"", StringComparison.Ordinal) ||
-                 command.Contains("\"/remote/directory-link-ancestor\"", StringComparison.Ordinal) ||
-                 command.Contains("\"/remote/mirror-link-ancestor\"", StringComparison.Ordinal)))
+                StatPath(command) is "/remote/link-ancestor" or "/remote/directory-link-ancestor" or "/remote/mirror-link-ancestor")
             {
                 var key = command.Contains("directory-link-ancestor", StringComparison.Ordinal)
                     ? "directory-link-ancestor"
@@ -5443,8 +5448,7 @@ public sealed class WorkspaceTests
                 return Task.FromResult(new LftpCommandResult([new("stdout", listing)]));
             }
             if (IsStatCommand(command) &&
-                (command.Contains("\"/remote/post-directory-link-ancestor\"", StringComparison.Ordinal) ||
-                 command.Contains("\"/remote/post-mirror-link-ancestor\"", StringComparison.Ordinal)))
+                StatPath(command) is "/remote/post-directory-link-ancestor" or "/remote/post-mirror-link-ancestor")
             {
                 var key = command.Contains("post-directory", StringComparison.Ordinal)
                     ? "post-directory-dry-run"
@@ -5543,21 +5547,14 @@ public sealed class WorkspaceTests
                      value.Contains("/unrecognized-destructive-directory", StringComparison.Ordinal)) =>
                     [new("stdout", RemoteDirectoryListing(value))],
                 var value when IsStatCommand(value) &&
-                    value.Contains("\"/remote/link-ancestor/file.bin\"", StringComparison.Ordinal) =>
+                    value.Contains("/remote/link-ancestor/file.bin", StringComparison.Ordinal) =>
                     [new("stdout", RemoteEditListing(value))],
                 var value when IsStatCommand(value) &&
-                    (value.Contains("\"/remote\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/collision-review\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/drift\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/clean-collision-drift\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/gate-blocker\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/local-root-drift-download\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/local-root-drift-upload\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/local-post-dryrun\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/remote/directory-link-ancestor/source\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/remote/mirror-link-ancestor/root\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/remote/post-directory-link-ancestor/source\"", StringComparison.Ordinal) ||
-                     value.Contains("\"/remote/post-mirror-link-ancestor/root\"", StringComparison.Ordinal)) =>
+                    StatPath(value) is "/remote" or "/collision-review" or "/drift" or "/clean-collision-drift" or
+                        "/gate-blocker" or "/local-root-drift-download" or "/local-root-drift-upload" or
+                        "/local-post-dryrun" or "/remote/directory-link-ancestor/source" or
+                        "/remote/mirror-link-ancestor/root" or "/remote/post-directory-link-ancestor/source" or
+                        "/remote/post-mirror-link-ancestor/root" =>
                     [new("stdout", RemoteDirectoryListing(value))],
                 var value when IsStatCommand(value) &&
                     value.Contains("/transfer-link", StringComparison.Ordinal) =>
@@ -5571,13 +5568,13 @@ public sealed class WorkspaceTests
                 var value when IsStatCommand(value) &&
                     value.Contains("/zero-line-missing-target", StringComparison.Ordinal) => [],
                 var value when IsStatCommand(value) &&
-                    value.Contains("\"/remote/pathless-missing-target\"", StringComparison.Ordinal) =>
+                    value.Contains("/remote/pathless-missing-target", StringComparison.Ordinal) =>
                     [new("stderr", "cls: Access failed: No such file")],
                 var value when IsStatCommand(value) &&
-                    value.Contains("\"/remote/bound-missing-target\"", StringComparison.Ordinal) =>
+                    value.Contains("/remote/bound-missing-target", StringComparison.Ordinal) =>
                     [new("stderr", "recls: Access failed: 550 No such file or directory. (/remote/bound-missing-target)")],
                 var value when IsStatCommand(value) &&
-                    value.Contains("\"/remote/wrong-bound-missing-target\"", StringComparison.Ordinal) =>
+                    value.Contains("/remote/wrong-bound-missing-target", StringComparison.Ordinal) =>
                     [new("stderr", "recls: Access failed: 550 No such file or directory. (/remote/different-target)")],
                 var value when IsStatCommand(value) &&
                     (value.Contains("/created", StringComparison.Ordinal) || value.Contains("/renamed.txt", StringComparison.Ordinal) ||
@@ -5613,8 +5610,9 @@ public sealed class WorkspaceTests
         }
 
         private static bool IsStatCommand(string command) =>
-            command.StartsWith("recls -ldB --time-style=long-iso", StringComparison.Ordinal) ||
-            command.StartsWith("cls -ldB --time-style=long-iso", StringComparison.Ordinal);
+            command.StartsWith($"echo \"{LftpCommandBuilder.LiteralStatMarker}", StringComparison.Ordinal) &&
+            (command.Contains("; recls -laB --time-style=long-iso \".\"", StringComparison.Ordinal) ||
+             command.Contains("; cls -laB --time-style=long-iso \".\"", StringComparison.Ordinal));
 
         private static bool IsAutomaticDirectoryPreview(string role, string command) =>
             (role == "directory-transfer-preview" || role == "transfer") &&
@@ -5636,11 +5634,25 @@ public sealed class WorkspaceTests
 
         private static string RemoteEntryName(string command)
         {
+            if (StatPath(command) is { } statPath)
+            {
+                var markerSeparator = statPath.LastIndexOf('/');
+                return markerSeparator >= 0 ? statPath[(markerSeparator + 1)..] : statPath;
+            }
             var end = command.LastIndexOf('"');
             var start = end > 0 ? command.LastIndexOf('"', end - 1) : -1;
             var remotePath = start >= 0 && end > start ? command[(start + 1)..end] : "/file.bin";
             var separator = remotePath.LastIndexOf('/');
             return separator >= 0 ? remotePath[(separator + 1)..] : remotePath;
+        }
+
+        private static string? StatPath(string command)
+        {
+            var marker = command.IndexOf(LftpCommandBuilder.LiteralStatMarker, StringComparison.Ordinal);
+            if (marker < 0) return null;
+            var pathStart = marker + LftpCommandBuilder.LiteralStatMarker.Length;
+            var pathEnd = command.IndexOf('"', pathStart);
+            return pathEnd > pathStart ? command[pathStart..pathEnd] : null;
         }
 
         private async Task<LftpCommandResult> WaitForCancellationAsync(CancellationToken cancellationToken)

@@ -10,6 +10,7 @@ public sealed class ActivityCenterViewModel : ObservableObject
 {
     private readonly IAgentWorkspaceClient _agent;
     private bool _isExpanded = true;
+    private HistoryRecordItem? _selectedHistory;
 
     public ActivityCenterViewModel(IAgentWorkspaceClient agent)
     {
@@ -19,7 +20,7 @@ public sealed class ActivityCenterViewModel : ObservableObject
     }
 
     public ObservableCollection<JobSnapshot> Jobs { get; } = [];
-    public ObservableCollection<HistoryRecord> History { get; } = [];
+    public ObservableCollection<HistoryRecordItem> History { get; } = [];
     public ObservableCollection<ActivityLogEntry> Log { get; } = [];
     public AsyncRelayCommand CancelJobCommand { get; }
     public AsyncRelayCommand RetryJobCommand { get; }
@@ -32,11 +33,24 @@ public sealed class ActivityCenterViewModel : ObservableObject
 
     public int ActiveCount => Jobs.Count(job => job.State is JobState.Queued or JobState.Running or JobState.Scheduled or JobState.Paused);
 
+    public HistoryRecordItem? SelectedHistory
+    {
+        get => _selectedHistory;
+        set
+        {
+            if (!SetProperty(ref _selectedHistory, value)) return;
+            OnPropertyChanged(nameof(HasSelectedHistory));
+        }
+    }
+
+    public bool HasSelectedHistory => SelectedHistory is not null;
+
     public void Load(UiWorkspaceBootstrap bootstrap)
     {
         Replace(Jobs, bootstrap.Jobs);
-        Replace(History, bootstrap.History);
+        Replace(History, bootstrap.History.Select(static record => new HistoryRecordItem(record)));
         Replace(Log, bootstrap.Log);
+        SelectedHistory = History.FirstOrDefault();
         OnPropertyChanged(nameof(ActiveCount));
         CancelJobCommand.NotifyCanExecuteChanged();
         RetryJobCommand.NotifyCanExecuteChanged();
@@ -54,14 +68,17 @@ public sealed class ActivityCenterViewModel : ObservableObject
 
     public void AddHistory(HistoryRecord record)
     {
-        var existing = History.FirstOrDefault(candidate => candidate.Id == record.Id);
+        var item = new HistoryRecordItem(record);
+        var existing = History.FirstOrDefault(candidate => candidate.Id == item.Id);
         if (existing is not null) History.Remove(existing);
         var insertionIndex = 0;
-        while (insertionIndex < History.Count && History[insertionIndex].FinishedAt >= record.FinishedAt)
+        while (insertionIndex < History.Count && History[insertionIndex].Record.FinishedAt >= record.FinishedAt)
             insertionIndex++;
-        History.Insert(insertionIndex, record);
+        History.Insert(insertionIndex, item);
         while (History.Count > HistoryRecordPolicy.MaximumBootstrapRecords)
             History.RemoveAt(History.Count - 1);
+        if (SelectedHistory is null || existing is not null && SelectedHistory.Id == existing.Id)
+            SelectedHistory = item;
     }
 
     public bool ApplyProgress(TransferProgressSnapshot progress)

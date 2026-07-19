@@ -43,7 +43,7 @@
             </Grid>
         </Expander.Header>
 
-        <Grid Height="136" Background="Transparent">
+        <Grid x:Name="ActivityContent" Height="136" Background="Transparent">
             <ListView
                 x:Name="TransfersDockList"
                 ItemsSource="{Binding Jobs}"
@@ -58,15 +58,15 @@
                 </ListView.ItemContainerStyle>
                 <ListView.ItemTemplate>
                     <DataTemplate>
-                        <Grid Padding="10,4" ColumnSpacing="12">
+                        <Grid Padding="10,5" ColumnSpacing="12">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="3*" />
-                                <ColumnDefinition Width="100" />
-                                <ColumnDefinition Width="170" />
+                                <ColumnDefinition Width="*" MinWidth="180" />
+                                <ColumnDefinition Width="88" />
+                                <ColumnDefinition Width="144" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <StackPanel Spacing="0">
-                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                            <StackPanel Spacing="1">
+                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" FontWeight="SemiBold" />
                                 <TextBlock Text="{Binding Status}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.65" TextTrimming="CharacterEllipsis" />
                                 <TextBlock Text="{Binding Error.Message}" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" TextTrimming="CharacterEllipsis" />
                             </StackPanel>
@@ -81,34 +81,108 @@
                 </ListView.ItemTemplate>
             </ListView>
 
-            <ListView
-                x:Name="HistoryDockList"
-                ItemsSource="{Binding History}"
-                SelectionMode="None"
+            <Grid
+                x:Name="HistoryDockView"
                 Visibility="Collapsed"
-                AutomationProperties.Name="Transfer history">
-                <ListView.ItemContainerStyle>
-                    <Style TargetType="ListViewItem">
-                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                        <Setter Property="MinHeight" Value="32" />
-                        <Setter Property="Padding" Value="0" />
-                    </Style>
-                </ListView.ItemContainerStyle>
-                <ListView.ItemTemplate>
-                    <DataTemplate>
-                        <Grid Padding="10,4" ColumnSpacing="12">
+                AutomationProperties.Name="Transfer history and details">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="5*" MinWidth="280" />
+                    <ColumnDefinition Width="7*" MinWidth="360" />
+                </Grid.ColumnDefinitions>
+                <ListView
+                    x:Name="HistoryDockList"
+                    ItemsSource="{Binding History}"
+                    SelectedItem="{Binding SelectedHistory, Mode=TwoWay}"
+                    SelectionMode="Single"
+                    AutomationProperties.Name="Transfer history">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="MinHeight" Value="50" />
+                            <Setter Property="Padding" Value="0" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Padding="10,5" ColumnSpacing="10" RowSpacing="1">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" MinWidth="100" />
+                                    <ColumnDefinition Width="112" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="1" Text="{Binding OutcomeDisplay}" Style="{ThemeResource CaptionTextBlockStyle}" HorizontalAlignment="Right" />
+                                <TextBlock Grid.Row="1" Text="{Binding Detail}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.65" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding FinishedAtListDisplay}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.65" HorizontalAlignment="Right" TextTrimming="CharacterEllipsis" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+
+                <Border Grid.Column="1" BorderBrush="{ThemeResource PilotBorderBrush}" BorderThickness="1,0,0,0" Padding="12,8,10,6">
+                    <Grid RowSpacing="4">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="12">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="3*" />
-                                <ColumnDefinition Width="120" />
-                                <ColumnDefinition Width="170" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
-                            <TextBlock Grid.Column="1" Text="{Binding Outcome}" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
-                            <TextBlock Grid.Column="2" Text="{Binding FinishedAt}" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding SelectedHistory.DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="1" Text="{Binding SelectedHistory.OutcomeDisplay}" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
                         </Grid>
-                    </DataTemplate>
-                </ListView.ItemTemplate>
-            </ListView>
+                        <TextBlock Grid.Row="1" Text="{Binding SelectedHistory.Detail}" Style="{ThemeResource CaptionTextBlockStyle}" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" />
+                        <Grid Grid.Row="2" ColumnSpacing="10" Margin="0,2,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Job log" Style="{ThemeResource CaptionTextBlockStyle}" FontWeight="SemiBold" />
+                            <TextBlock Grid.Column="2" Text="{Binding SelectedHistory.StartedAtDisplay}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.6" />
+                        </Grid>
+                        <Grid Grid.Row="3">
+                            <TextBlock
+                                Text="Detailed events were not recorded by the version that created this history item."
+                                Style="{ThemeResource CaptionTextBlockStyle}"
+                                Opacity="0.6"
+                                VerticalAlignment="Center"
+                                TextWrapping="Wrap"
+                                Visibility="{Binding SelectedHistory.HasNoLog, Converter={StaticResource BoolToVisibilityConverter}}" />
+                            <ListView ItemsSource="{Binding SelectedHistory.Log}" SelectionMode="None" AutomationProperties.Name="Selected transfer log">
+                                <ListView.ItemContainerStyle>
+                                    <Style TargetType="ListViewItem">
+                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                        <Setter Property="MinHeight" Value="24" />
+                                        <Setter Property="Padding" Value="0" />
+                                    </Style>
+                                </ListView.ItemContainerStyle>
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Padding="2,2" ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="70" />
+                                                <ColumnDefinition Width="54" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding TimeDisplay}" FontFamily="Consolas" Style="{ThemeResource CaptionTextBlockStyle}" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Level}" Style="{ThemeResource CaptionTextBlockStyle}" />
+                                            <TextBlock Grid.Column="2" Text="{Binding Message}" Style="{ThemeResource CaptionTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Grid>
 
             <ListView
                 x:Name="LogDockList"

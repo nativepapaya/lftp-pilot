@@ -153,6 +153,33 @@ public sealed class CommandBuilderTests
     }
 
     [Fact]
+    public void FreshStatListsTheLiteralParentForUnicodeAndPatternCharacters()
+    {
+        const string path = "/remote/[EAC] 菊池桃子 - スペシャル・セレクションI";
+
+        var command = LftpCommandBuilder.BuildStat(path, fresh: true);
+
+        Assert.StartsWith($"echo \"{LftpCommandBuilder.LiteralStatMarker}{path}\"; cd \"/remote\"; ", command, StringComparison.Ordinal);
+        Assert.EndsWith("recls -laB --time-style=long-iso \".\"", command, StringComparison.Ordinal);
+        Assert.DoesNotContain($"recls -laB --time-style=long-iso \"{path}\"", command, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FileTransfersKeepUnicodePathsQuotedAsLiteralGetAndPutOperands()
+    {
+        var profileId = Guid.NewGuid();
+        const string remoteFolder = "/[EAC] 菊池桃子 - 菊池桃子 スペシャル・セレクションI [1993.11.01][VPCB-81025][CDRip FLAC Lossless]";
+        const string remoteBook = "/隣人が推し作家だった件 (とらの百合ノベルス).epub";
+        var download = new TransferPlan(Guid.NewGuid(), profileId, TransferDirection.Download, remoteFolder,
+            @"C:\Downloads\album", SourceKind: TransferSourceKind.Directory);
+        var upload = new TransferPlan(Guid.NewGuid(), profileId, TransferDirection.Upload,
+            @"C:\Downloads\隣人が推し作家だった件 (とらの百合ノベルス).epub", remoteBook);
+
+        Assert.Contains($"\"{remoteFolder}\"", LftpCommandBuilder.BuildTransfer(download, background: false), StringComparison.Ordinal);
+        Assert.EndsWith($"-o \"{remoteBook}\"", LftpCommandBuilder.BuildTransfer(upload, background: false), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ForegroundSkipDownloadDisablesClobberAndRestoresScopedSettings()
     {
         var plan = new TransferPlan(Guid.NewGuid(), Guid.NewGuid(), TransferDirection.Download, "/remote.bin", @"C:\Out\remote.bin", TransferMode.Skip, 1, 4096);

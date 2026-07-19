@@ -16,8 +16,9 @@ public sealed partial class ActivityCenterView : UserControl
         TransfersDockTab.IsChecked = selected == "Transfers";
         HistoryDockTab.IsChecked = selected == "History";
         LogDockTab.IsChecked = selected == "Log";
+        ActivityContent.Height = selected == "History" ? 196 : 136;
         TransfersDockList.Visibility = selected == "Transfers" ? Visibility.Visible : Visibility.Collapsed;
-        HistoryDockList.Visibility = selected == "History" ? Visibility.Visible : Visibility.Collapsed;
+        HistoryDockView.Visibility = selected == "History" ? Visibility.Visible : Visibility.Collapsed;
         LogDockList.Visibility = selected == "Log" ? Visibility.Visible : Visibility.Collapsed;
         if (DataContext is ActivityCenterViewModel viewModel) viewModel.IsExpanded = true;
     }
