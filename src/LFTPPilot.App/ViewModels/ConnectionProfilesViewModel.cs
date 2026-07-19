@@ -8,6 +8,24 @@ namespace LFTPPilot.App.ViewModels;
 
 public sealed class ConnectionProfilesViewModel : ObservableObject
 {
+    public sealed record ProtocolOption(ConnectionProtocol Value, string DisplayName, int DefaultPort);
+    public sealed record AuthenticationOption(AuthenticationKind Value, string DisplayName);
+
+    private static readonly IReadOnlyList<ProtocolOption> ProtocolOptionsValue =
+    [
+        new(ConnectionProtocol.Sftp, "SFTP — SSH file transfer", 22),
+        new(ConnectionProtocol.FtpsExplicit, "FTPES — explicit TLS required", 21),
+        new(ConnectionProtocol.FtpOpportunisticTls, "FTP — use TLS when available", 21),
+        new(ConnectionProtocol.FtpsImplicit, "FTPS — implicit TLS", 990),
+        new(ConnectionProtocol.Ftp, "FTP — plain, no TLS", 21),
+    ];
+    private static readonly IReadOnlyList<AuthenticationOption> AuthenticationOptionsValue =
+    [
+        new(AuthenticationKind.AskOnConnect, "Ask every time"),
+        new(AuthenticationKind.Password, "Password — protected by Windows"),
+        new(AuthenticationKind.SshKey, "SSH private key"),
+        new(AuthenticationKind.Anonymous, "Anonymous"),
+    ];
     private readonly IAgentWorkspaceClient _agent;
     private ConnectionProfile? _selectedProfile;
     private string _name = "New site";
@@ -43,6 +61,8 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
     public ObservableCollection<ConnectionProfile> Profiles { get; } = [];
     public IReadOnlyList<ConnectionProtocol> Protocols { get; } = Enum.GetValues<ConnectionProtocol>();
     public IReadOnlyList<AuthenticationKind> AuthenticationKinds { get; } = Enum.GetValues<AuthenticationKind>();
+    public IReadOnlyList<ProtocolOption> ProtocolOptions => ProtocolOptionsValue;
+    public IReadOnlyList<AuthenticationOption> AuthenticationOptions => AuthenticationOptionsValue;
     public AsyncRelayCommand ConnectCommand { get; }
     public AsyncRelayCommand CreateAndConnectCommand { get; }
     public AsyncRelayCommand SaveCommand { get; }
@@ -92,7 +112,27 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
     public string Host { get => _host; set { if (SetProperty(ref _host, value)) CreateAndConnectCommand.NotifyCanExecuteChanged(); } }
     public string UserName { get => _userName; set => SetProperty(ref _userName, value); }
     public int Port { get => _port; set => SetProperty(ref _port, value); }
-    public ConnectionProtocol Protocol { get => _protocol; set => SetProperty(ref _protocol, value); }
+    public ConnectionProtocol Protocol
+    {
+        get => _protocol;
+        set
+        {
+            if (!SetProperty(ref _protocol, value)) return;
+            OnPropertyChanged(nameof(SelectedProtocolOption));
+        }
+    }
+    public ProtocolOption SelectedProtocolOption
+    {
+        get => ProtocolOptionsValue.First(option => option.Value == Protocol);
+        set
+        {
+            if (value is null || value.Value == Protocol) return;
+            var priorDefault = ProtocolOptionsValue.First(option => option.Value == Protocol).DefaultPort;
+            var useDefaultPort = Port == priorDefault;
+            Protocol = value.Value;
+            if (useDefaultPort) Port = value.DefaultPort;
+        }
+    }
     public AuthenticationKind Authentication
     {
         get => _authentication;
@@ -106,7 +146,13 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
             OnPropertyChanged(nameof(CanRememberCredential));
             OnPropertyChanged(nameof(CredentialHeader));
             OnPropertyChanged(nameof(RememberCredentialLabel));
+            OnPropertyChanged(nameof(SelectedAuthenticationOption));
         }
+    }
+    public AuthenticationOption SelectedAuthenticationOption
+    {
+        get => AuthenticationOptionsValue.First(option => option.Value == Authentication);
+        set { if (value is not null) Authentication = value.Value; }
     }
     public string? Status { get => _status; private set => SetProperty(ref _status, value); }
     public string Credential { get => _credential; set => SetProperty(ref _credential, value); }

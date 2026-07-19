@@ -11,6 +11,7 @@ public sealed record PackageDataPaths(string LocalState, string LocalCache, stri
     public string History => Path.Combine(LocalState, "history");
     public string MirrorDefinitions => Path.Combine(LocalState, "mirror-definitions");
     public string FolderTransferPresets => Path.Combine(LocalState, "folder-transfer-presets");
+    public string UiPreferences => Path.Combine(LocalState, "ui-preferences.json");
     public string RuntimeHome => Path.Combine(LocalState, "lftp-home");
     public string RemoteEdits => Path.Combine(LocalCache, "remote-edits");
     public string ExplorerExports => Path.Combine(LocalCache, "explorer-exports");

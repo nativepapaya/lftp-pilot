@@ -1170,9 +1170,13 @@ public sealed class WorkspaceTests
         var localRoot = Path.Combine(fixture.Directory.Path, "local");
         Directory.CreateDirectory(Path.Combine(localRoot, "folder"));
         await File.WriteAllTextAsync(Path.Combine(localRoot, "file.txt"), "data", TestContext.Current.CancellationToken);
+        var hiddenPath = Path.Combine(localRoot, "zz-hidden.txt");
+        await File.WriteAllTextAsync(hiddenPath, "hidden", TestContext.Current.CancellationToken);
+        File.SetAttributes(hiddenPath, File.GetAttributes(hiddenPath) | FileAttributes.Hidden);
         var local = await fixture.Service.BrowseLocalAsync(new(session.SessionId, localRoot), TestContext.Current.CancellationToken);
         Assert.Equal(EntryKind.Directory, local.Entries[0].Kind);
         Assert.Equal("file.txt", local.Entries[1].Name);
+        Assert.True(Assert.Single(local.Entries.Where(static entry => entry.Name == "zz-hidden.txt")).IsHidden);
 
         var remote = await fixture.Service.BrowseRemoteAsync(new(session.SessionId, "/home"), TestContext.Current.CancellationToken);
         Assert.Equal("folder", remote.Entries[0].Name);

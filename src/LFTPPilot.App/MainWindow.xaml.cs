@@ -34,8 +34,9 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         _activation = activation;
-        ViewModel = new MainWindowViewModel(AppServices.Agent);
+        ViewModel = new MainWindowViewModel(AppServices.Agent, AppServices.Preferences);
         ViewModel.RemoteEditLocalChanged += ViewModel_RemoteEditLocalChanged;
+        ViewModel.Settings.PreferencesChanged += Settings_PreferencesChanged;
         RootGrid.DataContext = ViewModel;
         ViewModel.Activity.Jobs.CollectionChanged += Jobs_CollectionChanged;
         ViewModel.Connections.Profiles.CollectionChanged += Profiles_CollectionChanged;
@@ -44,9 +45,19 @@ public sealed partial class MainWindow : Window
         SystemBackdrop = new MicaBackdrop { Kind = MicaKind.Base };
         ConfigureWindow();
         RootGrid.Loaded += RootGrid_Loaded;
+        ApplyTheme(ViewModel.Settings.Preferences.Theme);
     }
 
     public MainWindowViewModel ViewModel { get; }
+
+    private void Settings_PreferencesChanged(object? sender, AppPreferences preferences) => ApplyTheme(preferences.Theme);
+
+    private void ApplyTheme(AppThemePreference preference) => RootGrid.RequestedTheme = preference switch
+    {
+        AppThemePreference.Light => ElementTheme.Light,
+        AppThemePreference.Dark => ElementTheme.Dark,
+        _ => ElementTheme.Default,
+    };
 
     private async void RootGrid_Loaded(object sender, RoutedEventArgs e)
     {
@@ -59,7 +70,7 @@ public sealed partial class MainWindow : Window
         await RefreshJumpListAsync().ConfigureAwait(true);
         if (_activation?.Action == ProtocolActivationAction.OpenSettings)
         {
-            await ShowToolAsync("Settings", new SettingsPage(WindowNative.GetWindowHandle(this)) { DataContext = ViewModel.Settings }, 720).ConfigureAwait(true);
+            await ShowToolAsync("Settings", new SettingsPage(WindowNative.GetWindowHandle(this)) { DataContext = ViewModel.Settings }, 860).ConfigureAwait(true);
         }
         else if (_activation?.Action == ProtocolActivationAction.ShowTransfers)
         {
@@ -156,7 +167,10 @@ public sealed partial class MainWindow : Window
         await ShowToolAsync("Isolated LFTP console", new ConsolePage { DataContext = ViewModel.Console }, 860).ConfigureAwait(true);
 
     private async void Settings_Click(object sender, RoutedEventArgs e) =>
-        await ShowToolAsync("Settings", new SettingsPage(WindowNative.GetWindowHandle(this)) { DataContext = ViewModel.Settings }, 720).ConfigureAwait(true);
+        await ShowToolAsync("Settings", new SettingsPage(WindowNative.GetWindowHandle(this)) { DataContext = ViewModel.Settings }, 860).ConfigureAwait(true);
+
+    private async void Help_Click(object sender, RoutedEventArgs e) =>
+        await ShowToolAsync("Keyboard & mouse", new ShortcutsPage(), 620).ConfigureAwait(true);
 
     private async Task ShowToolAsync(string title, FrameworkElement content, double width)
     {

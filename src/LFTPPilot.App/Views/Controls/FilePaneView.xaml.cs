@@ -112,6 +112,46 @@ public sealed partial class FilePaneView : UserControl
 
     private void FilesList_SelectionChanged(object sender, SelectionChangedEventArgs e) => ViewModel?.UpdateSelection(FilesList.SelectedItems);
 
+    private void FilterAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (ViewModel?.ToggleFilterCommand.CanExecute(null) != true) return;
+        ViewModel.ToggleFilterCommand.Execute(null);
+        if (ViewModel.IsFilterVisible) DispatcherQueue.TryEnqueue(() => FilterBox.Focus(FocusState.Keyboard));
+        args.Handled = true;
+    }
+
+    private void FilePane_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.OriginalSource is TextBox or PasswordBox or NumberBox or ComboBox) return;
+        switch (e.Key)
+        {
+            case VirtualKey.Back:
+                if (ViewModel?.NavigateUpCommand.CanExecute(null) == true) ViewModel.NavigateUpCommand.Execute(null);
+                e.Handled = true;
+                break;
+            case VirtualKey.F3:
+                if (ViewModel?.RefreshCommand.CanExecute(null) == true) ViewModel.RefreshCommand.Execute(null);
+                e.Handled = true;
+                break;
+            case VirtualKey.F7:
+                CreateDirectory_Click(this, e);
+                e.Handled = true;
+                break;
+            case VirtualKey.F2:
+                RenameOrMove_Click(this, e);
+                e.Handled = true;
+                break;
+            case VirtualKey.Delete:
+                DeleteEntries_Click(this, e);
+                e.Handled = true;
+                break;
+            case VirtualKey.Enter:
+                OpenMenuItem_Click(this, e);
+                e.Handled = true;
+                break;
+        }
+    }
+
     private async void FilesList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
         if (FilesList.SelectedItem is FileEntryViewModel item && ViewModel is not null)

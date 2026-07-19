@@ -20,36 +20,57 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <Border Width="28" Height="28" CornerRadius="7" Background="{ThemeResource PilotAccentBrush}">
-                <FontIcon Glyph="&#xE8AB;" FontSize="15" Foreground="{ThemeResource PilotOnAccentBrush}" AutomationProperties.Name="LFTP Pilot" />
-            </Border>
-            <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-                <TextBlock Text="LFTP Pilot" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                <TextBlock Text="{Binding AgentStatus}" FontSize="11" Opacity="0.72" />
+            <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center">
+                <Border Width="28" Height="28" CornerRadius="7" Background="{ThemeResource PilotAccentBrush}">
+                    <FontIcon Glyph="&#xE8AB;" FontSize="15" Foreground="{ThemeResource PilotOnAccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="LFTP Pilot" />
+                </Border>
+                <TextBlock Text="LFTP Pilot" Style="{ThemeResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" />
             </StackPanel>
-            <CommandBar Grid.Column="2" Margin="0,0,144,0" DefaultLabelPosition="Right" Background="Transparent" IsOpen="False">
-                <AppBarButton Label="Connect" Click="Connect_Click" AutomationProperties.Name="Manage connections">
-                    <AppBarButton.Icon><FontIcon Glyph="&#xE710;" /></AppBarButton.Icon>
-                    <AppBarButton.KeyboardAccelerators>
-                        <KeyboardAccelerator Key="N" Modifiers="Control" />
-                    </AppBarButton.KeyboardAccelerators>
-                </AppBarButton>
-                <AppBarButton Label="Mirror" Click="Mirror_Click" AutomationProperties.Name="Plan a mirror job">
-                    <AppBarButton.Icon><FontIcon Glyph="&#xE895;" /></AppBarButton.Icon>
-                </AppBarButton>
-                <AppBarButton Label="Server transfer" Click="RemoteTransfer_Click" AutomationProperties.Name="Remote-to-remote transfer">
-                    <AppBarButton.Icon><FontIcon Glyph="&#xE8AB;" /></AppBarButton.Icon>
-                </AppBarButton>
-                <AppBarButton Label="Active edits" Click="ActiveEdits_Click" AutomationProperties.Name="Review active managed remote edits">
-                    <AppBarButton.Icon><FontIcon Glyph="&#xE70F;" /></AppBarButton.Icon>
-                </AppBarButton>
-                <AppBarButton Label="Console" Click="Console_Click" AutomationProperties.Name="Open isolated LFTP console">
-                    <AppBarButton.Icon><FontIcon Glyph="&#xE756;" /></AppBarButton.Icon>
-                </AppBarButton>
-                <AppBarButton Label="Settings" Click="Settings_Click" AutomationProperties.Name="Open settings">
-                    <AppBarButton.Icon><FontIcon Glyph="&#xE713;" /></AppBarButton.Icon>
-                </AppBarButton>
-            </CommandBar>
+
+            <Grid Grid.Column="1" Margin="24,0" VerticalAlignment="Center">
+                <Border
+                    Padding="10,4"
+                    CornerRadius="12"
+                    Background="{ThemeResource PilotSubtleBrush}"
+                    HorizontalAlignment="Center"
+                    Visibility="{Binding HasSessions, Converter={StaticResource BoolToVisibilityConverter}}"
+                    ToolTipService.ToolTip="{Binding SelectedSession.StatusText}">
+                    <StackPanel Orientation="Horizontal" Spacing="7">
+                        <Ellipse Width="7" Height="7" Fill="{ThemeResource PilotAccentBrush}" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding SelectedSession.DisplayName}" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                        <TextBlock Text="{Binding SelectedSession.ConnectionStateLabel}" Opacity="0.7" />
+                    </StackPanel>
+                </Border>
+                <TextBlock
+                    Text="No server connected"
+                    HorizontalAlignment="Center"
+                    Opacity="0.65"
+                    Visibility="{Binding HasNoSessions, Converter={StaticResource BoolToVisibilityConverter}}" />
+            </Grid>
+
+            <StackPanel Grid.Column="2" Margin="0,0,144,0" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                <Button Height="34" Padding="11,0" Click="Connect_Click" AutomationProperties.Name="Open connection manager">
+                    <StackPanel Orientation="Horizontal" Spacing="7"><FontIcon Glyph="&#xE968;" FontSize="14" /><TextBlock Text="Connections" /></StackPanel>
+                    <Button.KeyboardAccelerators><KeyboardAccelerator Key="N" Modifiers="Control" /></Button.KeyboardAccelerators>
+                </Button>
+                <Button Height="34" Padding="11,0" AutomationProperties.Name="Open LFTP tools">
+                    <StackPanel Orientation="Horizontal" Spacing="7"><FontIcon Glyph="&#xE90F;" FontSize="14" /><TextBlock Text="Tools" /><FontIcon Glyph="&#xE70D;" FontSize="10" /></StackPanel>
+                    <Button.Flyout>
+                        <MenuFlyout>
+                            <MenuFlyoutItem Text="Synchronize folders…" Click="Mirror_Click"><MenuFlyoutItem.Icon><FontIcon Glyph="&#xE895;" /></MenuFlyoutItem.Icon></MenuFlyoutItem>
+                            <MenuFlyoutItem Text="Server-to-server transfer…" Click="RemoteTransfer_Click"><MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8AB;" /></MenuFlyoutItem.Icon></MenuFlyoutItem>
+                            <MenuFlyoutItem Text="Managed remote edits…" Click="ActiveEdits_Click"><MenuFlyoutItem.Icon><FontIcon Glyph="&#xE70F;" /></MenuFlyoutItem.Icon></MenuFlyoutItem>
+                            <MenuFlyoutSeparator />
+                            <MenuFlyoutItem Text="Advanced LFTP console…" Click="Console_Click"><MenuFlyoutItem.Icon><FontIcon Glyph="&#xE756;" /></MenuFlyoutItem.Icon></MenuFlyoutItem>
+                        </MenuFlyout>
+                    </Button.Flyout>
+                </Button>
+                <Button Style="{StaticResource PilotToolbarButtonStyle}" Click="Help_Click" ToolTipService.ToolTip="Keyboard &amp; mouse (F1)" AutomationProperties.Name="Keyboard and mouse help">
+                    <FontIcon Glyph="&#xE897;" FontSize="14" />
+                    <Button.KeyboardAccelerators><KeyboardAccelerator Key="F1" /></Button.KeyboardAccelerators>
+                </Button>
+                <Button Style="{StaticResource PilotToolbarButtonStyle}" Click="Settings_Click" ToolTipService.ToolTip="Settings" AutomationProperties.Name="Open settings"><FontIcon Glyph="&#xE713;" FontSize="14" /></Button>
+            </StackPanel>
         </Grid>
 
         <StackPanel Grid.Row="1" Margin="12,0,12,8" Spacing="6">
@@ -81,26 +102,39 @@
                 VerticalAlignment="Center"
                 Canvas.ZIndex="10"
                 AutomationProperties.Name="Loading workspace" />
-            <TabView
-                x:Name="SessionTabs"
-                TabItemsSource="{Binding Sessions}"
-                SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
-                Visibility="{Binding HasSessions, Converter={StaticResource BoolToVisibilityConverter}}"
-                IsAddTabButtonVisible="True"
-                AddTabButtonClick="SessionTabs_AddTabButtonClick"
-                TabCloseRequested="SessionTabs_TabCloseRequested"
-                AutomationProperties.Name="Connection sessions">
-                <TabView.TabItemTemplate>
-                    <DataTemplate>
-                        <TabViewItem Header="{Binding DisplayName}" IsClosable="True">
-                            <TabViewItem.IconSource>
-                                <FontIconSource Glyph="{Binding ConnectionGlyph}" />
-                            </TabViewItem.IconSource>
-                            <controls:SessionWorkspaceView DataContext="{Binding}" />
-                        </TabViewItem>
-                    </DataTemplate>
-                </TabView.TabItemTemplate>
-            </TabView>
+            <Grid Visibility="{Binding HasSessions, Converter={StaticResource BoolToVisibilityConverter}}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="44" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <TabView
+                    x:Name="SessionTabs"
+                    Height="44"
+                    TabItemsSource="{Binding Sessions}"
+                    SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
+                    IsAddTabButtonVisible="True"
+                    TabWidthMode="SizeToContent"
+                    AddTabButtonClick="SessionTabs_AddTabButtonClick"
+                    TabCloseRequested="SessionTabs_TabCloseRequested"
+                    AutomationProperties.Name="Connection sessions">
+                    <TabView.TabItemTemplate>
+                        <DataTemplate>
+                            <TabViewItem Header="{Binding DisplayName}" IsClosable="True">
+                                <TabViewItem.IconSource>
+                                    <FontIconSource Glyph="{Binding ConnectionGlyph}" />
+                                </TabViewItem.IconSource>
+                            </TabViewItem>
+                        </DataTemplate>
+                    </TabView.TabItemTemplate>
+                </TabView>
+
+                <controls:SessionWorkspaceView
+                    Grid.Row="1"
+                    DataContext="{Binding SelectedSession}"
+                    HorizontalAlignment="Stretch"
+                    VerticalAlignment="Stretch" />
+            </Grid>
 
             <Grid
                 Visibility="{Binding HasNoSessions, Converter={StaticResource BoolToVisibilityConverter}}"
@@ -115,34 +149,27 @@
                 <controls:FilePaneView DataContext="{Binding OfflineLocalPane}" />
 
                 <StackPanel Grid.Column="1" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <Button Width="42" Height="42" IsEnabled="False" ToolTipService.ToolTip="Connect to upload files" AutomationProperties.Name="Upload unavailable until connected">
-                        <FontIcon Glyph="&#xE72A;" />
-                    </Button>
-                    <Button Width="42" Height="42" IsEnabled="False" ToolTipService.ToolTip="Connect to download files" AutomationProperties.Name="Download unavailable until connected">
-                        <FontIcon Glyph="&#xE72B;" />
-                    </Button>
-                    <FontIcon Glyph="&#xE8AB;" FontSize="18" Opacity="0.45" />
+                    <Button Width="50" Height="54" Padding="0" IsEnabled="False" ToolTipService.ToolTip="Connect to download files" AutomationProperties.Name="Download unavailable until connected"><StackPanel Spacing="1"><FontIcon Glyph="&#xE72B;" FontSize="16" /><TextBlock Text="GET" FontSize="10" HorizontalAlignment="Center" /></StackPanel></Button>
+                    <StackPanel Spacing="3"><Ellipse Width="6" Height="6" Fill="{ThemeResource TextFillColorDisabledBrush}" HorizontalAlignment="Center" /><TextBlock Text="Offline" FontSize="10" Opacity="0.6" /></StackPanel>
+                    <Button Width="50" Height="54" Padding="0" IsEnabled="False" ToolTipService.ToolTip="Connect to upload files" AutomationProperties.Name="Upload unavailable until connected"><StackPanel Spacing="1"><FontIcon Glyph="&#xE72A;" FontSize="16" /><TextBlock Text="PUT" FontSize="10" HorizontalAlignment="Center" /></StackPanel></Button>
                 </StackPanel>
 
-                <Border
-                    Grid.Column="2"
-                    Style="{StaticResource PilotCardStyle}"
-                    AutomationProperties.Name="Remote files not connected">
-                    <Grid Padding="24">
-                        <StackPanel Spacing="14" MaxWidth="420" HorizontalAlignment="Center" VerticalAlignment="Center">
-                            <Border Width="56" Height="56" CornerRadius="16" Background="{ThemeResource PilotSubtleBrush}">
-                                <FontIcon Glyph="&#xE968;" FontSize="25" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                            </Border>
-                            <TextBlock Text="Remote files" Style="{ThemeResource TitleTextBlockStyle}" TextAlignment="Center" />
-                            <TextBlock Text="No server is connected yet. Create or choose a saved connection to open a persistent session tab." TextWrapping="Wrap" TextAlignment="Center" Opacity="0.78" />
-                            <Button
-                                Content="Add or choose connection"
-                                Click="Connect_Click"
-                                Style="{ThemeResource AccentButtonStyle}"
-                                HorizontalAlignment="Center"
-                                AutomationProperties.Name="Add or choose a remote connection" />
-                            <TextBlock Text="{Binding OfflineWorkspaceStatus}" TextWrapping="Wrap" TextAlignment="Center" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.68" />
+                <Border Grid.Column="2" Style="{StaticResource PilotCardStyle}" AutomationProperties.Name="Remote files not connected">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="42" /><RowDefinition Height="42" /><RowDefinition Height="32" /><RowDefinition Height="*" /><RowDefinition Height="28" /></Grid.RowDefinitions>
+                        <Grid Padding="10,4,8,4">
+                            <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center"><FontIcon Glyph="&#xE968;" FontSize="14" Opacity="0.8" /><TextBlock Text="Remote" Style="{ThemeResource BodyStrongTextBlockStyle}" /></StackPanel>
+                        </Grid>
+                        <Grid Grid.Row="1" Padding="10,3,10,5"><TextBox Text="/" IsReadOnly="True" Opacity="0.65" AutomationProperties.Name="Remote folder path unavailable" /></Grid>
+                        <Grid Grid.Row="2" Padding="10,0" Background="{ThemeResource PilotSubtleBrush}"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="92" /><ColumnDefinition Width="142" /><ColumnDefinition Width="94" /></Grid.ColumnDefinitions><TextBlock Text="Name" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Size" Style="{ThemeResource CaptionTextBlockStyle}" HorizontalAlignment="Right" VerticalAlignment="Center" /><TextBlock Grid.Column="2" Text="Modified" Style="{ThemeResource CaptionTextBlockStyle}" Margin="8,0,0,0" VerticalAlignment="Center" /><TextBlock Grid.Column="3" Text="Type" Style="{ThemeResource CaptionTextBlockStyle}" Margin="8,0,0,0" VerticalAlignment="Center" /></Grid>
+                        <StackPanel Grid.Row="3" Spacing="12" MaxWidth="420" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <FontIcon Glyph="&#xE711;" FontSize="24" Opacity="0.65" />
+                            <TextBlock Text="Not connected" Style="{ThemeResource BodyStrongTextBlockStyle}" TextAlignment="Center" />
+                            <TextBlock Text="Choose a saved connection or add a new server to start a remote session." TextWrapping="Wrap" TextAlignment="Center" Opacity="0.72" />
+                            <Button Content="Open connection manager" Click="Connect_Click" Style="{ThemeResource AccentButtonStyle}" HorizontalAlignment="Center" AutomationProperties.Name="Add or choose a remote connection" />
+                            <TextBlock Text="{Binding OfflineWorkspaceStatus}" TextWrapping="Wrap" TextAlignment="Center" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.65" />
                         </StackPanel>
+                        <Grid Grid.Row="4" Padding="10,0" Background="{ThemeResource PilotSubtleBrush}"><TextBlock Text="0 items" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" /></Grid>
                     </Grid>
                 </Border>
             </Grid>

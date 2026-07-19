@@ -3,11 +3,13 @@ using LFTPPilot.Core;
 
 namespace LFTPPilot.App.ViewModels;
 
-public sealed class FileEntryViewModel(FileEntry entry) : ObservableObject
+public sealed class FileEntryViewModel(FileEntry entry, double rowHeight = 34, bool showDetailLine = false) : ObservableObject
 {
     private bool _isSelected;
 
     public FileEntry Entry { get; } = entry;
+    public double RowHeight { get; } = rowHeight;
+    public bool ShowDetailLine { get; } = showDetailLine;
     public string Name => Entry.Name;
     public string FullPath => Entry.FullPath;
     public bool IsDirectory => Entry.IsDirectory;

@@ -12,6 +12,7 @@ public sealed class FilePaneViewModel : ObservableObject
 {
     private readonly IAgentWorkspaceClient _agent;
     private readonly Guid _sessionId;
+    private readonly string _homePath;
     private readonly List<FileEntry> _allEntries = [];
     private ConnectionProfile? _profile;
     private ObservableCollection<FileEntryViewModel> _entries = [];
@@ -21,6 +22,9 @@ public sealed class FilePaneViewModel : ObservableObject
     private bool _sortDescending;
     private FilePaneSortColumn _sortColumn = FilePaneSortColumn.Name;
     private string? _selectedBookmark;
+    private bool _showHidden;
+    private bool _isFilterVisible;
+    private FileListDensity _fileListDensity = FileListDensity.Compact;
 
     public FilePaneViewModel(
         IAgentWorkspaceClient agent,
@@ -37,10 +41,18 @@ public sealed class FilePaneViewModel : ObservableObject
         SupportsTransfers = supportsTransfers;
         _profile = kind == PaneKind.Remote ? profile : null;
         _path = path;
+        _homePath = kind == PaneKind.Remote
+            ? profile?.InitialRemotePath ?? path
+            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(_homePath)) _homePath = path;
         Replace(entries);
         NavigateCommand = new AsyncRelayCommand(parameter => NavigateAsync(parameter as string ?? Path), null, ReportError);
         RefreshCommand = new AsyncRelayCommand(_ => NavigateAsync(Path), null, ReportError);
+        NavigateUpCommand = new AsyncRelayCommand(_ => NavigateAsync(GetParentPath()), null, ReportError);
+        NavigateHomeCommand = new AsyncRelayCommand(_ => NavigateAsync(_homePath), null, ReportError);
         SortCommand = new RelayCommand(parameter => Sort(parameter?.ToString()));
+        ToggleFilterCommand = new RelayCommand(_ => ToggleFilter());
+        ToggleHiddenCommand = new RelayCommand(_ => ShowHidden = !ShowHidden);
         AddCurrentBookmarkCommand = new AsyncRelayCommand(_ => AddCurrentBookmarkAsync(), _ => CanAddCurrentBookmark, ReportError);
         RemoveBookmarkCommand = new AsyncRelayCommand(RemoveBookmarkAsync, CanRemoveBookmark, ReportError);
         NavigateBookmarkCommand = new AsyncRelayCommand(NavigateBookmarkAsync, CanNavigateBookmark, ReportError);
@@ -50,8 +62,9 @@ public sealed class FilePaneViewModel : ObservableObject
     public PaneKind Kind { get; }
     public bool SupportsTransfers { get; }
     public Guid SessionId => _sessionId;
-    public string PaneTitle => Kind == PaneKind.Local ? "This PC" : "Remote";
+    public string PaneTitle => Kind == PaneKind.Local ? "Local" : _profile?.Name ?? "Remote";
     public string PaneSubtitle => Kind == PaneKind.Local ? "Local files" : "LFTP session";
+    public string PaneIconGlyph => Kind == PaneKind.Local ? "\uE7F1" : "\uE968";
     public ObservableCollection<FileEntryViewModel> Entries
     {
         get => _entries;
@@ -61,11 +74,34 @@ public sealed class FilePaneViewModel : ObservableObject
     public ObservableCollection<string> QuickAccessBookmarks { get; } = [];
     public AsyncRelayCommand NavigateCommand { get; }
     public AsyncRelayCommand RefreshCommand { get; }
+    public AsyncRelayCommand NavigateUpCommand { get; }
+    public AsyncRelayCommand NavigateHomeCommand { get; }
     public RelayCommand SortCommand { get; }
+    public RelayCommand ToggleFilterCommand { get; }
+    public RelayCommand ToggleHiddenCommand { get; }
     public AsyncRelayCommand AddCurrentBookmarkCommand { get; }
     public AsyncRelayCommand RemoveBookmarkCommand { get; }
     public AsyncRelayCommand NavigateBookmarkCommand { get; }
     public bool IsRemote => Kind == PaneKind.Remote;
+    public bool IsLocal => Kind == PaneKind.Local;
+    public bool ShowHidden
+    {
+        get => _showHidden;
+        set
+        {
+            if (!SetProperty(ref _showHidden, value)) return;
+            OnPropertyChanged(nameof(HiddenFilesLabel));
+            RebuildEntries();
+        }
+    }
+    public string HiddenFilesLabel => ShowHidden ? "Hide hidden files" : "Show hidden files";
+    public bool IsFilterVisible
+    {
+        get => _isFilterVisible;
+        private set => SetProperty(ref _isFilterVisible, value);
+    }
+    public double FileRowHeight => _fileListDensity == FileListDensity.Compact ? 34 : 44;
+    public bool ShowDetailLine => _fileListDensity == FileListDensity.Comfortable;
     public bool CanAddCurrentBookmark => IsRemote && _profile is not null && Path.StartsWith("/", StringComparison.Ordinal) &&
         !QuickAccessBookmarks.Contains(Path, StringComparer.Ordinal) && QuickAccessBookmarks.Count < 128;
 
@@ -288,7 +324,20 @@ public sealed class FilePaneViewModel : ObservableObject
     {
         if (!IsRemote || (_profile is not null && profile.Id != _profile.Id)) return;
         _profile = profile;
+        OnPropertyChanged(nameof(PaneTitle));
         LoadBookmarks();
+    }
+
+    public void ApplyPreferences(bool showHidden, FileListDensity density)
+    {
+        if (_fileListDensity != density)
+        {
+            _fileListDensity = density;
+            OnPropertyChanged(nameof(FileRowHeight));
+            OnPropertyChanged(nameof(ShowDetailLine));
+            RebuildEntries();
+        }
+        ShowHidden = showHidden;
     }
 
     public void Restore(string path, IEnumerable<FileEntry> entries)
@@ -328,10 +377,12 @@ public sealed class FilePaneViewModel : ObservableObject
 
     private void RebuildEntries()
     {
-        var filtered = string.IsNullOrWhiteSpace(FilterText)
-            ? _allEntries
-            : _allEntries.Where(entry => entry.Name.Contains(FilterText.Trim(), StringComparison.CurrentCultureIgnoreCase));
-        Entries = new ObservableCollection<FileEntryViewModel>(filtered.Select(static entry => new FileEntryViewModel(entry)));
+        IEnumerable<FileEntry> filtered = _allEntries;
+        if (!ShowHidden)
+            filtered = filtered.Where(static entry => !entry.IsHidden && !entry.Name.StartsWith(".", StringComparison.Ordinal));
+        if (!string.IsNullOrWhiteSpace(FilterText))
+            filtered = filtered.Where(entry => entry.Name.Contains(FilterText.Trim(), StringComparison.CurrentCultureIgnoreCase));
+        Entries = new ObservableCollection<FileEntryViewModel>(filtered.Select(entry => new FileEntryViewModel(entry, FileRowHeight, ShowDetailLine)));
         ApplySort();
         OnPropertyChanged(nameof(SelectionSummary));
     }
@@ -404,6 +455,27 @@ public sealed class FilePaneViewModel : ObservableObject
     {
         LastError = exception.Message;
         OnPropertyChanged(nameof(LastError));
+    }
+
+    private void ToggleFilter()
+    {
+        IsFilterVisible = !IsFilterVisible;
+        if (!IsFilterVisible) FilterText = string.Empty;
+    }
+
+    private string GetParentPath()
+    {
+        if (Kind == PaneKind.Local)
+        {
+            var root = System.IO.Path.GetPathRoot(Path);
+            if (string.Equals(root, Path, StringComparison.OrdinalIgnoreCase)) return Path;
+            return Directory.GetParent(Path)?.FullName ?? Path;
+        }
+
+        if (Path == "/") return Path;
+        var trimmed = Path.TrimEnd('/');
+        var slash = trimmed.LastIndexOf('/');
+        return slash <= 0 ? "/" : trimmed[..slash];
     }
 
     private async Task ReloadCurrentPathAsync()

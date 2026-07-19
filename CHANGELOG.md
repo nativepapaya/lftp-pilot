@@ -7,6 +7,25 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ## Unreleased
 
+### Changed
+
+- Reworked the native workspace around LFTP Commander's proven hierarchy:
+  connections and session state lead the title bar, advanced features live in
+  one Tools menu, both file panes use compact command toolbars and optional
+  filters, GET/PUT remain visually central, and Activity spans the window as a
+  proper bottom dock without closable utility tabs.
+- Replaced the placeholder Settings page with a native sectioned surface for
+  interface behavior, real transfer defaults, authenticated LFTP engine
+  status, package storage, diagnostics, and signed updates. Theme, pane
+  density, hidden-file defaults, Activity state, parallelism, segmentation,
+  and rate limits persist per Windows account and feed the live workspace and
+  new transfer dialogs.
+- Connection protocol and authentication choices now use descriptive labels
+  instead of raw enum names, while saved connection rows show their endpoint
+  context at a glance.
+- Added a native keyboard-and-mouse reference and pane shortcuts for filtering,
+  navigation, refresh, folder creation, rename, open, and delete operations.
+
 ### Fixed
 
 - First launch now shows a real local file pane and an intentional remote

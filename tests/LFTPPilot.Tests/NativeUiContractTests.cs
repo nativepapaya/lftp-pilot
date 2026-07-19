@@ -47,7 +47,52 @@ public sealed class NativeUiContractTests
         var localPane = workspace.Split('\n').Single(line => line.Contains("x:Name=\"LocalPane\"", StringComparison.Ordinal));
         Assert.DoesNotContain("IsEnabled=\"{Binding IsConnected}\"", localPane, StringComparison.Ordinal);
         Assert.Contains("Grid.Column=\"2\"", workspace, StringComparison.Ordinal);
-        Assert.Contains("Saved tab is disconnected", workspace, StringComparison.Ordinal);
+        Assert.Contains("Remote session disconnected", workspace, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NativeShellKeepsCommanderWorkflowHierarchyWithoutFlatAdvancedToolbar()
+    {
+        var root = FindRepositoryRoot();
+        var mainWindow = await File.ReadAllTextAsync(
+            Path.Combine(root, "src", "LFTPPilot.App", "MainWindow.xaml"),
+            TestContext.Current.CancellationToken);
+        var filePane = await File.ReadAllTextAsync(
+            Path.Combine(root, "src", "LFTPPilot.App", "Views", "Controls", "FilePaneView.xaml"),
+            TestContext.Current.CancellationToken);
+        var activity = await File.ReadAllTextAsync(
+            Path.Combine(root, "src", "LFTPPilot.App", "Views", "Controls", "ActivityCenterView.xaml"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("Text=\"Connections\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Text=\"Tools\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Text=\"Synchronize folders…\"", mainWindow, StringComparison.Ordinal);
+        Assert.DoesNotContain("<CommandBar", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Text=\"GET\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Text=\"PUT\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("DataContext=\"{Binding SelectedSession}\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding ToggleFilterCommand}\"", filePane, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding HiddenFilesLabel}\"", filePane, StringComparison.Ordinal);
+        Assert.Equal(3, activity.Split("IsClosable=\"False\"").Length - 1);
+    }
+
+    [Fact]
+    public async Task SettingsExposeOnlyPersistedNativeSectionsAndTransferDefaults()
+    {
+        var root = FindRepositoryRoot();
+        var settings = await File.ReadAllTextAsync(
+            Path.Combine(root, "src", "LFTPPilot.App", "Views", "Pages", "SettingsPage.xaml"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("Content=\"Interface\"", settings, StringComparison.Ordinal);
+        Assert.Contains("Content=\"Transfers\"", settings, StringComparison.Ordinal);
+        Assert.Contains("Content=\"LFTP engine\"", settings, StringComparison.Ordinal);
+        Assert.Contains("Content=\"Storage &amp; updates\"", settings, StringComparison.Ordinal);
+        Assert.Contains("DefaultParallelFiles", settings, StringComparison.Ordinal);
+        Assert.Contains("DefaultDownloadSegments", settings, StringComparison.Ordinal);
+        Assert.Contains("DownloadLimitKiB", settings, StringComparison.Ordinal);
+        Assert.DoesNotContain("custom font", settings, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("OLED", settings, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string FindRepositoryRoot()

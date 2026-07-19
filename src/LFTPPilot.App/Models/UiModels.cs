@@ -87,10 +87,3 @@ public enum FilePaneSortColumn
     Modified,
     Type,
 }
-
-public enum AppThemePreference
-{
-    System,
-    Light,
-    Dark,
-}

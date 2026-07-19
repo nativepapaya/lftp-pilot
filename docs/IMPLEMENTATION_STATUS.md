@@ -5,20 +5,22 @@ repository is a fresh native Windows codebase with no Git history or data
 migration from LFTP Commander. This page separates the shipped implementation
 from the final independent-machine acceptance work.
 
-## Native UI recovery in progress
+## Native UI successor update in progress
 
 The signed `1.0.0.16` trusted-tester package exposed a serious first-launch UI
 failure: with no saved profile or session, the center workspace was blank, the
 connection form's actions were clipped, and there was no reliable path to a
 dual-pane session. It should not be treated as a usable acceptance build.
 
-The unreleased native UI recovery adds a browsable offline local pane, a visible
-remote connection target, explicit new-profile and initial-path editing,
-functional add-tab routing, pinned connection actions, full-width advanced
-tool dialogs, and local-pane access while a saved remote session is
-disconnected. View-model, App/Agent boundary, XAML contract, full solution, and
-interactive diagnostic checks cover the corrected flow. A newer signed package
-must still be installed and retested before this recovery is considered shipped.
+The unreleased native UI update repairs those first-launch paths and reorganizes
+the product as LFTP Commander's native Windows successor: compact full-height
+dual panes, session context and connection management at the top, a central
+GET/PUT transfer spine, advanced LFTP workflows under one Tools menu, a
+full-width Activity dock, and categorized settings that persist and apply real
+interface and transfer defaults. View-model, persistence, App/Agent boundary,
+XAML contract, full solution, and interactive diagnostic checks cover the
+corrected flow. A newer signed package must still be installed and retested
+before this update is considered shipped.
 
 ## Implemented in 1.0
 

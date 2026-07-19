@@ -7,11 +7,15 @@ public static class AppServices
 
     public static IAgentWorkspaceClient Agent { get; private set; } = null!;
     public static AgentProcessManager ProcessManager { get; private set; } = null!;
+    public static LFTPPilot.Core.IAppPreferencesStore Preferences { get; private set; } = null!;
 
     public static void Initialize(bool useDemoTransport)
     {
         _disposed = false;
         var updates = new LFTPPilot.Windows.Updates.AppInstallerUpdateService();
+        var dataPaths = LFTPPilot.Windows.Storage.PackageDataPaths.CreateDefault();
+        dataPaths.EnsureCreated();
+        Preferences = new LFTPPilot.Windows.Storage.JsonAppPreferencesStore(dataPaths.UiPreferences);
         ProcessManager = new AgentProcessManager();
         Agent = useDemoTransport
             ? new DemoAgentWorkspaceClient(updates)
