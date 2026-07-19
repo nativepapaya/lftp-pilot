@@ -14,6 +14,10 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
   one Tools menu, both file panes use compact command toolbars and optional
   filters, GET/PUT remain visually central, and Activity spans the window as a
   proper bottom dock without closable utility tabs.
+- Integrated session tabs directly into the title bar with one connection-state
+  dot and one close affordance, tightened pane and transfer controls to a shared
+  spacing grid, and flattened Activity into a single dock surface instead of a
+  window-like card nested inside the main window.
 - Replaced the placeholder Settings page with a native sectioned surface for
   interface behavior, real transfer defaults, authenticated LFTP engine
   status, package storage, diagnostics, and signed updates. Theme, pane

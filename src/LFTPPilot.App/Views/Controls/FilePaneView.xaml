@@ -13,15 +13,15 @@
     <Border Style="{StaticResource PilotCardStyle}" AutomationProperties.Name="{Binding PaneSubtitle}">
         <Grid>
             <Grid.RowDefinitions>
-                <RowDefinition Height="42" />
-                <RowDefinition Height="42" />
+                <RowDefinition Height="36" />
+                <RowDefinition Height="34" />
                 <RowDefinition Height="Auto" />
-                <RowDefinition Height="32" />
-                <RowDefinition Height="*" />
                 <RowDefinition Height="28" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="24" />
             </Grid.RowDefinitions>
 
-            <Grid Padding="10,4,8,4" ColumnSpacing="4">
+            <Grid Padding="8,2,6,2" ColumnSpacing="3">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
@@ -34,13 +34,13 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <FontIcon Glyph="{Binding PaneIconGlyph}" FontSize="14" VerticalAlignment="Center" Opacity="0.8" />
-                <TextBlock Grid.Column="1" Margin="7,0,8,0" Text="{Binding PaneTitle}" Style="{ThemeResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="1" Margin="6,0,6,0" Text="{Binding PaneTitle}" Style="{ThemeResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
 
                 <ComboBox
                     x:Name="QuickAccessBox"
                     Grid.Column="2"
-                    Width="154"
-                    Height="34"
+                    Width="140"
+                    Height="30"
                     ItemsSource="{Binding QuickAccessBookmarks}"
                     SelectedItem="{Binding SelectedBookmark, Mode=TwoWay}"
                     SelectionChanged="QuickAccessBox_SelectionChanged"
@@ -78,7 +78,7 @@
                 </Button>
             </Grid>
 
-            <Grid Grid.Row="1" Padding="10,3,10,5">
+            <Grid Grid.Row="1" Padding="8,1">
                 <TextBox
                     x:Name="PathBox"
                     Text="{Binding Path, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
@@ -88,7 +88,7 @@
                 <ProgressBar IsIndeterminate="True" VerticalAlignment="Bottom" Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibilityConverter}}" />
             </Grid>
 
-            <Border Grid.Row="2" Padding="10,0,10,8" Visibility="{Binding IsFilterVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+            <Border Grid.Row="2" Padding="8,0,8,6" Visibility="{Binding IsFilterVisible, Converter={StaticResource BoolToVisibilityConverter}}">
                 <Grid ColumnSpacing="6">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                     <TextBox x:Name="FilterBox" Text="{Binding FilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="Filter names in this folder" AutomationProperties.Name="Filter files" />
@@ -96,9 +96,9 @@
                 </Grid>
             </Border>
 
-            <Grid Grid.Row="3" Padding="10,0,6,0" Background="{ThemeResource PilotSubtleBrush}">
+            <Grid Grid.Row="3" Padding="8,0,4,0" Background="{ThemeResource PilotSubtleBrush}">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="30" />
+                    <ColumnDefinition Width="26" />
                     <ColumnDefinition Width="*" MinWidth="130" />
                     <ColumnDefinition Width="5" />
                     <ColumnDefinition x:Name="HeaderSizeColumn" Width="92" />
@@ -134,7 +134,7 @@
                 AutomationProperties.Name="Files"
                 ScrollViewer.HorizontalScrollBarVisibility="Auto">
                 <ListView.ItemContainerStyle>
-                    <Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="MinHeight" Value="32" /></Style>
+                    <Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="MinHeight" Value="28" /><Setter Property="Padding" Value="0" /></Style>
                 </ListView.ItemContainerStyle>
                 <ListView.ContextFlyout>
                     <MenuFlyout>
@@ -153,9 +153,9 @@
                 </ListView.ContextFlyout>
                 <ListView.ItemTemplate>
                     <DataTemplate>
-                        <Grid Padding="5,0" MinHeight="{Binding RowHeight}" Loaded="FileRow_Loaded" Unloaded="FileRow_Unloaded">
+                        <Grid Padding="4,0" MinHeight="{Binding RowHeight}" Loaded="FileRow_Loaded" Unloaded="FileRow_Unloaded">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="26" /><ColumnDefinition Width="*" MinWidth="130" /><ColumnDefinition Width="5" /><ColumnDefinition Width="92" /><ColumnDefinition Width="5" /><ColumnDefinition Width="142" /><ColumnDefinition Width="5" /><ColumnDefinition Width="94" />
+                                <ColumnDefinition Width="22" /><ColumnDefinition Width="*" MinWidth="130" /><ColumnDefinition Width="5" /><ColumnDefinition Width="92" /><ColumnDefinition Width="5" /><ColumnDefinition Width="142" /><ColumnDefinition Width="5" /><ColumnDefinition Width="94" />
                             </Grid.ColumnDefinitions>
                             <FontIcon Glyph="{Binding Glyph}" FontSize="14" Opacity="0.82" />
                             <StackPanel Grid.Column="1" VerticalAlignment="Center">
@@ -170,7 +170,7 @@
                 </ListView.ItemTemplate>
             </ListView>
 
-            <Grid Grid.Row="5" Padding="10,0" Background="{ThemeResource PilotSubtleBrush}">
+            <Grid Grid.Row="5" Padding="8,0" Background="{ThemeResource PilotSubtleBrush}">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                 <TextBlock Text="{Binding SelectionSummary}" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
                 <TextBlock Grid.Column="1" Text="{Binding SortIndicator}" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" Opacity="0.65" />

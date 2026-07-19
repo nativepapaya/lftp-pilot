@@ -5,14 +5,14 @@
     xmlns:controls="using:LFTPPilot.App.Views.Controls"
     HorizontalContentAlignment="Stretch"
     VerticalContentAlignment="Stretch">
-    <Grid Padding="0,4,0,0" RowSpacing="4">
+    <Grid RowSpacing="4">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" MinWidth="320" />
-            <ColumnDefinition Width="64" />
+            <ColumnDefinition Width="52" />
             <ColumnDefinition Width="*" MinWidth="320" />
         </Grid.ColumnDefinitions>
 
@@ -176,42 +176,38 @@
 
         <controls:FilePaneView x:Name="LocalPane" Grid.Row="1" DataContext="{Binding LocalPane}" TransferRequested="LocalPane_TransferRequested" TransferOptionsRequested="LocalPane_TransferOptionsRequested" FilesDropped="LocalPane_FilesDropped" DropRejected="Pane_DropRejected" />
 
-        <StackPanel Grid.Row="1" Grid.Column="1" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
+        <StackPanel Grid.Row="1" Grid.Column="1" Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
             <Button
-                Width="50"
-                Height="54"
+                Width="42"
+                Height="44"
                 Padding="0"
                 Command="{Binding DownloadCommand}"
                 ToolTipService.ToolTip="Download selected remote files (Ctrl+Left)"
                 AutomationProperties.Name="Download selected remote files">
-                <StackPanel Spacing="1">
-                    <FontIcon Glyph="&#xE72B;" FontSize="16" />
-                    <TextBlock Text="GET" FontSize="10" HorizontalAlignment="Center" />
+                <StackPanel Spacing="0">
+                    <FontIcon Glyph="&#xE72B;" FontSize="15" />
+                    <TextBlock Text="GET" FontSize="9" HorizontalAlignment="Center" />
                 </StackPanel>
                 <Button.KeyboardAccelerators>
                     <KeyboardAccelerator Key="Left" Modifiers="Control" />
                 </Button.KeyboardAccelerators>
             </Button>
-            <StackPanel Spacing="3" HorizontalAlignment="Center">
-                <Ellipse Width="6" Height="6" Fill="{ThemeResource PilotAccentBrush}" HorizontalAlignment="Center" />
-                <TextBlock Text="{Binding ConnectionStateLabel}" FontSize="10" HorizontalAlignment="Center" Opacity="0.72" />
-            </StackPanel>
             <Button
-                Width="50"
-                Height="54"
+                Width="42"
+                Height="44"
                 Padding="0"
                 Command="{Binding UploadCommand}"
                 ToolTipService.ToolTip="Upload selected local files (Ctrl+Right)"
                 AutomationProperties.Name="Upload selected local files">
-                <StackPanel Spacing="1">
-                    <FontIcon Glyph="&#xE72A;" FontSize="16" />
-                    <TextBlock Text="PUT" FontSize="10" HorizontalAlignment="Center" />
+                <StackPanel Spacing="0">
+                    <FontIcon Glyph="&#xE72A;" FontSize="15" />
+                    <TextBlock Text="PUT" FontSize="9" HorizontalAlignment="Center" />
                 </StackPanel>
                 <Button.KeyboardAccelerators>
                     <KeyboardAccelerator Key="Right" Modifiers="Control" />
                 </Button.KeyboardAccelerators>
             </Button>
-            <Button Width="36" Height="32" Padding="0" IsEnabled="{Binding IsConnected}" ToolTipService.ToolTip="Transfer and session tools" AutomationProperties.Name="Transfer and session tools">
+            <Button Width="30" Height="28" Padding="0" IsEnabled="{Binding IsConnected}" ToolTipService.ToolTip="Transfer and session tools" AutomationProperties.Name="Transfer and session tools">
                 <FontIcon Glyph="&#xE712;" FontSize="13" />
                 <Button.Flyout>
                     <MenuFlyout>
@@ -231,7 +227,7 @@
         <Border
             Grid.Row="1"
             Grid.Column="2"
-            Margin="1,116,1,29"
+            Margin="1,98,1,25"
             Padding="20"
             Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
             Visibility="{Binding IsDisconnected, Converter={StaticResource BoolToVisibilityConverter}}">

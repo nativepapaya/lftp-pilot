@@ -9,10 +9,10 @@ client immediately legible and uses WinUI where Windows can now do better.
 
 | Workflow | Commander strength | Native direction |
 | --- | --- | --- |
-| Connection | The active site, connect action, and state are always visible. | Keep session tabs, but lead with Connections and selected-session state instead of a flat advanced-feature toolbar. |
+| Connection | The active site, connect action, and state are always visible. | Integrate session tabs into the title bar, use one subtle state dot and one close affordance, and lead with Connections instead of a flat advanced-feature toolbar. |
 | File panes | Compact title, path, tools, columns, rows, and selection status form one uninterrupted surface. | Use the same information hierarchy with WinUI buttons, menus, virtualization, Explorer drag/drop, and system accessibility. |
 | Transfer direction | GET and PUT sit between the source and destination panes, with a small readiness indicator. | Preserve that spatial model. Transfer options and recursive search move behind one small session-tools menu. |
-| Activity | Transfers, history, and log share a resizable bottom dock. | Use a full-width native Activity expander with non-closable utility tabs and active-job count. |
+| Activity | Transfers, history, and log share a resizable bottom dock. | Use a full-width native Activity expander with a single flat header, compact view selectors, and active-job count. Do not nest a card or second window surface inside the dock. |
 | Settings | A left section list separates transfers, behavior, notifications, engine, advanced, and storage. | Use native navigation for only real settings: interface, transfer defaults, authenticated engine facts, storage, diagnostics, and updates. Do not recreate obsolete font/OLED/runtime-path controls. |
 | Site manager | Saved sites remain visible beside one focused editor and pinned Save/Connect actions. | Retain that layout, add descriptive protocol/authentication labels, and keep host-key review inside the connection task. |
 
@@ -32,3 +32,9 @@ client immediately legible and uses WinUI where Windows can now do better.
    background work, notifications, taskbar progress, and Jump Lists.
 6. LFTP Commander data and repository history remain outside the product. The
    old app is evidence, not a migration source.
+7. Shell geometry is deliberate: a 40-pixel title/session strip, 8-pixel outer
+   gutters, 30-pixel pane commands, compact file rows, and a 52-pixel transfer
+   spine. Controls align to pane and dock edges instead of floating in unused
+   space.
+8. Connection state appears once in the session tab. Session closure also
+   appears once; extra glyphs or detached status pills are regressions.
