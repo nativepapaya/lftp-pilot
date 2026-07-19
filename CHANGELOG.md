@@ -37,6 +37,8 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Fixed
 
+- Activity and per-transfer log timestamps now use a fixed-width 24-hour clock
+  so localized AM/PM suffixes cannot wrap and misalign compact log rows.
 - Remote transfer validation now resolves a requested child from a fresh
   literal parent-directory listing instead of passing the full child path to
   LFTP's pattern-aware listing command. Downloads and uploads with Unicode,

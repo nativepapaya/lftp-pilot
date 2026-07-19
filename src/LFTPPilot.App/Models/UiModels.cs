@@ -28,7 +28,7 @@ public sealed record ActivityLogEntry(
     string Source,
     string Message)
 {
-    public string TimeDisplay => Timestamp.ToLocalTime().ToString("T", System.Globalization.CultureInfo.CurrentCulture);
+    public string TimeDisplay => Timestamp.ToLocalTime().ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
 }
 
 public sealed record HistoryRecordItem(HistoryRecord Record)
@@ -48,7 +48,7 @@ public sealed record HistoryRecordItem(HistoryRecord Record)
 
 public sealed record HistoryLogItem(HistoryLogEntry Entry)
 {
-    public string TimeDisplay => Entry.Timestamp.ToLocalTime().ToString("T", System.Globalization.CultureInfo.CurrentCulture);
+    public string TimeDisplay => Entry.Timestamp.ToLocalTime().ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
     public string Level => Entry.Level;
     public string Message => Entry.Message;
 }

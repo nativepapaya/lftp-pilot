@@ -8,6 +8,18 @@ namespace LFTPPilot.Tests;
 public sealed class MainWindowViewModelTests
 {
     [Fact]
+    public void ActivityLogTimesUseFixedWidthClockFormatting()
+    {
+        var timestamp = new DateTimeOffset(2026, 7, 19, 22, 15, 22, TimeSpan.Zero);
+
+        var activity = new ActivityLogEntry(timestamp, "Info", "Agent", "Message");
+        var history = new HistoryLogItem(new(timestamp, "Error", "Failed"));
+
+        Assert.Matches("^[0-9]{2}:[0-9]{2}:[0-9]{2}$", activity.TimeDisplay);
+        Assert.Matches("^[0-9]{2}:[0-9]{2}:[0-9]{2}$", history.TimeDisplay);
+    }
+
+    [Fact]
     public async Task FirstLaunchShowsBrowsableLocalWorkspaceWithoutProfileOrSession()
     {
         var profile = Profile();
