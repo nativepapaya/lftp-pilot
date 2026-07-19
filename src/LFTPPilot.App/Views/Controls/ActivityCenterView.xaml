@@ -1,96 +1,145 @@
 <UserControl
-    x:Name="ActivityRoot"
     x:Class="LFTPPilot.App.Views.Controls.ActivityCenterView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     HorizontalContentAlignment="Stretch">
-    <Expander IsExpanded="{Binding IsExpanded, Mode=TwoWay}" HorizontalAlignment="Stretch" AutomationProperties.Name="Activity center">
+    <Expander
+        IsExpanded="{Binding IsExpanded, Mode=TwoWay}"
+        HorizontalAlignment="Stretch"
+        HorizontalContentAlignment="Stretch"
+        Background="{ThemeResource PilotPaneBrush}"
+        BorderBrush="{ThemeResource PilotBorderBrush}"
+        BorderThickness="0,1,0,0"
+        CornerRadius="0"
+        AutomationProperties.Name="Activity center">
         <Expander.Header>
-            <StackPanel Orientation="Horizontal" Spacing="8">
-                <FontIcon Glyph="&#xE9D9;" FontSize="15" />
-                <TextBlock Text="Activity" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                <Border Padding="7,1" CornerRadius="9" Background="{ThemeResource PilotSubtleBrush}">
-                    <TextBlock Text="{Binding ActiveCount}" FontSize="11" />
-                </Border>
-            </StackPanel>
+            <Grid Height="32">
+                <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE9D9;" FontSize="13" Margin="2,0,4,0" />
+                    <TextBlock Text="Activity" Style="{ThemeResource CaptionTextBlockStyle}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,4,0" />
+                    <ToggleButton
+                        x:Name="TransfersDockTab"
+                        Content="Transfers"
+                        Tag="Transfers"
+                        IsChecked="True"
+                        Style="{StaticResource PilotDockTabStyle}"
+                        Click="ActivityTab_Click" />
+                    <ToggleButton
+                        x:Name="HistoryDockTab"
+                        Content="History"
+                        Tag="History"
+                        Style="{StaticResource PilotDockTabStyle}"
+                        Click="ActivityTab_Click" />
+                    <ToggleButton
+                        x:Name="LogDockTab"
+                        Content="Log"
+                        Tag="Log"
+                        Style="{StaticResource PilotDockTabStyle}"
+                        Click="ActivityTab_Click" />
+                    <Border Padding="6,0" MinWidth="22" Height="18" CornerRadius="9" Background="{ThemeResource PilotSubtleBrush}" Margin="3,0,0,0">
+                        <TextBlock Text="{Binding ActiveCount}" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                </StackPanel>
+            </Grid>
         </Expander.Header>
-        <Border Style="{StaticResource PilotCardStyle}" Height="220" HorizontalAlignment="Stretch">
-            <TabView IsAddTabButtonVisible="False" CanDragTabs="False" TabWidthMode="SizeToContent" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
-                <TabViewItem Header="Transfers" IsClosable="False" HorizontalContentAlignment="Stretch">
-                    <ListView Width="{Binding ActualWidth, ElementName=ActivityRoot}" ItemsSource="{Binding Jobs}" SelectionMode="Single" AutomationProperties.Name="Active transfers">
-                        <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style>
-                        </ListView.ItemContainerStyle>
-                        <ListView.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Padding="8,5" ColumnSpacing="12">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="2*" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="150" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <StackPanel>
-                                        <TextBlock Text="{Binding DisplayName}" Style="{ThemeResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Text="{Binding Status}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.7" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Text="{Binding Error.Message}" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" TextTrimming="CharacterEllipsis" />
-                                    </StackPanel>
-                                    <TextBlock Grid.Column="1" Text="{Binding State}" VerticalAlignment="Center" />
-                                    <ProgressBar Grid.Column="2" Value="{Binding Progress}" Maximum="1" Height="4" VerticalAlignment="Center" AutomationProperties.Name="Transfer progress" />
-                                    <StackPanel Grid.Column="3" Margin="6,0,0,0" Orientation="Horizontal" Spacing="6">
-                                        <Button Padding="8,4" Content="Retry" Click="RetryJob_Click" IsEnabled="{Binding CanRetry}" Visibility="{Binding CanRetry, Converter={StaticResource BoolToVisibilityConverter}}" ToolTipService.ToolTip="Retry this failed transfer after the Agent revalidates its paths and active session" AutomationProperties.Name="Retry failed transfer" />
-                                        <Button Padding="8,4" Content="Cancel" Click="CancelJob_Click" IsEnabled="{Binding State, Converter={StaticResource JobStateToCancellableConverter}}" ToolTipService.ToolTip="Cancel this queued, active, paused, or scheduled job" AutomationProperties.Name="Cancel job" />
-                                    </StackPanel>
-                                </Grid>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
-                </TabViewItem>
-                <TabViewItem Header="History" IsClosable="False" HorizontalContentAlignment="Stretch">
-                    <ListView Width="{Binding ActualWidth, ElementName=ActivityRoot}" ItemsSource="{Binding History}" SelectionMode="Single" AutomationProperties.Name="Transfer history">
-                        <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style>
-                        </ListView.ItemContainerStyle>
-                        <ListView.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Padding="8,5" ColumnSpacing="12">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="2*" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="150" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Grid.Column="1" Text="{Binding Outcome}" />
-                                    <TextBlock Grid.Column="2" Text="{Binding FinishedAt}" Style="{ThemeResource CaptionTextBlockStyle}" />
-                                </Grid>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
-                </TabViewItem>
-                <TabViewItem Header="Log" IsClosable="False" HorizontalContentAlignment="Stretch">
-                    <ListView Width="{Binding ActualWidth, ElementName=ActivityRoot}" ItemsSource="{Binding Log}" SelectionMode="Single" AutomationProperties.Name="Activity log">
-                        <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style>
-                        </ListView.ItemContainerStyle>
-                        <ListView.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Padding="8,4" ColumnSpacing="10">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="76" />
-                                        <ColumnDefinition Width="76" />
-                                        <ColumnDefinition Width="100" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="{Binding TimeDisplay}" FontFamily="Consolas" />
-                                    <TextBlock Grid.Column="1" Text="{Binding Level}" />
-                                    <TextBlock Grid.Column="2" Text="{Binding Source}" Opacity="0.72" />
-                                    <TextBlock Grid.Column="3" Text="{Binding Message}" TextTrimming="CharacterEllipsis" />
-                                </Grid>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
-                </TabViewItem>
-            </TabView>
-        </Border>
+
+        <Grid Height="136" Background="Transparent">
+            <ListView
+                x:Name="TransfersDockList"
+                ItemsSource="{Binding Jobs}"
+                SelectionMode="None"
+                AutomationProperties.Name="Active transfers">
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="MinHeight" Value="38" />
+                        <Setter Property="Padding" Value="0" />
+                    </Style>
+                </ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Padding="10,4" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="100" />
+                                <ColumnDefinition Width="170" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="0">
+                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding Status}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.65" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding Error.Message}" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                            <TextBlock Grid.Column="1" Text="{Binding State}" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
+                            <ProgressBar Grid.Column="2" Value="{Binding Progress}" Maximum="1" Height="3" VerticalAlignment="Center" AutomationProperties.Name="Transfer progress" />
+                            <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                <Button Height="26" MinWidth="0" Padding="8,0" Content="Retry" Click="RetryJob_Click" IsEnabled="{Binding CanRetry}" Visibility="{Binding CanRetry, Converter={StaticResource BoolToVisibilityConverter}}" ToolTipService.ToolTip="Retry failed transfer" AutomationProperties.Name="Retry failed transfer" />
+                                <Button Height="26" MinWidth="0" Padding="8,0" Content="Cancel" Click="CancelJob_Click" IsEnabled="{Binding State, Converter={StaticResource JobStateToCancellableConverter}}" ToolTipService.ToolTip="Cancel job" AutomationProperties.Name="Cancel job" />
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+
+            <ListView
+                x:Name="HistoryDockList"
+                ItemsSource="{Binding History}"
+                SelectionMode="None"
+                Visibility="Collapsed"
+                AutomationProperties.Name="Transfer history">
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="MinHeight" Value="32" />
+                        <Setter Property="Padding" Value="0" />
+                    </Style>
+                </ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Padding="10,4" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="170" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="1" Text="{Binding Outcome}" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="2" Text="{Binding FinishedAt}" Style="{ThemeResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+
+            <ListView
+                x:Name="LogDockList"
+                ItemsSource="{Binding Log}"
+                SelectionMode="None"
+                Visibility="Collapsed"
+                AutomationProperties.Name="Activity log">
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="MinHeight" Value="28" />
+                        <Setter Property="Padding" Value="0" />
+                    </Style>
+                </ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Padding="10,3" ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="72" />
+                                <ColumnDefinition Width="68" />
+                                <ColumnDefinition Width="96" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding TimeDisplay}" FontFamily="Consolas" Style="{ThemeResource CaptionTextBlockStyle}" />
+                            <TextBlock Grid.Column="1" Text="{Binding Level}" Style="{ThemeResource CaptionTextBlockStyle}" />
+                            <TextBlock Grid.Column="2" Text="{Binding Source}" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.65" />
+                            <TextBlock Grid.Column="3" Text="{Binding Message}" Style="{ThemeResource CaptionTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Grid>
     </Expander>
 </UserControl>

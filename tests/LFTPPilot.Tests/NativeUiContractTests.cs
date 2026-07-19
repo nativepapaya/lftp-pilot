@@ -73,7 +73,36 @@ public sealed class NativeUiContractTests
         Assert.Contains("DataContext=\"{Binding SelectedSession}\"", mainWindow, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding ToggleFilterCommand}\"", filePane, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding HiddenFilesLabel}\"", filePane, StringComparison.Ordinal);
-        Assert.Equal(3, activity.Split("IsClosable=\"False\"").Length - 1);
+        Assert.DoesNotContain("<TabView", activity, StringComparison.Ordinal);
+        Assert.DoesNotContain("PilotCardStyle", activity, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"TransfersDockTab\"", activity, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"HistoryDockTab\"", activity, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"LogDockTab\"", activity, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NativeShellUsesOneIntegratedSessionStripAndFlatActivityDock()
+    {
+        var root = FindRepositoryRoot();
+        var mainWindow = await File.ReadAllTextAsync(
+            Path.Combine(root, "src", "LFTPPilot.App", "MainWindow.xaml"),
+            TestContext.Current.CancellationToken);
+        var activity = await File.ReadAllTextAsync(
+            Path.Combine(root, "src", "LFTPPilot.App", "Views", "Controls", "ActivityCenterView.xaml"),
+            TestContext.Current.CancellationToken);
+        var workspace = await File.ReadAllTextAsync(
+            Path.Combine(root, "src", "LFTPPilot.App", "Views", "Controls", "SessionWorkspaceView.xaml"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("x:Name=\"AppTitleBar\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"SessionTabs\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("ConnectionStateOpacity", mainWindow, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConnectionStateLabel", mainWindow, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConnectionStateLabel", workspace, StringComparison.Ordinal);
+        Assert.Equal(1, mainWindow.Split("IsClosable=\"True\"").Length - 1);
+        Assert.DoesNotContain("<RowDefinition Height=\"44\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("BorderThickness=\"0,1,0,0\"", activity, StringComparison.Ordinal);
+        Assert.Contains("<Grid Height=\"136\" Background=\"Transparent\">", activity, StringComparison.Ordinal);
     }
 
     [Fact]

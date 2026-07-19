@@ -100,7 +100,7 @@ public sealed class FilePaneViewModel : ObservableObject
         get => _isFilterVisible;
         private set => SetProperty(ref _isFilterVisible, value);
     }
-    public double FileRowHeight => _fileListDensity == FileListDensity.Compact ? 34 : 44;
+    public double FileRowHeight => _fileListDensity == FileListDensity.Compact ? 30 : 40;
     public bool ShowDetailLine => _fileListDensity == FileListDensity.Comfortable;
     public bool CanAddCurrentBookmark => IsRemote && _profile is not null && Path.StartsWith("/", StringComparison.Ordinal) &&
         !QuickAccessBookmarks.Contains(Path, StringComparer.Ordinal) && QuickAccessBookmarks.Count < 128;

@@ -84,8 +84,7 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
         {
             if (!SetProperty(ref _isConnected, value)) return;
             OnPropertyChanged(nameof(IsDisconnected));
-            OnPropertyChanged(nameof(ConnectionGlyph));
-            OnPropertyChanged(nameof(ConnectionStateLabel));
+            OnPropertyChanged(nameof(ConnectionStateOpacity));
             OnPropertyChanged(nameof(CanReconnect));
             OnPropertyChanged(nameof(ReconnectDescription));
             RefreshCommand.NotifyCanExecuteChanged();
@@ -113,8 +112,7 @@ public sealed class SessionViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _statusText, value);
     }
 
-    public string ConnectionGlyph => IsConnected ? "\uE701" : "\uE711";
-    public string ConnectionStateLabel => IsConnected ? "Ready" : "Offline";
+    public double ConnectionStateOpacity => IsConnected ? 1 : 0.35;
     public int DefaultParallelFiles => _defaultParallelFiles;
     public int DefaultDownloadSegments => _defaultDownloadSegments;
     public long DownloadLimitKiB => _downloadLimitKiB;

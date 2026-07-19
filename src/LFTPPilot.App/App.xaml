@@ -39,17 +39,29 @@
                 <Setter Property="Background" Value="{ThemeResource PilotPaneBrush}" />
                 <Setter Property="BorderBrush" Value="{ThemeResource PilotBorderBrush}" />
                 <Setter Property="BorderThickness" Value="1" />
-                <Setter Property="CornerRadius" Value="8" />
+                <Setter Property="CornerRadius" Value="5" />
             </Style>
             <Style x:Key="PilotSettingsCardStyle" TargetType="Border" BasedOn="{StaticResource PilotCardStyle}">
                 <Setter Property="Padding" Value="16" />
                 <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorSecondaryBrush}" />
             </Style>
             <Style x:Key="PilotToolbarButtonStyle" TargetType="Button">
-                <Setter Property="Width" Value="34" />
-                <Setter Property="Height" Value="34" />
+                <Setter Property="Width" Value="30" />
+                <Setter Property="Height" Value="30" />
                 <Setter Property="Padding" Value="0" />
                 <Setter Property="HorizontalContentAlignment" Value="Center" />
+                <Setter Property="VerticalContentAlignment" Value="Center" />
+            </Style>
+            <Style x:Key="PilotTitleBarButtonStyle" TargetType="Button">
+                <Setter Property="Height" Value="30" />
+                <Setter Property="MinWidth" Value="0" />
+                <Setter Property="Padding" Value="10,0" />
+                <Setter Property="VerticalContentAlignment" Value="Center" />
+            </Style>
+            <Style x:Key="PilotDockTabStyle" TargetType="ToggleButton">
+                <Setter Property="Height" Value="28" />
+                <Setter Property="MinWidth" Value="0" />
+                <Setter Property="Padding" Value="9,0" />
                 <Setter Property="VerticalContentAlignment" Value="Center" />
             </Style>
             <infrastructure:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
