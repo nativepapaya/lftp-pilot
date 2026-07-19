@@ -172,7 +172,7 @@
             </Grid>
         </Border>
 
-        <controls:FilePaneView x:Name="LocalPane" Grid.Row="1" IsEnabled="{Binding IsConnected}" DataContext="{Binding LocalPane}" TransferRequested="LocalPane_TransferRequested" TransferOptionsRequested="LocalPane_TransferOptionsRequested" FilesDropped="LocalPane_FilesDropped" DropRejected="Pane_DropRejected" />
+        <controls:FilePaneView x:Name="LocalPane" Grid.Row="1" DataContext="{Binding LocalPane}" TransferRequested="LocalPane_TransferRequested" TransferOptionsRequested="LocalPane_TransferOptionsRequested" FilesDropped="LocalPane_FilesDropped" DropRejected="Pane_DropRejected" />
 
         <StackPanel Grid.Row="1" Grid.Column="1" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
             <Button
@@ -239,18 +239,15 @@
         <controls:FilePaneView x:Name="RemotePane" Grid.Row="1" Grid.Column="2" IsEnabled="{Binding IsConnected}" DataContext="{Binding RemotePane}" TransferRequested="RemotePane_TransferRequested" TransferOptionsRequested="RemotePane_TransferOptionsRequested" FilesDropped="RemotePane_FilesDropped" DropRejected="Pane_DropRejected" RemoteEditRequested="RemotePane_RemoteEditRequested" />
 
         <Border
-            Grid.RowSpan="2"
-            Grid.ColumnSpan="3"
-            MaxWidth="520"
-            Padding="28"
-            HorizontalAlignment="Center"
-            VerticalAlignment="Center"
+            Grid.Row="1"
+            Grid.Column="2"
+            Padding="24"
             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="1"
             CornerRadius="12"
             Visibility="{Binding IsDisconnected, Converter={StaticResource BoolToVisibilityConverter}}">
-            <StackPanel Spacing="12" HorizontalAlignment="Center">
+            <StackPanel Spacing="12" MaxWidth="420" HorizontalAlignment="Center" VerticalAlignment="Center">
                 <FontIcon Glyph="&#xE711;" FontSize="28" />
                 <TextBlock Text="Saved tab is disconnected" Style="{ThemeResource SubtitleTextBlockStyle}" TextAlignment="Center" />
                 <TextBlock Text="{Binding ReconnectDescription}" TextWrapping="Wrap" TextAlignment="Center" Opacity="0.78" />

@@ -247,6 +247,7 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
     public async Task<IReadOnlyList<FileEntry>> BrowseAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default)
     {
         var method = pane == PaneKind.Local ? WorkspaceMethods.BrowseLocal : WorkspaceMethods.BrowseRemote;
+        Guid? effectiveSessionId = pane == PaneKind.Local && sessionId == Guid.Empty ? null : sessionId;
         var entries = new List<FileEntry>();
         var seenTokens = new HashSet<string>(StringComparer.Ordinal);
         string? continuationToken = null;
@@ -255,7 +256,7 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         {
             cancellationToken.ThrowIfCancellationRequested();
             var result = await RequestAsync<BrowseResult>(method,
-                new BrowseRequest(sessionId, path, ContinuationToken: continuationToken, PageSize: BrowsePageSize),
+                new BrowseRequest(effectiveSessionId, path, ContinuationToken: continuationToken, PageSize: BrowsePageSize),
                 cancellationToken, retryOnDisconnect: false).ConfigureAwait(false);
             if (result.Location.Kind != pane) throw new InvalidDataException("The Agent returned a directory page for the wrong pane.");
             if (result.TotalCount is < 0 or > MaximumBrowseEntries) throw new InvalidDataException("The directory contains more entries than the App safety limit.");
@@ -321,12 +322,12 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
 
     public async Task<FileMutationResult> CreateDirectoryAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default) =>
         await RequestAsync<FileMutationResult>(WorkspaceMethods.FileCreateDirectory,
-            new CreateDirectoryRequest(pane, path, sessionId), cancellationToken, retryOnDisconnect: false,
+            new CreateDirectoryRequest(pane, path, EffectiveSessionId(sessionId, pane)), cancellationToken, retryOnDisconnect: false,
             semantics: RequestSemantics.Mutation).ConfigureAwait(false);
 
     public async Task<FileMutationResult> MoveEntryAsync(Guid sessionId, PaneKind pane, string sourcePath, string destinationPath, CancellationToken cancellationToken = default) =>
         await RequestAsync<FileMutationResult>(WorkspaceMethods.FileMove,
-            new MoveEntryRequest(pane, sourcePath, destinationPath, sessionId), cancellationToken, retryOnDisconnect: false,
+            new MoveEntryRequest(pane, sourcePath, destinationPath, EffectiveSessionId(sessionId, pane)), cancellationToken, retryOnDisconnect: false,
             semantics: RequestSemantics.Mutation).ConfigureAwait(false);
 
     public async Task<FileMutationResult> DeleteEntriesAsync(
@@ -337,8 +338,11 @@ public sealed class LiveAgentWorkspaceClient : IAgentWorkspaceClient
         bool confirmed,
         CancellationToken cancellationToken = default) =>
         await RequestAsync<FileMutationResult>(WorkspaceMethods.FileDelete,
-            new DeleteEntriesRequest(pane, paths.ToImmutableArray(), sessionId, recursive, confirmed), cancellationToken,
+            new DeleteEntriesRequest(pane, paths.ToImmutableArray(), EffectiveSessionId(sessionId, pane), recursive, confirmed), cancellationToken,
             retryOnDisconnect: false, semantics: RequestSemantics.Mutation).ConfigureAwait(false);
+
+    private static Guid? EffectiveSessionId(Guid sessionId, PaneKind pane) =>
+        pane == PaneKind.Local && sessionId == Guid.Empty ? null : sessionId;
 
     public async Task<JobSnapshot> EnqueueTransferAsync(Guid sessionId, TransferPlan plan, CancellationToken cancellationToken = default)
     {

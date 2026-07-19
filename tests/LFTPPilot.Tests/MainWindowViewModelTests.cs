@@ -8,6 +8,33 @@ namespace LFTPPilot.Tests;
 public sealed class MainWindowViewModelTests
 {
     [Fact]
+    public async Task FirstLaunchShowsBrowsableLocalWorkspaceWithoutProfileOrSession()
+    {
+        var profile = Profile();
+        var localEntry = new FileEntry(
+            "Documents",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Documents"),
+            EntryKind.Directory,
+            null,
+            DateTimeOffset.UtcNow);
+        var agent = new RecordingSessionAgent(profile, []);
+        agent.OfflineLocalEntries.Add(localEntry);
+        agent.CommitProfileDeleteAndPublish();
+        var viewModel = CreateViewModelWithoutUiContext(agent);
+
+        await viewModel.InitializeAsync();
+
+        Assert.True(viewModel.HasNoSessions);
+        Assert.False(viewModel.HasSessions);
+        Assert.Empty(viewModel.Connections.Profiles);
+        Assert.Equal(Guid.Empty, viewModel.OfflineLocalPane.SessionId);
+        Assert.False(viewModel.OfflineLocalPane.SupportsTransfers);
+        Assert.Equal(localEntry, Assert.Single(viewModel.OfflineLocalPane.Entries).Entry);
+        Assert.Single(agent.OfflineBrowseRequests);
+        Assert.Contains("Local files are ready", viewModel.OfflineWorkspaceStatus, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task DisconnectFailureAfterMutationReportsUnknownStateAndRequestsResync()
     {
         var profile = new ConnectionProfile(
@@ -56,12 +83,17 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(
             [firstSeed.Snapshot.SessionId, secondSeed.Snapshot.SessionId],
             viewModel.Sessions.Select(static session => session.SessionId));
+        Assert.True(viewModel.HasSessions);
+        Assert.False(viewModel.HasNoSessions);
 
         await viewModel.CloseSessionAsync(viewModel.Sessions[0]);
         Assert.Equal(secondSeed.Snapshot.SessionId, Assert.Single(viewModel.Sessions).SessionId);
         await viewModel.CloseSessionAsync(viewModel.Sessions[0]);
 
         Assert.Empty(viewModel.Sessions);
+        Assert.False(viewModel.HasSessions);
+        Assert.True(viewModel.HasNoSessions);
+        Assert.Single(agent.OfflineBrowseRequests);
         Assert.Equal(
             [firstSeed.Snapshot.SessionId, secondSeed.Snapshot.SessionId],
             agent.DisconnectedSessionIds);
@@ -869,6 +901,8 @@ public sealed class MainWindowViewModelTests
         public List<ExplorerExportStartRequest> ExplorerStartRequests { get; } = [];
         public Queue<ExplorerExportSnapshot> ExplorerGetReplies { get; } = [];
         public List<Guid> ReleasedExplorerExports { get; } = [];
+        public List<FileEntry> OfflineLocalEntries { get; } = [];
+        public List<string> OfflineBrowseRequests { get; } = [];
         public ExplorerExportSnapshot? ExplorerStartReply { get; init; }
         public bool ExplorerStartOutcomeUnknown { get; init; }
         public int ExplorerGetCalls { get; private set; }
@@ -973,7 +1007,13 @@ public sealed class MainWindowViewModelTests
                 throw new InvalidOperationException("connect completed before reply serialization failed");
             return Task.FromResult(seed);
         }
-        public Task<IReadOnlyList<FileEntry>> BrowseAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default) => Unsupported<IReadOnlyList<FileEntry>>();
+        public Task<IReadOnlyList<FileEntry>> BrowseAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (sessionId != Guid.Empty || pane != PaneKind.Local) return Unsupported<IReadOnlyList<FileEntry>>();
+            OfflineBrowseRequests.Add(path);
+            return Task.FromResult<IReadOnlyList<FileEntry>>(OfflineLocalEntries.ToArray());
+        }
         public Task<FileMutationResult> CreateDirectoryAsync(Guid sessionId, PaneKind pane, string path, CancellationToken cancellationToken = default) => Unsupported<FileMutationResult>();
         public Task<FileMutationResult> MoveEntryAsync(Guid sessionId, PaneKind pane, string sourcePath, string destinationPath, CancellationToken cancellationToken = default) => Unsupported<FileMutationResult>();
         public Task<FileMutationResult> DeleteEntriesAsync(Guid sessionId, PaneKind pane, IReadOnlyList<string> paths, bool recursive, bool confirmed, CancellationToken cancellationToken = default) => Unsupported<FileMutationResult>();

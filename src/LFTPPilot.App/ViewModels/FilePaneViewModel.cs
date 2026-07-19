@@ -28,11 +28,13 @@ public sealed class FilePaneViewModel : ObservableObject
         PaneKind kind,
         string path,
         IEnumerable<FileEntry> entries,
-        ConnectionProfile? profile = null)
+        ConnectionProfile? profile = null,
+        bool supportsTransfers = true)
     {
         _agent = agent;
         _sessionId = sessionId;
         Kind = kind;
+        SupportsTransfers = supportsTransfers;
         _profile = kind == PaneKind.Remote ? profile : null;
         _path = path;
         Replace(entries);
@@ -46,6 +48,7 @@ public sealed class FilePaneViewModel : ObservableObject
     }
 
     public PaneKind Kind { get; }
+    public bool SupportsTransfers { get; }
     public Guid SessionId => _sessionId;
     public string PaneTitle => Kind == PaneKind.Local ? "This PC" : "Remote";
     public string PaneSubtitle => Kind == PaneKind.Local ? "Local files" : "LFTP session";
