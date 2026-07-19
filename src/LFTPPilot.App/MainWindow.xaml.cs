@@ -67,7 +67,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void SessionTabs_AddTabButtonClick(TabView sender, object args) => await ViewModel.AddDefaultSessionAsync().ConfigureAwait(true);
+    private async void SessionTabs_AddTabButtonClick(TabView sender, object args) => await ShowConnectionsAsync().ConfigureAwait(true);
 
     private async void SessionTabs_TabCloseRequested(TabView sender, TabViewTabCloseRequestedEventArgs args)
     {
@@ -116,8 +116,32 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void Connect_Click(object sender, RoutedEventArgs e) =>
-        await ShowToolAsync("Connections", new ConnectionProfilesPage(WindowNative.GetWindowHandle(this)) { DataContext = ViewModel.Connections }, 760).ConfigureAwait(true);
+    private async void Connect_Click(object sender, RoutedEventArgs e) => await ShowConnectionsAsync().ConfigureAwait(true);
+
+    private async Task ShowConnectionsAsync()
+    {
+        var page = new ConnectionProfilesPage(WindowNative.GetWindowHandle(this)) { DataContext = ViewModel.Connections };
+        var dialog = new ContentDialog
+        {
+            Title = "Connections",
+            Content = page,
+            CloseButtonText = "Close",
+            DefaultButton = ContentDialogButton.None,
+            XamlRoot = RootGrid.XamlRoot,
+            MinWidth = 860,
+        };
+        ConfigureDialogSize(dialog, 900, 780);
+        EventHandler<Models.WorkspaceSessionSeed> connected = (_, _) => dialog.Hide();
+        ViewModel.Connections.SessionConnected += connected;
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        finally
+        {
+            ViewModel.Connections.SessionConnected -= connected;
+        }
+    }
 
     private async void Mirror_Click(object sender, RoutedEventArgs e) =>
         await ShowToolAsync("Mirror preview", new MirrorPage { DataContext = ViewModel.Mirror }, 900).ConfigureAwait(true);
@@ -145,7 +169,18 @@ public sealed partial class MainWindow : Window
             XamlRoot = RootGrid.XamlRoot,
             MinWidth = width,
         };
+        ConfigureDialogSize(dialog, width, 780);
         await dialog.ShowAsync();
+    }
+
+    private static void ConfigureDialogSize(ContentDialog dialog, double width, double maximumHeight)
+    {
+        // WinUI's default ContentDialog template caps every dialog at 548 px,
+        // even when MinWidth is larger. Override the template resources on the
+        // individual tool surface so wide forms are never silently clipped.
+        dialog.Resources["ContentDialogMinWidth"] = width;
+        dialog.Resources["ContentDialogMaxWidth"] = width;
+        dialog.Resources["ContentDialogMaxHeight"] = maximumHeight;
     }
 
     private async Task ShowActiveEditsAsync()

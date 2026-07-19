@@ -8,6 +8,34 @@ namespace LFTPPilot.Tests;
 public sealed class ConnectionProfilesViewModelTests
 {
     [Fact]
+    public async Task NewConnectionPersistsInitialPaneLocationsBeforeConnecting()
+    {
+        var existing = Profile(ConnectionProtocol.Ftp);
+        var agent = new RecordingAgent(Inspection(existing, SftpHostKeyState.EnrollmentRequired));
+        var viewModel = ViewModel(agent, existing);
+
+        viewModel.NewProfileCommand.Execute(null);
+        Assert.True(viewModel.IsCreatingProfile);
+        Assert.Null(viewModel.SelectedProfile);
+
+        viewModel.Name = "New FTP site";
+        viewModel.Protocol = ConnectionProtocol.Ftp;
+        viewModel.Host = "files.example.test";
+        viewModel.Port = 21;
+        viewModel.UserName = "alice";
+        viewModel.InitialLocalPath = @"C:\Transfers";
+        viewModel.InitialRemotePath = "/incoming";
+        viewModel.CreateAndConnectCommand.Execute(null);
+        await WaitUntilAsync(() => agent.ConnectCredentials.Count == 1);
+
+        var saved = Assert.Single(agent.SavedProfiles);
+        Assert.Equal(@"C:\Transfers", saved.InitialLocalPath);
+        Assert.Equal("/incoming", saved.InitialRemotePath);
+        Assert.True(viewModel.HasSelectedProfile);
+        Assert.False(viewModel.IsCreatingProfile);
+    }
+
+    [Fact]
     public async Task CancellingEnrollmentKeepsEnteredCredentialInAppMemory()
     {
         var profile = Profile();
@@ -462,6 +490,7 @@ public sealed class ConnectionProfilesViewModelTests
     private sealed class RecordingAgent(SftpHostKeyInspection inspection) : IAgentWorkspaceClient
     {
         public List<string?> SavedCredentials { get; } = [];
+        public List<ConnectionProfile> SavedProfiles { get; } = [];
         public List<string?> ConnectCredentials { get; } = [];
         public List<bool> ReplaceDecisions { get; } = [];
         public List<Guid> DeletedProfileIds { get; } = [];
@@ -482,6 +511,7 @@ public sealed class ConnectionProfilesViewModelTests
         public async Task<ConnectionProfile> SaveProfileAsync(ConnectionProfile profile, string? credential = null, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            SavedProfiles.Add(profile);
             SavedCredentials.Add(credential);
             SaveStarted.TrySetResult(true);
             if (DelaySave) await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);

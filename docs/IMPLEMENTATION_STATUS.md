@@ -5,6 +5,21 @@ repository is a fresh native Windows codebase with no Git history or data
 migration from LFTP Commander. This page separates the shipped implementation
 from the final independent-machine acceptance work.
 
+## Native UI recovery in progress
+
+The signed `1.0.0.16` trusted-tester package exposed a serious first-launch UI
+failure: with no saved profile or session, the center workspace was blank, the
+connection form's actions were clipped, and there was no reliable path to a
+dual-pane session. It should not be treated as a usable acceptance build.
+
+The unreleased native UI recovery adds a browsable offline local pane, a visible
+remote connection target, explicit new-profile and initial-path editing,
+functional add-tab routing, pinned connection actions, full-width advanced
+tool dialogs, and local-pane access while a saved remote session is
+disconnected. View-model, App/Agent boundary, XAML contract, full solution, and
+interactive diagnostic checks cover the corrected flow. A newer signed package
+must still be installed and retested before this recovery is considered shipped.
+
 ## Implemented in 1.0
 
 - Native WinUI 3 session tabs and virtualized dual file panes with sorting,

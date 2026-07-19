@@ -9,6 +9,20 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Fixed
 
+- First launch now shows a real local file pane and an intentional remote
+  connection surface instead of an empty center area when no profiles or
+  sessions exist. Local navigation and file mutations use an Agent request
+  without inventing a connection identity.
+- The connection manager now keeps its profile actions and status pinned below
+  the scrolling form, exposes explicit new-profile and initial-pane-path
+  controls, closes only after a session is confirmed, and opens from both the
+  first-run remote pane and the add-tab button.
+- Wide native tool surfaces now override WinUI's default 548-pixel
+  `ContentDialog` cap. Connections, Mirror, server-to-server transfer, Console,
+  and Settings no longer hide their right-hand or footer controls despite
+  requesting a larger width.
+- A disconnected saved session now leaves its local pane usable and confines
+  the reconnect explanation to the unavailable remote pane.
 - Settings now resolves the installed MSIX version as soon as the page opens
   and reuses that package-aware value in support-bundle metadata. It previously
   displayed the assembly fallback `1.0.0.0` until a manual update check.

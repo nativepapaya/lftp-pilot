@@ -11,6 +11,28 @@ namespace LFTPPilot.Tests;
 public sealed class LiveAgentWorkspaceClientTests
 {
     [Fact]
+    public async Task OfflineLocalBrowseOmitsSessionIdentityOnAgentBoundary()
+    {
+        const int processId = 100;
+        var engine = new OfflineBrowseEngineClient(processId);
+        var client = CreateClient(engine, processId);
+        try
+        {
+            var path = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var entries = await client.BrowseAsync(Guid.Empty, PaneKind.Local, path, TestContext.Current.CancellationToken);
+
+            Assert.Empty(entries);
+            var request = Assert.IsType<BrowseRequest>(engine.LastBrowseRequest);
+            Assert.Null(request.SessionId);
+            Assert.Equal(path, request.Path);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task DisposeCancelsConnectionAdmissionBeforeDisposingCandidate()
     {
         const int processId = 101;
@@ -1258,6 +1280,47 @@ public sealed class LiveAgentWorkspaceClientTests
             () => throw new InvalidOperationException("The test Agent should already be discoverable."),
             _ => { },
             _ => engine);
+
+    private sealed class OfflineBrowseEngineClient(int processId) : IEngineClient
+    {
+        public BrowseRequest? LastBrowseRequest { get; private set; }
+
+        public Task<JsonElement> RequestAsync(
+            string method,
+            object? payload = null,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.Equals(method, "ping", StringComparison.Ordinal))
+            {
+                return Task.FromResult(JsonSerializer.SerializeToElement(new
+                {
+                    protocolVersion = AgentProtocol.CurrentVersion,
+                    processId,
+                    clientProcessId = Environment.ProcessId,
+                }, FramedJsonStream.SerializerOptions));
+            }
+
+            if (string.Equals(method, WorkspaceMethods.BrowseLocal, StringComparison.Ordinal))
+            {
+                LastBrowseRequest = Assert.IsType<BrowseRequest>(payload);
+                return Task.FromResult(JsonSerializer.SerializeToElement(
+                    new BrowseResult(new(PaneKind.Local, LastBrowseRequest.Path), [], TotalCount: 0),
+                    FramedJsonStream.SerializerOptions));
+            }
+
+            return Task.FromException<JsonElement>(new NotSupportedException($"Unexpected test method: {method}"));
+        }
+
+        public async IAsyncEnumerable<EngineEvent> Events(
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            yield break;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
 
     private sealed class LostReplyEngineClient(int processId) : IEngineClient
     {

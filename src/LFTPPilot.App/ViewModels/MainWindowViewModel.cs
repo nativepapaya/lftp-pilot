@@ -19,6 +19,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly SemaphoreSlim _resyncGate = new(1, 1);
     private readonly Dictionary<Guid, UnconfirmedTransferState> _unconfirmedTransfers = [];
     private RemoteEditItemViewModel? _selectedActiveRemoteEdit;
+    private string _offlineWorkspaceStatus = "Browse local files now, then connect when you are ready.";
     private int _stateInvalidated;
 
     public MainWindowViewModel(IAgentWorkspaceClient agent)
@@ -31,6 +32,15 @@ public sealed class MainWindowViewModel : ObservableObject
         Console = new ConsoleViewModel(agent);
         RemoteTransfer = new RemoteTransferViewModel(agent);
         Settings = new SettingsViewModel(agent);
+        var localPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(localPath)) localPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        OfflineLocalPane = new FilePaneViewModel(
+            agent,
+            Guid.Empty,
+            PaneKind.Local,
+            localPath,
+            [],
+            supportsTransfers: false);
         InitializeCommand = new AsyncRelayCommand(_ => InitializeAsync(), null, ReportError);
         Connections.SessionConnected += (_, seed) => AddSession(seed);
         Connections.StateRefreshRequested += (_, _) => RequestStateRefresh();
@@ -56,6 +66,7 @@ public sealed class MainWindowViewModel : ObservableObject
     public ConsoleViewModel Console { get; }
     public RemoteTransferViewModel RemoteTransfer { get; }
     public SettingsViewModel Settings { get; }
+    public FilePaneViewModel OfflineLocalPane { get; }
     public AsyncRelayCommand InitializeCommand { get; }
     public event Action<RemoteEditLocalChange>? RemoteEditLocalChanged;
 
@@ -75,6 +86,9 @@ public sealed class MainWindowViewModel : ObservableObject
     public bool IsDemoMode { get => _isDemoMode; private set => SetProperty(ref _isDemoMode, value); }
     public string AgentStatus { get => _agentStatus; private set => SetProperty(ref _agentStatus, value); }
     public bool HasAgentError { get => _hasAgentError; private set => SetProperty(ref _hasAgentError, value); }
+    public bool HasSessions => Sessions.Count > 0;
+    public bool HasNoSessions => Sessions.Count == 0;
+    public string OfflineWorkspaceStatus { get => _offlineWorkspaceStatus; private set => SetProperty(ref _offlineWorkspaceStatus, value); }
     public int ActiveRemoteEditCount => ActiveRemoteEdits.Count;
     public int UnconfirmedTransferCount => _unconfirmedTransfers.Count;
 
@@ -99,6 +113,7 @@ public sealed class MainWindowViewModel : ObservableObject
             await Mirror.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);
             await RemoteTransfer.ReconcileWorkspaceAsync(bootstrap.Jobs).ConfigureAwait(true);
             ApplySessionBootstrap(bootstrap.Sessions);
+            if (HasNoSessions) await LoadOfflineLocalPaneAsync().ConfigureAwait(true);
 
             if (requestedProfileId is Guid id)
             {
@@ -231,8 +246,29 @@ public sealed class MainWindowViewModel : ObservableObject
 
         var session = CreateSession(seed, profile);
         Sessions.Add(session);
+        NotifySessionCollectionChanged();
         SelectedSession = session;
         Console.LoadSessions(Sessions);
+    }
+
+    private async Task LoadOfflineLocalPaneAsync()
+    {
+        try
+        {
+            await OfflineLocalPane.NavigateAsync(OfflineLocalPane.Path).ConfigureAwait(true);
+            OfflineWorkspaceStatus = "Local files are ready. Add a connection to open the remote pane.";
+        }
+        catch (Exception exception)
+        {
+            OfflineWorkspaceStatus = $"The local folder could not be loaded: {exception.Message}";
+            Activity.Log.Insert(0, new(DateTimeOffset.Now, "Warning", "Local files", OfflineWorkspaceStatus));
+        }
+    }
+
+    private void NotifySessionCollectionChanged()
+    {
+        OnPropertyChanged(nameof(HasSessions));
+        OnPropertyChanged(nameof(HasNoSessions));
     }
 
     private void ApplySessionBootstrap(IReadOnlyList<Models.WorkspaceSessionSeed> seeds)
@@ -293,6 +329,7 @@ public sealed class MainWindowViewModel : ObservableObject
         SelectedSession = selectedSessionId is { } selectedId
             ? Sessions.FirstOrDefault(candidate => candidate.SessionId == selectedId) ?? Sessions.FirstOrDefault()
             : Sessions.FirstOrDefault();
+        NotifySessionCollectionChanged();
         Console.LoadSessions(Sessions);
     }
 
@@ -512,6 +549,8 @@ public sealed class MainWindowViewModel : ObservableObject
         var index = Sessions.IndexOf(session);
         if (index < 0) return;
         Sessions.RemoveAt(index);
+        NotifySessionCollectionChanged();
+        if (HasNoSessions) _ = LoadOfflineLocalPaneAsync();
         _ = DisposeSessionAsync(session);
         if (ReferenceEquals(SelectedSession, session))
         {

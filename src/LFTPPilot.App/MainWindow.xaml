@@ -85,6 +85,7 @@
                 x:Name="SessionTabs"
                 TabItemsSource="{Binding Sessions}"
                 SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
+                Visibility="{Binding HasSessions, Converter={StaticResource BoolToVisibilityConverter}}"
                 IsAddTabButtonVisible="True"
                 AddTabButtonClick="SessionTabs_AddTabButtonClick"
                 TabCloseRequested="SessionTabs_TabCloseRequested"
@@ -100,6 +101,51 @@
                     </DataTemplate>
                 </TabView.TabItemTemplate>
             </TabView>
+
+            <Grid
+                Visibility="{Binding HasNoSessions, Converter={StaticResource BoolToVisibilityConverter}}"
+                ColumnSpacing="12"
+                AutomationProperties.Name="Disconnected dual pane workspace">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MinWidth="360" />
+                    <ColumnDefinition Width="58" />
+                    <ColumnDefinition Width="*" MinWidth="360" />
+                </Grid.ColumnDefinitions>
+
+                <controls:FilePaneView DataContext="{Binding OfflineLocalPane}" />
+
+                <StackPanel Grid.Column="1" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Button Width="42" Height="42" IsEnabled="False" ToolTipService.ToolTip="Connect to upload files" AutomationProperties.Name="Upload unavailable until connected">
+                        <FontIcon Glyph="&#xE72A;" />
+                    </Button>
+                    <Button Width="42" Height="42" IsEnabled="False" ToolTipService.ToolTip="Connect to download files" AutomationProperties.Name="Download unavailable until connected">
+                        <FontIcon Glyph="&#xE72B;" />
+                    </Button>
+                    <FontIcon Glyph="&#xE8AB;" FontSize="18" Opacity="0.45" />
+                </StackPanel>
+
+                <Border
+                    Grid.Column="2"
+                    Style="{StaticResource PilotCardStyle}"
+                    AutomationProperties.Name="Remote files not connected">
+                    <Grid Padding="24">
+                        <StackPanel Spacing="14" MaxWidth="420" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Border Width="56" Height="56" CornerRadius="16" Background="{ThemeResource PilotSubtleBrush}">
+                                <FontIcon Glyph="&#xE968;" FontSize="25" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <TextBlock Text="Remote files" Style="{ThemeResource TitleTextBlockStyle}" TextAlignment="Center" />
+                            <TextBlock Text="No server is connected yet. Create or choose a saved connection to open a persistent session tab." TextWrapping="Wrap" TextAlignment="Center" Opacity="0.78" />
+                            <Button
+                                Content="Add or choose connection"
+                                Click="Connect_Click"
+                                Style="{ThemeResource AccentButtonStyle}"
+                                HorizontalAlignment="Center"
+                                AutomationProperties.Name="Add or choose a remote connection" />
+                            <TextBlock Text="{Binding OfflineWorkspaceStatus}" TextWrapping="Wrap" TextAlignment="Center" Style="{ThemeResource CaptionTextBlockStyle}" Opacity="0.68" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Grid>
         </Grid>
 
         <controls:ActivityCenterView Grid.Row="3" Margin="12,0,12,12" DataContext="{Binding Activity}" />

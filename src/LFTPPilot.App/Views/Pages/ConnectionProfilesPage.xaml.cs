@@ -32,6 +32,16 @@ public sealed partial class ConnectionProfilesPage : UserControl
         if (file is not null) viewModel.SshKeyPath = file.Path;
     }
 
+    private async void InitialLocalPathBrowse_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (_ownerWindow == 0 || DataContext is not ConnectionProfilesViewModel viewModel) return;
+        var picker = new global::Windows.Storage.Pickers.FolderPicker();
+        picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, _ownerWindow);
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is not null) viewModel.InitialLocalPath = folder.Path;
+    }
+
     private void Credential_PasswordChanged(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         if (!_synchronizingCredential &&

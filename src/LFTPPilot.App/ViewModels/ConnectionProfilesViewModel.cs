@@ -20,6 +20,8 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
     private string _credential = string.Empty;
     private bool _rememberCredential;
     private string _sshKeyPath = string.Empty;
+    private string _initialLocalPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    private string _initialRemotePath = "/";
     private SftpHostKeyReview? _pendingHostKeyReview;
     private TaskCompletionSource<bool>? _hostKeyReviewDecision;
     private CancellationTokenSource? _connectionOperationCancellation;
@@ -31,6 +33,7 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
         CreateAndConnectCommand = new AsyncRelayCommand(_ => CreateAndConnectAsync(), _ => !string.IsNullOrWhiteSpace(Host) && IsConnectionEditingEnabled, ReportError);
         SaveCommand = new AsyncRelayCommand(_ => SaveAsync(), _ => SelectedProfile is not null && IsConnectionEditingEnabled, ReportError);
         DeleteCommand = new AsyncRelayCommand(_ => DeleteAsync(), _ => SelectedProfile is not null && IsConnectionEditingEnabled, ReportError);
+        NewProfileCommand = new RelayCommand(_ => BeginNewProfile(), _ => IsConnectionEditingEnabled);
         ApproveHostKeyReviewCommand = new RelayCommand(_ => CompleteHostKeyReview(approved: true), _ => HasPendingHostKeyReview);
         CancelHostKeyReviewCommand = new RelayCommand(_ => CompleteHostKeyReview(approved: false), _ => HasPendingHostKeyReview);
     }
@@ -44,6 +47,7 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
     public AsyncRelayCommand CreateAndConnectCommand { get; }
     public AsyncRelayCommand SaveCommand { get; }
     public AsyncRelayCommand DeleteCommand { get; }
+    public RelayCommand NewProfileCommand { get; }
     public RelayCommand ApproveHostKeyReviewCommand { get; }
     public RelayCommand CancelHostKeyReviewCommand { get; }
 
@@ -67,6 +71,8 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
             ConnectCommand.NotifyCanExecuteChanged();
             SaveCommand.NotifyCanExecuteChanged();
             DeleteCommand.NotifyCanExecuteChanged();
+            OnPropertyChanged(nameof(HasSelectedProfile));
+            OnPropertyChanged(nameof(IsCreatingProfile));
             if (value is not null)
             {
                 Name = value.Name;
@@ -76,6 +82,8 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
                 Protocol = value.Protocol;
                 Authentication = value.Authentication;
                 SshKeyPath = value.SshKeyPath ?? string.Empty;
+                InitialLocalPath = value.InitialLocalPath ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                InitialRemotePath = value.InitialRemotePath ?? "/";
             }
         }
     }
@@ -104,6 +112,12 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
     public string Credential { get => _credential; set => SetProperty(ref _credential, value); }
     public bool RememberCredential { get => _rememberCredential; set => SetProperty(ref _rememberCredential, value); }
     public string SshKeyPath { get => _sshKeyPath; set => SetProperty(ref _sshKeyPath, value); }
+    public string InitialLocalPath { get => _initialLocalPath; set => SetProperty(ref _initialLocalPath, value); }
+    public string InitialRemotePath { get => _initialRemotePath; set => SetProperty(ref _initialRemotePath, value); }
+    public bool HasProfiles => Profiles.Count > 0;
+    public bool HasNoProfiles => Profiles.Count == 0;
+    public bool HasSelectedProfile => SelectedProfile is not null;
+    public bool IsCreatingProfile => SelectedProfile is null;
     public bool IsCredentialAuthentication => Authentication is AuthenticationKind.Password or AuthenticationKind.AskOnConnect or AuthenticationKind.SshKey;
     public bool IsSshKeyAuthentication => Authentication == AuthenticationKind.SshKey;
     public bool CanRememberCredential => Authentication is AuthenticationKind.Password or AuthenticationKind.SshKey;
@@ -135,7 +149,9 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
             Profiles.Add(profile);
         }
 
-        SelectedProfile = Profiles.FirstOrDefault();
+        NotifyProfileCollectionChanged();
+        if (Profiles.FirstOrDefault() is { } first) SelectedProfile = first;
+        else BeginNewProfile();
     }
 
     public void Upsert(ConnectionProfile profile)
@@ -143,6 +159,24 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
         var existing = Profiles.FirstOrDefault(candidate => candidate.Id == profile.Id);
         if (existing is null) Profiles.Add(profile);
         else Profiles[Profiles.IndexOf(existing)] = profile;
+        NotifyProfileCollectionChanged();
+    }
+
+    public void BeginNewProfile()
+    {
+        SelectedProfile = null;
+        Name = "New site";
+        Host = string.Empty;
+        UserName = string.Empty;
+        Protocol = ConnectionProtocol.Sftp;
+        Port = 22;
+        Authentication = AuthenticationKind.AskOnConnect;
+        SshKeyPath = string.Empty;
+        InitialLocalPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        InitialRemotePath = "/";
+        Credential = string.Empty;
+        RememberCredential = false;
+        Status = "Enter connection details, then create and connect.";
     }
 
     private async Task ConnectAsync()
@@ -216,7 +250,9 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
 
             var profile = new ConnectionProfile(
                 Guid.NewGuid(), Name.Trim(), Protocol, Host.Trim(), Port, UserName.Trim(), Authentication,
-                SshKeyPath: IsSshKeyAuthentication ? SshKeyPath.Trim() : null);
+                SshKeyPath: IsSshKeyAuthentication ? SshKeyPath.Trim() : null,
+                InitialRemotePath: NullIfWhiteSpace(InitialRemotePath),
+                InitialLocalPath: NullIfWhiteSpace(InitialLocalPath));
             var ephemeralCredential = IsCredentialAuthentication && !string.IsNullOrEmpty(Credential) ? Credential : null;
             var rememberCredential = RememberCredential &&
                 profile.Authentication is (AuthenticationKind.Password or AuthenticationKind.SshKey);
@@ -224,6 +260,7 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
             // until the presented host key has been explicitly trusted.
             var saved = await _agent.SaveProfileAsync(profile, cancellationToken: operation.Token).ConfigureAwait(true);
             Profiles.Add(saved);
+            NotifyProfileCollectionChanged();
             SelectedProfile = saved;
             // Selecting a genuinely new profile intentionally clears credential options.
             // This profile was created from the current form, so restore only the user's
@@ -267,6 +304,8 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
                 Protocol = Protocol,
                 Authentication = Authentication,
                 SshKeyPath = IsSshKeyAuthentication ? SshKeyPath.Trim() : null,
+                InitialRemotePath = NullIfWhiteSpace(InitialRemotePath),
+                InitialLocalPath = NullIfWhiteSpace(InitialLocalPath),
             };
             var enteredCredential = RememberCredential && CanRememberCredential && !string.IsNullOrEmpty(Credential)
                 ? Credential
@@ -398,6 +437,7 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
     private void NotifyConnectionOperationChanged()
     {
         OnPropertyChanged(nameof(IsConnectionEditingEnabled));
+        NewProfileCommand.NotifyCanExecuteChanged();
         ConnectCommand.NotifyCanExecuteChanged();
         CreateAndConnectCommand.NotifyCanExecuteChanged();
         SaveCommand.NotifyCanExecuteChanged();
@@ -442,7 +482,9 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
             if (!await _agent.DeleteProfileAsync(removed.Id, operation.Token).ConfigureAwait(true))
                 throw new InvalidOperationException("The Agent declined the profile deletion request.");
             Profiles.Remove(removed);
-            SelectedProfile = Profiles.FirstOrDefault();
+            NotifyProfileCollectionChanged();
+            if (Profiles.FirstOrDefault() is { } next) SelectedProfile = next;
+            else BeginNewProfile();
             Credential = string.Empty;
             Status = "Connection profile deleted and its sessions disconnected.";
             RequestStateRefresh();
@@ -474,4 +516,12 @@ public sealed class ConnectionProfilesViewModel : ObservableObject
     }
 
     private void RequestStateRefresh() => StateRefreshRequested?.Invoke(this, EventArgs.Empty);
+
+    private void NotifyProfileCollectionChanged()
+    {
+        OnPropertyChanged(nameof(HasProfiles));
+        OnPropertyChanged(nameof(HasNoProfiles));
+    }
+
+    private static string? NullIfWhiteSpace(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
