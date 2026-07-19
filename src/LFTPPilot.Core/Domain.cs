@@ -331,6 +331,11 @@ public sealed record JobSnapshot(
     public bool CanRetry => RetryAvailable && State == JobState.Failed;
 }
 
+public sealed record HistoryLogEntry(
+    DateTimeOffset Timestamp,
+    string Level,
+    string Message);
+
 public sealed record HistoryRecord(
     Guid Id,
     Guid JobId,
@@ -340,7 +345,11 @@ public sealed record HistoryRecord(
     DateTimeOffset StartedAt,
     DateTimeOffset FinishedAt,
     long? BytesTransferred = null,
-    string? Detail = null);
+    string? Detail = null,
+    ImmutableArray<HistoryLogEntry> Log = default)
+{
+    public ImmutableArray<HistoryLogEntry> Log { get; init; } = Log.IsDefault ? [] : Log;
+}
 
 public sealed record TransferProgressSnapshot(
     Guid JobId,

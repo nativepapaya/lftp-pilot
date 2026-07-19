@@ -31,6 +31,28 @@ public sealed record ActivityLogEntry(
     public string TimeDisplay => Timestamp.ToLocalTime().ToString("T", System.Globalization.CultureInfo.CurrentCulture);
 }
 
+public sealed record HistoryRecordItem(HistoryRecord Record)
+{
+    public Guid Id => Record.Id;
+    public string DisplayName => Record.DisplayName;
+    public JobState Outcome => Record.Outcome;
+    public string OutcomeDisplay => Record.Outcome.ToString();
+    public string FinishedAtDisplay => Record.FinishedAt.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
+    public string FinishedAtListDisplay => Record.FinishedAt.ToLocalTime().ToString("MMM d, h:mm tt", System.Globalization.CultureInfo.CurrentCulture);
+    public string StartedAtDisplay => Record.StartedAt.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
+    public string Detail => Record.Detail ?? "No additional detail was recorded.";
+    public IReadOnlyList<HistoryLogItem> Log => Record.Log.Select(static entry => new HistoryLogItem(entry)).ToArray();
+    public bool HasLog => Record.Log.Length > 0;
+    public bool HasNoLog => !HasLog;
+}
+
+public sealed record HistoryLogItem(HistoryLogEntry Entry)
+{
+    public string TimeDisplay => Entry.Timestamp.ToLocalTime().ToString("T", System.Globalization.CultureInfo.CurrentCulture);
+    public string Level => Entry.Level;
+    public string Message => Entry.Message;
+}
+
 public sealed record MirrorUiPreview(
     MirrorDefinition Definition,
     MirrorPreview Preview);

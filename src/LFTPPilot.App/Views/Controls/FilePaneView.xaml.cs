@@ -487,15 +487,24 @@ public sealed partial class FilePaneView : UserControl
 
     private void TransferOptionsMenuItem_Click(object sender, RoutedEventArgs e) => TransferOptionsRequested?.Invoke(this, EventArgs.Empty);
 
-    private void CopyPathMenuItem_Click(object sender, RoutedEventArgs e)
+    private async void CopyPathMenuItem_Click(object sender, RoutedEventArgs e)
     {
         var selected = FilesList.SelectedItems.OfType<FileEntryViewModel>().Select(static item => item.FullPath).ToList();
         if (selected.Count == 0) return;
-        var package = new DataPackage();
-        // Explicit Copy path remains text for the clipboard. Drag transfers never
-        // publish paths and accept only the opaque in-process token above.
-        package.SetText(string.Join(Environment.NewLine, selected));
-        Clipboard.SetContent(package);
+        try
+        {
+            var package = new DataPackage();
+            // Explicit Copy path remains text for the clipboard. Drag transfers never
+            // publish paths and accept only the opaque in-process token above.
+            package.SetText(string.Join(Environment.NewLine, selected));
+            Clipboard.SetContent(package);
+            Clipboard.Flush();
+            ViewModel?.ReportOperationStatus(selected.Count == 1 ? "Path copied" : $"{selected.Count} paths copied");
+        }
+        catch (Exception exception)
+        {
+            await ShowOperationErrorAsync("The path could not be copied", exception).ConfigureAwait(true);
+        }
     }
 
     private async void CreateDirectory_Click(object sender, RoutedEventArgs e)

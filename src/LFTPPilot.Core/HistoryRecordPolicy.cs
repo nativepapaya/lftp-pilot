@@ -6,6 +6,9 @@ public static class HistoryRecordPolicy
     public const int RetentionLimit = 2_000;
     public const int MaximumDisplayNameLength = JobSnapshotPolicy.MaximumDisplayNameLength;
     public const int MaximumDetailLength = JobSnapshotPolicy.MaximumErrorMessageLength;
+    public const int MaximumLogEntries = 12;
+    public const int MaximumLogLevelLength = 16;
+    public const int MaximumLogMessageLength = 256;
 
     public static void Validate(HistoryRecord record)
     {
@@ -25,6 +28,22 @@ public static class HistoryRecordPolicy
         if (record.BytesTransferred is < 0)
             throw new ArgumentException("A history record cannot contain a negative byte count.", nameof(record));
         ValidateText(record.Detail, MaximumDetailLength, "detail", required: false);
+        if (record.Log.IsDefault || record.Log.Length > MaximumLogEntries)
+            throw new ArgumentException("A history record contains an invalid log collection.", nameof(record));
+        DateTimeOffset? previousTimestamp = null;
+        foreach (var entry in record.Log)
+        {
+            ArgumentNullException.ThrowIfNull(entry);
+            ValidateTimestamp(entry.Timestamp, "log-entry");
+            if (entry.Timestamp < record.StartedAt || entry.Timestamp > record.FinishedAt ||
+                previousTimestamp is { } previous && entry.Timestamp < previous)
+            {
+                throw new ArgumentException("A history record contains an out-of-order log entry.", nameof(record));
+            }
+            ValidateText(entry.Level, MaximumLogLevelLength, "log level", required: true);
+            ValidateText(entry.Message, MaximumLogMessageLength, "log message", required: true);
+            previousTimestamp = entry.Timestamp;
+        }
     }
 
     private static void ValidateText(string? value, int maximumLength, string field, bool required)

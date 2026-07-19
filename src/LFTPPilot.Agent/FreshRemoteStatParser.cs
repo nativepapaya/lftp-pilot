@@ -13,6 +13,8 @@ internal static class FreshRemoteStatParser
         if (result.TimedOut) throw new TimeoutException($"{operation} timed out.");
         if (result.Failure is not null) throw new IOException($"{operation} failed: {result.Failure}");
         if (result.Truncated) throw new InvalidDataException($"{operation} produced too much output.");
+        var separator = remotePath.LastIndexOf('/');
+        var parent = separator <= 0 ? "/" : remotePath[..separator];
         var error = LftpOutputParser.FirstError(result.Lines);
         if (error is not null)
         {
@@ -21,7 +23,8 @@ internal static class FreshRemoteStatParser
             {
                 if (result.Lines.Length == 1 &&
                     string.Equals(result.Lines[0].Stream, "stderr", StringComparison.OrdinalIgnoreCase) &&
-                    MissingDiagnosticMatchesPath(result.Lines[0].Line, remotePath))
+                    (MissingDiagnosticMatchesPath(result.Lines[0].Line, remotePath) ||
+                     MissingDiagnosticMatchesPath(result.Lines[0].Line, parent)))
                 {
                     return null;
                 }
@@ -31,20 +34,42 @@ internal static class FreshRemoteStatParser
             throw new IOException($"{operation} failed closed: {error}");
         }
 
-        if (IsBoundMissingPathDiagnostic(result, remotePath) || result.Lines.Length == 0) return null;
-        if (result.Lines.Length != 1 ||
-            !string.Equals(result.Lines[0].Stream, "stdout", StringComparison.OrdinalIgnoreCase) ||
-            string.IsNullOrWhiteSpace(result.Lines[0].Line))
-            throw new InvalidDataException($"The server returned ambiguous output for {operation.ToLowerInvariant()}.");
+        if (IsBoundMissingPathDiagnostic(result, remotePath) ||
+            IsBoundMissingPathDiagnostic(result, parent)) return null;
 
-        var separator = remotePath.LastIndexOf('/');
-        var parent = separator <= 0 ? "/" : remotePath[..separator];
-        var entries = LftpOutputParser.ParseLongListing([result.Lines[0].Line], parent);
-        if (entries.Length != 1)
-            throw new InvalidDataException($"The server did not return one parseable entry for {operation.ToLowerInvariant()}.");
-        if (!string.Equals(entries[0].FullPath, remotePath, StringComparison.Ordinal))
-            throw new InvalidDataException($"The server returned a different path for {operation.ToLowerInvariant()}.");
-        return entries[0];
+        var marker = LftpCommandBuilder.LiteralStatMarker + remotePath;
+        var listingLines = new List<string>();
+        foreach (var line in result.Lines)
+        {
+            if (!string.Equals(line.Stream, "stdout", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(line.Line))
+                throw new InvalidDataException($"The server returned ambiguous output for {operation.ToLowerInvariant()}.");
+            if (string.Equals(line.Line, marker, StringComparison.Ordinal) ||
+                line.Line.StartsWith("total ", StringComparison.OrdinalIgnoreCase))
+                continue;
+            listingLines.Add(line.Line);
+        }
+        if (remotePath == "/") return new("/", "/", EntryKind.Directory, null, null);
+        if (listingLines.Count == 0) return null;
+
+        var parsed = new List<FileEntry>();
+        foreach (var line in listingLines)
+        {
+            var entries = LftpOutputParser.ParseLongListing([line], parent);
+            if (entries.Length == 0)
+            {
+                if (IsDotDirectoryListing(line)) continue;
+                throw new InvalidDataException($"The server returned an unparseable entry for {operation.ToLowerInvariant()}.");
+            }
+            parsed.AddRange(entries);
+        }
+        var matches = parsed.Where(entry => string.Equals(entry.FullPath, remotePath, StringComparison.Ordinal)).ToArray();
+        return matches.Length switch
+        {
+            0 => null,
+            1 => matches[0],
+            _ => throw new InvalidDataException($"The server repeated the requested path for {operation.ToLowerInvariant()}.")
+        };
     }
 
     public static string ValidateRemotePath(string remotePath, string parameterName)
@@ -98,4 +123,8 @@ internal static class FreshRemoteStatParser
             diagnostic.Contains("(/", StringComparison.Ordinal) &&
             MissingDiagnosticMatchesPath(diagnostic, remotePath);
     }
+
+    private static bool IsDotDirectoryListing(string line) =>
+        line.Length > 10 && line[0] == 'd' &&
+        (line.EndsWith(" .", StringComparison.Ordinal) || line.EndsWith(" ..", StringComparison.Ordinal));
 }

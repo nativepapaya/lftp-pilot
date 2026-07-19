@@ -1,5 +1,6 @@
 using LFTPPilot.Agent;
 using LFTPPilot.Core;
+using LFTPPilot.Engine;
 using LFTPPilot.Windows.Storage;
 
 namespace LFTPPilot.Tests;
@@ -16,6 +17,10 @@ public sealed class HistoryTests
         Assert.Throws<ArgumentException>(() => HistoryRecordPolicy.Validate(record with { DisplayName = "bad\rname" }));
         Assert.Throws<ArgumentException>(() => HistoryRecordPolicy.Validate(record with { BytesTransferred = -1 }));
         Assert.Throws<ArgumentException>(() => HistoryRecordPolicy.Validate(record with { FinishedAt = record.StartedAt.AddTicks(-1) }));
+        Assert.Throws<ArgumentException>(() => HistoryRecordPolicy.Validate(record with
+        {
+            Log = [new(record.StartedAt, "Info", "bad\nmessage")],
+        }));
     }
 
     [Fact]
@@ -76,7 +81,40 @@ public sealed class HistoryTests
         Assert.Equal(running.UpdatedAt, record.StartedAt);
         Assert.Equal(completed.UpdatedAt, record.FinishedAt);
         Assert.Equal("Complete", record.Detail);
+        Assert.Equal(["Queued: Queued", "Running: Running", "Completed: Complete"],
+            record.Log.Select(static entry => entry.Message));
         Assert.Single(published);
+    }
+
+    [Fact]
+    public async Task JsonStoreRestoresLegacyRecordsWithoutAStoredTimeline()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "history.json");
+        var now = DateTimeOffset.UtcNow;
+        var record = CreateRecord(Guid.NewGuid(), JobState.Failed, now);
+        var legacyJson = System.Text.Json.JsonSerializer.Serialize(new[]
+        {
+            new
+            {
+                record.Id,
+                record.JobId,
+                record.Kind,
+                record.DisplayName,
+                record.Outcome,
+                record.StartedAt,
+                record.FinishedAt,
+                record.BytesTransferred,
+                record.Detail,
+            },
+        }, FramedJsonStream.SerializerOptions);
+        await File.WriteAllTextAsync(path, legacyJson, cancellationToken);
+
+        var restored = Assert.Single(await new JsonHistoryStore(path).GetRecentAsync(10, cancellationToken));
+
+        Assert.Empty(restored.Log);
+        Assert.Equal(record.Detail, restored.Detail);
     }
 
     [Fact]

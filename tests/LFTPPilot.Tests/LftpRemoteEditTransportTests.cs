@@ -336,7 +336,7 @@ public sealed class LftpRemoteEditTransportTests
         var stat = LftpCommandBuilder.BuildStat("/note.txt", fresh: true);
         var upload = LftpCommandBuilder.BuildRemoteEditUpload(@"C:\cache\content.txt", "/note.txt");
 
-        Assert.StartsWith("recls -ldB ", stat, StringComparison.Ordinal);
+        Assert.StartsWith($"echo \"{LftpCommandBuilder.LiteralStatMarker}/note.txt\"; cd \"/\"; recls -laB ", stat, StringComparison.Ordinal);
         Assert.StartsWith("put ", upload, StringComparison.Ordinal);
         Assert.DoesNotContain("put -e ", upload, StringComparison.Ordinal);
     }
@@ -509,9 +509,10 @@ public sealed class LftpRemoteEditTransportTests
             if (FailureForCommand?.Invoke(command) is { } failure) return new([], Failure: failure);
 
             LftpCommandResult result;
-            if (command.StartsWith("recls -ldB ", StringComparison.Ordinal) || command.StartsWith("cls -ldB ", StringComparison.Ordinal))
+            if (command.StartsWith($"echo \"{LftpCommandBuilder.LiteralStatMarker}", StringComparison.Ordinal))
             {
-                var path = QuotedArguments(command)[0];
+                var marker = QuotedArguments(command)[0];
+                var path = marker[LftpCommandBuilder.LiteralStatMarker.Length..];
                 result = StatResultForPath?.Invoke(path) ?? (_files.TryGetValue(path, out var file)
                     ? new([new("stdout", Listing(path, file))])
                     : new([new("stderr", "cls: Access failed: No such file")]));

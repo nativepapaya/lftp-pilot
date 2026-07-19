@@ -5,6 +5,8 @@ namespace LFTPPilot.Engine;
 
 public static class LftpCommandBuilder
 {
+    public const string LiteralStatMarker = "__LFTPPILOT_LITERAL_STAT__";
+
     public static string Quote(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
@@ -111,7 +113,14 @@ public static class LftpCommandBuilder
     public static string BuildStat(string remotePath, bool fresh = false)
     {
         EnsureRemoteAbsolute(remotePath, nameof(remotePath));
-        return $"{(fresh ? "recls" : "cls")} -ldB --time-style=long-iso {Quote(DashSafe(remotePath))}";
+        var separator = remotePath.LastIndexOf('/');
+        var parent = separator <= 0 ? "/" : remotePath[..separator];
+        var marker = LiteralStatMarker + remotePath;
+        // cls/recls path operands can be patterns. Enter the already-validated
+        // parent literally, list its complete contents, and let the caller bind
+        // exactly one returned child to remotePath instead of passing the child
+        // name to the listing command.
+        return $"echo {Quote(marker)}; cd {Quote(DashSafe(parent))}; {(fresh ? "recls" : "cls")} -laB --time-style=long-iso {Quote(".")}";
     }
 
     public static string BuildCreateDirectory(string remotePath)

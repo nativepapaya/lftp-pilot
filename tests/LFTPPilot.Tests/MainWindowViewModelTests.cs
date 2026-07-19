@@ -694,6 +694,7 @@ public sealed class MainWindowViewModelTests
 
         var updated = Assert.Single(viewModel.Activity.History);
         Assert.Equal(JobState.Cancelled, updated.Outcome);
+        Assert.Same(updated, viewModel.Activity.SelectedHistory);
         Assert.Empty(viewModel.Activity.Log);
     }
 

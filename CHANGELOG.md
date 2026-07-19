@@ -9,6 +9,11 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Changed
 
+- Reworked Activity history into a compact master-detail surface. Long transfer
+  names now remain in a bounded column, each item is selectable, and newly
+  completed jobs retain a bounded Agent-owned timeline that remains available
+  after restarting the app. Older history records continue to show their
+  stored completion or failure detail.
 - Reworked the native workspace around LFTP Commander's proven hierarchy:
   connections and session state lead the title bar, advanced features live in
   one Tools menu, both file panes use compact command toolbars and optional
@@ -32,6 +37,13 @@ updates and human-facing `v1.0.<sequence>` release tags during trusted testing.
 
 ### Fixed
 
+- Remote transfer validation now resolves a requested child from a fresh
+  literal parent-directory listing instead of passing the full child path to
+  LFTP's pattern-aware listing command. Downloads and uploads with Unicode,
+  spaces, parentheses, or bracket characters no longer fail before LFTP can
+  run the literal `get` or `put` operation.
+- Copy path now flushes the text to the Windows clipboard and reports success
+  in the pane status bar; clipboard failures surface an actionable dialog.
 - First launch now shows a real local file pane and an intentional remote
   connection surface instead of an empty center area when no profiles or
   sessions exist. Local navigation and file mutations use an Agent request

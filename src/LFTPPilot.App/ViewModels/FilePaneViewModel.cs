@@ -25,6 +25,7 @@ public sealed class FilePaneViewModel : ObservableObject
     private bool _showHidden;
     private bool _isFilterVisible;
     private FileListDensity _fileListDensity = FileListDensity.Compact;
+    private string? _operationStatus;
 
     public FilePaneViewModel(
         IAgentWorkspaceClient agent,
@@ -140,6 +141,22 @@ public sealed class FilePaneViewModel : ObservableObject
     public string SelectionSummary => HasSelection ? $"{SelectedEntries.Count} selected" : $"{Entries.Count} items";
     public string SortIndicator => _sortDescending ? "Descending" : "Ascending";
     public string? LastError { get; private set; }
+    public string? OperationStatus
+    {
+        get => _operationStatus;
+        private set
+        {
+            if (!SetProperty(ref _operationStatus, value)) return;
+            OnPropertyChanged(nameof(HasOperationStatus));
+        }
+    }
+    public bool HasOperationStatus => !string.IsNullOrWhiteSpace(OperationStatus);
+
+    public void ReportOperationStatus(string message)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(message);
+        OperationStatus = message;
+    }
 
     public string FilterText
     {
